@@ -19,7 +19,13 @@ permissions:
 
 jobs:
   paquet:
-    runs-on: ubuntu-latest
+    # Système figé : le compilateur C d'une version plus récente produisait du code AVX
+    # (« Illegal instruction » sur les processeurs virtuels kvm64 de Proxmox).
+    runs-on: ubuntu-24.04
+    env:
+      # Jeu d'instructions x86-64 de base, pour le code Rust comme pour le C de ring.
+      RUSTFLAGS: -C target-cpu=x86-64
+      CFLAGS_x86_64_unknown_linux_musl: -march=x86-64 -mtune=generic
     steps:
       - uses: actions/checkout@v4
 
@@ -29,7 +35,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - run: sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools qemu-user
 
       - uses: taiki-e/install-action@v2
         with:
@@ -38,6 +44,19 @@ jobs:
       - name: Paquet Debian
         run: |
           cargo deb --target x86_64-unknown-linux-musl
+
+      # Le paquet doit tourner sur un processeur ancien (qemu64 : ni AVX ni SSE4) : on y
+      # crée les clés et le certificat comme à l'installation (la base, absente, arrête la suite).
+      - name: Essai sur un processeur sans AVX
+        run: |
+          d=$(mktemp -d)
+          HEIMDIA_DATA_DIR=$d HEIMDIA_DATABASE_URL=postgres://essai@127.0.0.1:1/essai \
+            timeout 120 qemu-x86_64 -cpu qemu64 target/x86_64-unknown-linux-musl/release/heimdia init --no-admin || true
+          ls -l $d
+          test -s $d/signature.key && test -s $d/api.crt
+
+      - name: Fichiers publiés
+        run: |
           mkdir publie
           cp target/x86_64-unknown-linux-musl/debian/heimdia_*.deb publie/
           # Nom stable pour le lien « dernière version » utilisé par installer.sh.
