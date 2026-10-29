@@ -41,6 +41,9 @@ enum Command {
         /// Identifiant de l'administrateur.
         #[arg(long, default_value = "admin")]
         admin: String,
+        /// Prépare la base et les clés sans créer d'administrateur.
+        #[arg(long)]
+        no_admin: bool,
     },
     /// Lance le bastion.
     Serve,
@@ -283,8 +286,8 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let config = Config::from_env()?;
 
-    if let Command::Init { admin } = &cli.command {
-        return init(config, admin).await;
+    if let Command::Init { admin, no_admin } = &cli.command {
+        return init(config, admin, *no_admin).await;
     }
     let db = connect_db(&config).await?;
     let keys = Keys::load(&config.data_dir)?;
@@ -349,7 +352,7 @@ async fn main() -> Result<()> {
     }
 }
 
-async fn init(config: Config, admin: &str) -> Result<()> {
+async fn init(config: Config, admin: &str, no_admin: bool) -> Result<()> {
     println!("Heimdia {}, première installation\n", env!("CARGO_PKG_VERSION"));
     for created in Keys::create_missing(&config.data_dir)? {
         println!("✓ Créé : {created}");
@@ -370,7 +373,10 @@ async fn init(config: Config, admin: &str) -> Result<()> {
     println!("  À SAUVEGARDER hors du serveur : {}", state.config.data_dir.join("coffre.key").display());
 
     let has_admin = model::users(&state.db).await?.iter().any(|u| u.role == "admin");
-    if has_admin {
+    if no_admin {
+        println!("
+Aucun administrateur créé (--no-admin) : lancez « heimdia init » pour le créer.");
+    } else if has_admin {
         println!("\nUn administrateur existe déjà : rien d'autre à faire.");
     } else {
         println!("\nCompte administrateur : {admin}");
