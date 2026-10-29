@@ -137,7 +137,13 @@ impl Conn {
 
     async fn fail(&self, method: &str, why: &str) {
         let (login, _) = split_login(&self.requested);
-        audit::note(&self.state.db, login, "auth.echec", json!({ "methode": method, "raison": why, "adresse": self.addr })).await;
+        audit::note(
+            &self.state.db,
+            login,
+            "auth.echec",
+            json!({ "methode": method, "raison": why, "adresse": self.addr }),
+        )
+        .await;
     }
 
     /// Après un facteur réussi : accès complet, ou demande du code TOTP.
@@ -153,7 +159,13 @@ impl Conn {
                     Factor::Totp => "code",
                 })
                 .collect();
-            audit::note(&self.state.db, &user.login, "auth.reussie", json!({ "facteurs": methods, "adresse": self.addr })).await;
+            audit::note(
+                &self.state.db,
+                &user.login,
+                "auth.reussie",
+                json!({ "facteurs": methods, "adresse": self.addr }),
+            )
+            .await;
             return Ok(Auth::Accept);
         }
         if policy.could_use(&self.factors, Factor::Totp) {
@@ -172,7 +184,9 @@ impl Conn {
     async fn check_totp(&mut self, user: &User, code: &str) -> Result<bool> {
         let Some(sealed) = &user.totp_secret else { return Ok(false) };
         let secret = self.state.keys.open(&format!("totp:{}", user.id), sealed)?;
-        let Some(step) = totp_check(&secret, code, user.totp_last_step) else { return Ok(false) };
+        let Some(step) = totp_check(&secret, code, user.totp_last_step) else {
+            return Ok(false);
+        };
         model::consume_totp_step(&self.state.db, user.id, step).await
     }
 }
@@ -206,7 +220,9 @@ impl server::Handler for Conn {
     }
 
     async fn auth_publickey_offered(&mut self, requested: &str, key: &russh::keys::PublicKey) -> Result<Auth, Self::Error> {
-        let Some(user) = self.load(requested).await? else { return Ok(Auth::reject()) };
+        let Some(user) = self.load(requested).await? else {
+            return Ok(Auth::reject());
+        };
         let fingerprint = key.fingerprint(HashAlg::Sha256).to_string();
         let owned = model::user_key_owner(&self.state.db, &fingerprint).await? == Some(user.id);
         let usable = user.policy(&self.state.db).await?.could_use(&self.factors, Factor::Key);
@@ -214,7 +230,9 @@ impl server::Handler for Conn {
     }
 
     async fn auth_publickey(&mut self, requested: &str, key: &russh::keys::PublicKey) -> Result<Auth, Self::Error> {
-        let Some(user) = self.load(requested).await? else { return Ok(Auth::reject()) };
+        let Some(user) = self.load(requested).await? else {
+            return Ok(Auth::reject());
+        };
         let fingerprint = key.fingerprint(HashAlg::Sha256).to_string();
         if model::user_key_owner(&self.state.db, &fingerprint).await? != Some(user.id) {
             self.fail("clé", "clé inconnue").await;
@@ -235,7 +253,9 @@ impl server::Handler for Conn {
             return Ok(Auth::reject());
         };
         let policy = user.policy(&self.state.db).await?;
-        let answer = response.and_then(|mut r| r.next()).map(|b| String::from_utf8_lossy(&b).into_owned());
+        let answer = response
+            .and_then(|mut r| r.next())
+            .map(|b| String::from_utf8_lossy(&b).into_owned());
         match (&self.ki, answer) {
             // Premier passage : mot de passe si rien n'est encore prouvé, sinon le code.
             (KiStage::Start, _) | (_, None) => {
@@ -300,7 +320,12 @@ impl server::Handler for Conn {
         Ok(())
     }
 
-    async fn channel_open_session(&mut self, channel: Channel<Msg>, reply: ChannelOpenHandle, _session: &mut Session) -> Result<(), Self::Error> {
+    async fn channel_open_session(
+        &mut self,
+        channel: Channel<Msg>,
+        reply: ChannelOpenHandle,
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
         let Some(ctx) = self.ctx.clone() else {
             reply.reject(ChannelOpenFailure::AdministrativelyProhibited).await;
             return Ok(());
@@ -342,9 +367,11 @@ impl server::Handler for Conn {
 
     async fn exec_request(&mut self, channel: ChannelId, data: &[u8], session: &mut Session) -> Result<(), Self::Error> {
         let command = String::from_utf8_lossy(data);
-        let allowed = self.ctx.as_ref().and_then(|c| c.target.as_ref()).is_some_and(|(t, access)| {
-            access.is_some_and(|a| a.sftp || !is_file_copy(&command)) && t.vaulted()
-        });
+        let allowed = self
+            .ctx
+            .as_ref()
+            .and_then(|c| c.target.as_ref())
+            .is_some_and(|(t, access)| access.is_some_and(|a| a.sftp || !is_file_copy(&command)) && t.vaulted());
         if allowed {
             session.channel_success(channel)?;
         } else {
@@ -355,7 +382,11 @@ impl server::Handler for Conn {
 
     async fn subsystem_request(&mut self, channel: ChannelId, name: &str, session: &mut Session) -> Result<(), Self::Error> {
         let allowed = name == "sftp"
-            && self.ctx.as_ref().and_then(|c| c.target.as_ref()).is_some_and(|(t, access)| access.is_some_and(|a| a.sftp) && t.vaulted());
+            && self
+                .ctx
+                .as_ref()
+                .and_then(|c| c.target.as_ref())
+                .is_some_and(|(t, access)| access.is_some_and(|a| a.sftp) && t.vaulted());
         if allowed {
             session.channel_success(channel)?;
         } else {
@@ -405,7 +436,13 @@ impl server::Handler for Conn {
                 return Ok(());
             }
         }
-        audit::note(db, &ctx.user.login, "acces.refuse", json!({ "demande": format!("{host}:{port}"), "type": "tunnel", "adresse": ctx.addr })).await;
+        audit::note(
+            db,
+            &ctx.user.login,
+            "acces.refuse",
+            json!({ "demande": format!("{host}:{port}"), "type": "tunnel", "adresse": ctx.addr }),
+        )
+        .await;
         reply.reject(ChannelOpenFailure::AdministrativelyProhibited).await;
         Ok(())
     }
@@ -432,8 +469,23 @@ async fn run_channel(ctx: Arc<Ctx>, mut channel: Channel<Msg>) -> Result<()> {
     let mut pty: Option<PtyInfo> = None;
     loop {
         match channel.wait().await {
-            Some(ChannelMsg::RequestPty { term, col_width, row_height, pix_width, pix_height, terminal_modes, .. }) => {
-                pty = Some(PtyInfo { term, cols: col_width, rows: row_height, pix_w: pix_width, pix_h: pix_height, modes: terminal_modes });
+            Some(ChannelMsg::RequestPty {
+                term,
+                col_width,
+                row_height,
+                pix_width,
+                pix_height,
+                terminal_modes,
+                ..
+            }) => {
+                pty = Some(PtyInfo {
+                    term,
+                    cols: col_width,
+                    rows: row_height,
+                    pix_w: pix_width,
+                    pix_h: pix_height,
+                    modes: terminal_modes,
+                });
             }
             Some(ChannelMsg::WindowChange { col_width, row_height, .. }) => {
                 if let Some(p) = &mut pty {
@@ -514,9 +566,19 @@ async fn read_line(channel: &mut Channel<Msg>, echo: bool, pty: &mut Option<PtyI
 /// Menu des serveurs autorisés quand le nom ne désigne pas de cible.
 async fn choose_target(ctx: &Ctx, channel: &mut Channel<Msg>, pty: &mut Option<PtyInfo>) -> Result<Option<Target>> {
     let targets = model::allowed_targets(&ctx.state.db, ctx.user.id).await?;
-    let name = model::setting(&ctx.state.db, "nom").await?.and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_else(|| "Heimdia".into());
+    let name = model::setting(&ctx.state.db, "nom")
+        .await?
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or_else(|| "Heimdia".into());
     if targets.is_empty() {
-        say(channel, &format!("\n  {name} · bonjour {}\n  Aucun serveur ne vous est autorisé en ce moment.\n\n", ctx.user.login)).await;
+        say(
+            channel,
+            &format!(
+                "\n  {name} · bonjour {}\n  Aucun serveur ne vous est autorisé en ce moment.\n\n",
+                ctx.user.login
+            ),
+        )
+        .await;
         return Ok(None);
     }
     let width = targets.iter().map(|t| t.name.chars().count()).max().unwrap_or(0);
@@ -532,7 +594,9 @@ async fn choose_target(ctx: &Ctx, channel: &mut Channel<Msg>, pty: &mut Option<P
     say(channel, &text).await;
     for _ in 0..3 {
         say(channel, "  Votre choix (numéro ou nom) : ").await;
-        let Some(answer) = read_line(channel, true, pty).await else { return Ok(None) };
+        let Some(answer) = read_line(channel, true, pty).await else {
+            return Ok(None);
+        };
         let found = answer
             .parse::<usize>()
             .ok()
@@ -554,7 +618,13 @@ async fn shell(ctx: Arc<Ctx>, mut channel: Channel<Msg>, mut pty: Option<PtyInfo
     let target = match (&ctx.target, &ctx.requested_target) {
         (Some((t, _)), _) => t.clone(),
         (None, Some(name)) => {
-            audit::note(db, &login, "acces.refuse", json!({ "demande": name, "raison": "cible inconnue", "adresse": ctx.addr })).await;
+            audit::note(
+                db,
+                &login,
+                "acces.refuse",
+                json!({ "demande": name, "raison": "cible inconnue", "adresse": ctx.addr }),
+            )
+            .await;
             say(&channel, &format!("Serveur inconnu ou non autorisé : {name}\n")).await;
             close(&channel, 1).await;
             return Ok(());
@@ -569,7 +639,13 @@ async fn shell(ctx: Arc<Ctx>, mut channel: Channel<Msg>, mut pty: Option<PtyInfo
     };
     // Les droits sont relus au moment d'ouvrir : une règle retirée s'applique tout de suite.
     let Some(access) = model::access(db, ctx.user.id, target.id).await? else {
-        audit::note(db, &login, "acces.refuse", json!({ "cible": target.name, "raison": "aucune règle active", "adresse": ctx.addr })).await;
+        audit::note(
+            db,
+            &login,
+            "acces.refuse",
+            json!({ "cible": target.name, "raison": "aucune règle active", "adresse": ctx.addr }),
+        )
+        .await;
         say(&channel, &format!("Serveur inconnu ou non autorisé : {}\n", target.name)).await;
         close(&channel, 1).await;
         return Ok(());
@@ -581,17 +657,39 @@ async fn shell(ctx: Arc<Ctx>, mut channel: Channel<Msg>, mut pty: Option<PtyInfo
         return Ok(());
     };
     let remote = handle.channel_open_session().await?;
-    let p = pty.clone().unwrap_or(PtyInfo { term: "xterm-256color".into(), cols: 80, rows: 24, pix_w: 0, pix_h: 0, modes: vec![] });
-    remote.request_pty(true, &p.term, p.cols, p.rows, p.pix_w, p.pix_h, &p.modes).await?;
+    let p = pty.clone().unwrap_or(PtyInfo {
+        term: "xterm-256color".into(),
+        cols: 80,
+        rows: 24,
+        pix_w: 0,
+        pix_h: 0,
+        modes: vec![],
+    });
+    remote
+        .request_pty(true, &p.term, p.cols, p.rows, p.pix_w, p.pix_h, &p.modes)
+        .await?;
     remote.request_shell(true).await?;
 
     let id = Uuid::new_v4();
     let detail = format!("{creds_user}@{}", target.name);
     model::session_start(db, id, ctx.user.id, target.id, "shell", &detail, &ctx.addr).await?;
-    audit::note(db, &login, "session.ouverte", json!({ "session": id, "cible": target.name, "compte": creds_user, "mode": target.mode, "adresse": ctx.addr })).await;
+    audit::note(
+        db,
+        &login,
+        "session.ouverte",
+        json!({ "session": id, "cible": target.name, "compte": creds_user, "mode": target.mode, "adresse": ctx.addr }),
+    )
+    .await;
     let mut recorder = if target.records() {
         say(&channel, "Heimdia : session enregistrée.\n").await;
-        Some(Recorder::create(&ctx.state.config.recordings_dir(), id, p.cols, p.rows, &format!("{login} → {detail}"), access.record_input)?)
+        Some(Recorder::create(
+            &ctx.state.config.recordings_dir(),
+            id,
+            p.cols,
+            p.rows,
+            &format!("{login} → {detail}"),
+            access.record_input,
+        )?)
     } else {
         None
     };
@@ -618,7 +716,11 @@ async fn connect_interactive(
             Ok(h) => Ok(Some((h, creds.user().to_string()))),
             Err(ConnectError::Refused) => {
                 audit::note(&ctx.state.db, login, "cible.coffre_refuse", json!({ "cible": target.name })).await;
-                say(channel, "Le compte du coffre a été refusé par le serveur. Prévenez un administrateur.\n").await;
+                say(
+                    channel,
+                    "Le compte du coffre a été refusé par le serveur. Prévenez un administrateur.\n",
+                )
+                .await;
                 Ok(None)
             }
             Err(ConnectError::Other(e)) => {
@@ -639,12 +741,25 @@ async fn connect_interactive(
     };
     for attempt in 0..3 {
         say(channel, &format!("Mot de passe de {account}@{} : ", target.name)).await;
-        let Some(password) = read_line(channel, false, pty).await else { return Ok(None) };
-        let creds = Credentials::Password { user: account.clone(), password };
+        let Some(password) = read_line(channel, false, pty).await else {
+            return Ok(None);
+        };
+        let creds = Credentials::Password {
+            user: account.clone(),
+            password,
+        };
         match target::connect(&ctx.state, target, &creds, login).await {
             Ok(h) => return Ok(Some((h, account))),
-            Err(ConnectError::Refused) if attempt < 2 => say(channel, "Accès refusé.\n").await,
-            Err(ConnectError::Refused) => say(channel, "Accès refusé.\n").await,
+            Err(ConnectError::Refused) => {
+                audit::note(
+                    &ctx.state.db,
+                    login,
+                    "cible.identifiants_refuses",
+                    json!({ "cible": target.name, "compte": account, "essai": attempt + 1 }),
+                )
+                .await;
+                say(channel, "Accès refusé.\n").await;
+            }
             Err(ConnectError::Other(e)) => {
                 say(channel, &format!("{e:#}\n")).await;
                 return Ok(None);
@@ -692,11 +807,21 @@ async fn pump(user: &mut Channel<Msg>, mut remote: Channel<russh::client::Msg>, 
 }
 
 async fn finish(ctx: &Ctx, id: Uuid, recorder: Option<Recorder>, started: std::time::Instant, target: &str) {
-    let mut done = model::Finished { recording: None, sha256: None, signature: None, bytes: 0 };
+    let mut done = model::Finished {
+        recording: None,
+        sha256: None,
+        signature: None,
+        bytes: 0,
+    };
     if let Some(rec) = recorder {
         match rec.finish(&ctx.state.keys, id) {
             Ok((path, sha, sig, bytes)) => {
-                done = model::Finished { recording: Some(path), sha256: Some(sha), signature: Some(sig), bytes: bytes as i64 };
+                done = model::Finished {
+                    recording: Some(path),
+                    sha256: Some(sha),
+                    signature: Some(sig),
+                    bytes: bytes as i64,
+                };
             }
             Err(e) => tracing::error!("enregistrement {id} : {e:#}"),
         }
@@ -736,17 +861,32 @@ async fn exec(ctx: Arc<Ctx>, mut channel: Channel<Msg>, pty: Option<PtyInfo>, co
     };
     let remote = handle.channel_open_session().await?;
     if let Some(p) = &pty {
-        remote.request_pty(true, &p.term, p.cols, p.rows, p.pix_w, p.pix_h, &p.modes).await?;
+        remote
+            .request_pty(true, &p.term, p.cols, p.rows, p.pix_w, p.pix_h, &p.modes)
+            .await?;
     }
     remote.exec(true, command.as_bytes()).await?;
     let id = Uuid::new_v4();
     let db = &ctx.state.db;
     model::session_start(db, id, ctx.user.id, target.id, "exec", &command, &ctx.addr).await?;
-    audit::note(db, &ctx.user.login, "commande.executee", json!({ "session": id, "cible": target.name, "commande": command, "adresse": ctx.addr })).await;
+    audit::note(
+        db,
+        &ctx.user.login,
+        "commande.executee",
+        json!({ "session": id, "cible": target.name, "commande": command, "adresse": ctx.addr }),
+    )
+    .await;
     let (cols, rows) = pty.as_ref().map(|p| (p.cols, p.rows)).unwrap_or((80, 24));
     // Copies de fichiers : on journalise sans enregistrer le contenu binaire.
     let mut recorder = if target.records() && !is_file_copy(&command) {
-        Some(Recorder::create(&ctx.state.config.recordings_dir(), id, cols, rows, &format!("{} → {}: {command}", ctx.user.login, target.name), access.record_input)?)
+        Some(Recorder::create(
+            &ctx.state.config.recordings_dir(),
+            id,
+            cols,
+            rows,
+            &format!("{} → {}: {command}", ctx.user.login, target.name),
+            access.record_input,
+        )?)
     } else {
         None
     };
@@ -778,7 +918,13 @@ async fn sftp(ctx: Arc<Ctx>, mut channel: Channel<Msg>, name: String) -> Result<
     let id = Uuid::new_v4();
     let db = &ctx.state.db;
     model::session_start(db, id, ctx.user.id, target.id, "sftp", creds.user(), &ctx.addr).await?;
-    audit::note(db, &ctx.user.login, "sftp.ouvert", json!({ "session": id, "cible": target.name, "adresse": ctx.addr })).await;
+    audit::note(
+        db,
+        &ctx.user.login,
+        "sftp.ouvert",
+        json!({ "session": id, "cible": target.name, "adresse": ctx.addr }),
+    )
+    .await;
     let started = std::time::Instant::now();
     let status = pump(&mut channel, remote, None).await;
     let _ = handle.disconnect(russh::Disconnect::ByApplication, "", "fr").await;
@@ -793,17 +939,47 @@ async fn relay_tcp(ctx: Arc<Ctx>, target: Target, channel: Channel<Msg>) -> Resu
     let db = &ctx.state.db;
     let mut tcp = tokio::net::TcpStream::connect((target.host.as_str(), target.port as u16)).await?;
     model::session_start(db, id, ctx.user.id, target.id, "rebond", "ssh -J", &ctx.addr).await?;
-    audit::note(db, &ctx.user.login, "rebond.ouvert", json!({ "session": id, "cible": target.name, "adresse": ctx.addr })).await;
+    audit::note(
+        db,
+        &ctx.user.login,
+        "rebond.ouvert",
+        json!({ "session": id, "cible": target.name, "adresse": ctx.addr }),
+    )
+    .await;
     let started = std::time::Instant::now();
     let mut stream = channel.into_stream();
     let (up, down) = tokio::io::copy_bidirectional(&mut stream, &mut tcp).await.unwrap_or((0, 0));
-    let _ = model::session_end(db, id, model::Finished { recording: None, sha256: None, signature: None, bytes: (up + down) as i64 }).await;
-    audit::note(db, &ctx.user.login, "rebond.ferme", json!({ "session": id, "cible": target.name, "duree_s": started.elapsed().as_secs(), "octets": up + down })).await;
+    let _ = model::session_end(
+        db,
+        id,
+        model::Finished {
+            recording: None,
+            sha256: None,
+            signature: None,
+            bytes: (up + down) as i64,
+        },
+    )
+    .await;
+    audit::note(
+        db,
+        &ctx.user.login,
+        "rebond.ferme",
+        json!({ "session": id, "cible": target.name, "duree_s": started.elapsed().as_secs(), "octets": up + down }),
+    )
+    .await;
     Ok(())
 }
 
 /// Tunnel (ssh -L) ouvert depuis la cible du coffre.
-async fn relay_tunnel(ctx: Arc<Ctx>, target: Target, channel: Channel<Msg>, host: String, port: u32, origin: String, origin_port: u32) -> Result<()> {
+async fn relay_tunnel(
+    ctx: Arc<Ctx>,
+    target: Target,
+    channel: Channel<Msg>,
+    host: String,
+    port: u32,
+    origin: String,
+    origin_port: u32,
+) -> Result<()> {
     let creds = target::vault_credentials(&ctx.state, &target)?;
     let handle = match target::connect(&ctx.state, &target, &creds, &ctx.user.login).await {
         Ok(h) => h,
@@ -815,11 +991,33 @@ async fn relay_tunnel(ctx: Arc<Ctx>, target: Target, channel: Channel<Msg>, host
     let db = &ctx.state.db;
     let detail = format!("{host}:{port}");
     model::session_start(db, id, ctx.user.id, target.id, "tunnel", &detail, &ctx.addr).await?;
-    audit::note(db, &ctx.user.login, "tunnel.ouvert", json!({ "session": id, "cible": target.name, "vers": detail, "adresse": ctx.addr })).await;
+    audit::note(
+        db,
+        &ctx.user.login,
+        "tunnel.ouvert",
+        json!({ "session": id, "cible": target.name, "vers": detail, "adresse": ctx.addr }),
+    )
+    .await;
     let (mut a, mut b) = (channel.into_stream(), remote.into_stream());
     let (up, down) = tokio::io::copy_bidirectional(&mut a, &mut b).await.unwrap_or((0, 0));
     let _ = handle.disconnect(russh::Disconnect::ByApplication, "", "fr").await;
-    let _ = model::session_end(db, id, model::Finished { recording: None, sha256: None, signature: None, bytes: (up + down) as i64 }).await;
-    audit::note(db, &ctx.user.login, "tunnel.ferme", json!({ "session": id, "cible": target.name, "octets": up + down })).await;
+    let _ = model::session_end(
+        db,
+        id,
+        model::Finished {
+            recording: None,
+            sha256: None,
+            signature: None,
+            bytes: (up + down) as i64,
+        },
+    )
+    .await;
+    audit::note(
+        db,
+        &ctx.user.login,
+        "tunnel.ferme",
+        json!({ "session": id, "cible": target.name, "octets": up + down }),
+    )
+    .await;
     Ok(())
 }

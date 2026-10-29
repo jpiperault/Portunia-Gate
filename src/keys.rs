@@ -18,7 +18,9 @@ use russh::keys::{
 
 pub fn random<const N: usize>() -> Result<[u8; N]> {
     let mut out = [0u8; N];
-    SystemRandom::new().fill(&mut out).map_err(|_| anyhow!("générateur aléatoire indisponible"))?;
+    SystemRandom::new()
+        .fill(&mut out)
+        .map_err(|_| anyhow!("générateur aléatoire indisponible"))?;
     Ok(out)
 }
 

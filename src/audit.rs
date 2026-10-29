@@ -10,7 +10,11 @@ const GENESIS: &str = "heimdia-journal-v1";
 
 fn link(prev: &str, seq: i64, at: &DateTime<Utc>, actor: &str, event: &str, detail: &Value) -> String {
     // serde_json trie les clés des objets : le texte est stable d'une lecture à l'autre.
-    let text = format!("{prev}\n{seq}\n{}\n{actor}\n{event}\n{}", at.to_rfc3339_opts(chrono::SecondsFormat::Micros, true), detail);
+    let text = format!(
+        "{prev}\n{seq}\n{}\n{actor}\n{event}\n{}",
+        at.to_rfc3339_opts(chrono::SecondsFormat::Micros, true),
+        detail
+    );
     crate::keys::sha256_hex(text.as_bytes())
 }
 
@@ -63,7 +67,10 @@ pub struct Entry {
 }
 
 pub async fn last(db: &PgPool, count: i64) -> Result<Vec<Entry>> {
-    let mut rows: Vec<Entry> = sqlx::query_as("SELECT * FROM audit ORDER BY seq DESC LIMIT $1").bind(count).fetch_all(db).await?;
+    let mut rows: Vec<Entry> = sqlx::query_as("SELECT * FROM audit ORDER BY seq DESC LIMIT $1")
+        .bind(count)
+        .fetch_all(db)
+        .await?;
     rows.reverse();
     Ok(rows)
 }

@@ -41,7 +41,15 @@ impl Recorder {
             "env": { "TERM": "xterm-256color" },
         });
         writeln!(out, "{header}")?;
-        Ok(Self { path, out, start: Instant::now(), record_input, carry_out: Vec::new(), carry_in: Vec::new(), bytes: 0 })
+        Ok(Self {
+            path,
+            out,
+            start: Instant::now(),
+            record_input,
+            carry_out: Vec::new(),
+            carry_in: Vec::new(),
+            bytes: 0,
+        })
     }
 
     fn event(&mut self, kind: &str, text: &str) {
@@ -103,7 +111,13 @@ fn take_utf8(carry: &mut Vec<u8>, data: &[u8]) -> String {
             continue;
         }
         if b >= 0xC0 {
-            let need = if b >= 0xF0 { 4 } else if b >= 0xE0 { 3 } else { 2 };
+            let need = if b >= 0xF0 {
+                4
+            } else if b >= 0xE0 {
+                3
+            } else {
+                2
+            };
             if back < need {
                 end = carry.len() - back;
             }

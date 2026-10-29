@@ -14,7 +14,10 @@ pub fn hash_password(password: &str) -> Result<String> {
         bail!("Le mot de passe doit contenir au moins 10 caractères");
     }
     let salt = SaltString::encode_b64(&crate::keys::random::<16>()?).map_err(|e| anyhow!("sel : {e}"))?;
-    Ok(Argon2::default().hash_password(password.as_bytes(), &salt).map_err(|e| anyhow!("hachage : {e}"))?.to_string())
+    Ok(Argon2::default()
+        .hash_password(password.as_bytes(), &salt)
+        .map_err(|e| anyhow!("hachage : {e}"))?
+        .to_string())
 }
 
 pub fn verify_password(hash: &str, password: &str) -> bool {
@@ -71,7 +74,13 @@ pub fn base32(bytes: &[u8]) -> String {
 
 pub fn otpauth_uri(issuer: &str, login: &str, secret: &[u8]) -> String {
     let enc = |s: &str| s.replace(' ', "%20").replace(':', "%3A");
-    format!("otpauth://totp/{}:{}?secret={}&issuer={}&digits=6&period=30", enc(issuer), enc(login), base32(secret), enc(issuer))
+    format!(
+        "otpauth://totp/{}:{}?secret={}&issuer={}&digits=6&period=30",
+        enc(issuer),
+        enc(login),
+        base32(secret),
+        enc(issuer)
+    )
 }
 
 /// Code QR à afficher dans un terminal (deux lignes de pixels par ligne de texte).

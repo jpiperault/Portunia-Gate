@@ -12,7 +12,10 @@ use crate::auth::Policy;
 pub const DEFAULT_POLICY: &str = "password+totp,key+totp";
 
 pub async fn setting(db: &PgPool, key: &str) -> Result<Option<Value>> {
-    Ok(sqlx::query_scalar("SELECT value FROM settings WHERE key = $1").bind(key).fetch_optional(db).await?)
+    Ok(sqlx::query_scalar("SELECT value FROM settings WHERE key = $1")
+        .bind(key)
+        .fetch_optional(db)
+        .await?)
 }
 
 pub async fn set_setting(db: &PgPool, key: &str, value: Value) -> Result<()> {
@@ -25,7 +28,10 @@ pub async fn set_setting(db: &PgPool, key: &str, value: Value) -> Result<()> {
 }
 
 pub async fn default_policy(db: &PgPool) -> Result<Policy> {
-    let text = setting(db, "auth_policy").await?.and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_else(|| DEFAULT_POLICY.into());
+    let text = setting(db, "auth_policy")
+        .await?
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or_else(|| DEFAULT_POLICY.into());
     Policy::parse(&text)
 }
 
@@ -57,11 +63,16 @@ impl User {
 const USER_COLUMNS: &str = "id, login, display_name, role, password_hash, totp_secret, totp_last_step, auth_policy, disabled";
 
 pub async fn user_by_login(db: &PgPool, login: &str) -> Result<Option<User>> {
-    Ok(sqlx::query_as(&format!("SELECT {USER_COLUMNS} FROM users WHERE login = $1")).bind(login).fetch_optional(db).await?)
+    Ok(sqlx::query_as(&format!("SELECT {USER_COLUMNS} FROM users WHERE login = $1"))
+        .bind(login)
+        .fetch_optional(db)
+        .await?)
 }
 
 pub async fn users(db: &PgPool) -> Result<Vec<User>> {
-    Ok(sqlx::query_as(&format!("SELECT {USER_COLUMNS} FROM users ORDER BY login")).fetch_all(db).await?)
+    Ok(sqlx::query_as(&format!("SELECT {USER_COLUMNS} FROM users ORDER BY login"))
+        .fetch_all(db)
+        .await?)
 }
 
 pub fn check_login(login: &str) -> Result<()> {
@@ -88,12 +99,22 @@ pub async fn create_user(db: &PgPool, login: &str, role: &str, password_hash: Op
         .bind(policy)
         .execute(db)
         .await
-        .map_err(|e| if is_unique(&e) { anyhow!("Le compte « {login} » existe déjà") } else { e.into() })?;
+        .map_err(|e| {
+            if is_unique(&e) {
+                anyhow!("Le compte « {login} » existe déjà")
+            } else {
+                e.into()
+            }
+        })?;
     Ok(id)
 }
 
 pub async fn set_totp(db: &PgPool, user: Uuid, sealed: Option<Vec<u8>>) -> Result<()> {
-    sqlx::query("UPDATE users SET totp_secret = $2, totp_last_step = 0 WHERE id = $1").bind(user).bind(sealed).execute(db).await?;
+    sqlx::query("UPDATE users SET totp_secret = $2, totp_last_step = 0 WHERE id = $1")
+        .bind(user)
+        .bind(sealed)
+        .execute(db)
+        .await?;
     Ok(())
 }
 
@@ -109,7 +130,10 @@ pub async fn consume_totp_step(db: &PgPool, user: Uuid, step: i64) -> Result<boo
 }
 
 pub async fn user_key_owner(db: &PgPool, fingerprint: &str) -> Result<Option<Uuid>> {
-    Ok(sqlx::query_scalar("SELECT user_id FROM user_keys WHERE fingerprint = $1").bind(fingerprint).fetch_optional(db).await?)
+    Ok(sqlx::query_scalar("SELECT user_id FROM user_keys WHERE fingerprint = $1")
+        .bind(fingerprint)
+        .fetch_optional(db)
+        .await?)
 }
 
 pub async fn add_user_key(db: &PgPool, user: Uuid, public_key: &str, fingerprint: &str, label: &str) -> Result<()> {
@@ -121,7 +145,13 @@ pub async fn add_user_key(db: &PgPool, user: Uuid, public_key: &str, fingerprint
         .bind(label)
         .execute(db)
         .await
-        .map_err(|e| if is_unique(&e) { anyhow!("Cette clé est déjà enregistrée") } else { e.into() })?;
+        .map_err(|e| {
+            if is_unique(&e) {
+                anyhow!("Cette clé est déjà enregistrée")
+            } else {
+                e.into()
+            }
+        })?;
     Ok(())
 }
 
@@ -134,7 +164,13 @@ pub async fn create_group(db: &PgPool, name: &str) -> Result<Uuid> {
         .bind(name)
         .execute(db)
         .await
-        .map_err(|e| if is_unique(&e) { anyhow!("Le groupe « {name} » existe déjà") } else { e.into() })?;
+        .map_err(|e| {
+            if is_unique(&e) {
+                anyhow!("Le groupe « {name} » existe déjà")
+            } else {
+                e.into()
+            }
+        })?;
     Ok(id)
 }
 
@@ -147,7 +183,11 @@ pub async fn group_id(db: &PgPool, name: &str) -> Result<Uuid> {
 }
 
 pub async fn add_member(db: &PgPool, group: Uuid, user: Uuid) -> Result<()> {
-    sqlx::query("INSERT INTO group_members (group_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING").bind(group).bind(user).execute(db).await?;
+    sqlx::query("INSERT INTO group_members (group_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING")
+        .bind(group)
+        .bind(user)
+        .execute(db)
+        .await?;
     Ok(())
 }
 
@@ -182,7 +222,12 @@ impl Target {
 const TARGET_COLUMNS: &str = "id, name, folder, host, port, mode, account, secret_kind, secret, host_key";
 
 pub async fn target_by_name(db: &PgPool, name: &str) -> Result<Option<Target>> {
-    Ok(sqlx::query_as(&format!("SELECT {TARGET_COLUMNS} FROM targets WHERE lower(name) = lower($1)")).bind(name).fetch_optional(db).await?)
+    Ok(
+        sqlx::query_as(&format!("SELECT {TARGET_COLUMNS} FROM targets WHERE lower(name) = lower($1)"))
+            .bind(name)
+            .fetch_optional(db)
+            .await?,
+    )
 }
 
 /// Cible en mode rebond désignée par son adresse (connexion « ssh -J »).
@@ -197,7 +242,11 @@ pub async fn target_by_address(db: &PgPool, host: &str, port: i32) -> Result<Opt
 }
 
 pub async fn targets(db: &PgPool) -> Result<Vec<Target>> {
-    Ok(sqlx::query_as(&format!("SELECT {TARGET_COLUMNS} FROM targets ORDER BY folder, name")).fetch_all(db).await?)
+    Ok(
+        sqlx::query_as(&format!("SELECT {TARGET_COLUMNS} FROM targets ORDER BY folder, name"))
+            .fetch_all(db)
+            .await?,
+    )
 }
 
 pub struct NewTarget {
@@ -237,9 +286,14 @@ pub async fn create_target(db: &PgPool, t: NewTarget, seal: impl FnOnce(Uuid) ->
     Ok(id)
 }
 
-pub async fn pin_host_key(db: &PgPool, target: Uuid, fingerprint: &str) -> Result<()> {
-    sqlx::query("UPDATE targets SET host_key = $2 WHERE id = $1 AND host_key IS NULL").bind(target).bind(fingerprint).execute(db).await?;
-    Ok(())
+/// Mémorise l'empreinte si aucune ne l'est encore ; vrai si c'est cet appel qui l'a fait.
+pub async fn pin_host_key(db: &PgPool, target: Uuid, fingerprint: &str) -> Result<bool> {
+    let done = sqlx::query("UPDATE targets SET host_key = $2 WHERE id = $1 AND host_key IS NULL")
+        .bind(target)
+        .bind(fingerprint)
+        .execute(db)
+        .await?;
+    Ok(done.rows_affected() == 1)
 }
 
 // ---------- Droits ----------
@@ -348,9 +402,19 @@ pub async fn create_rule(db: &PgPool, r: NewRule) -> Result<Uuid> {
     .bind(r.expires_at)
     .execute(&mut *tx)
     .await
-    .map_err(|e| if is_unique(&e) { anyhow!("La règle « {} » existe déjà", r.name) } else { e.into() })?;
+    .map_err(|e| {
+        if is_unique(&e) {
+            anyhow!("La règle « {} » existe déjà", r.name)
+        } else {
+            e.into()
+        }
+    })?;
     for target in &r.targets {
-        sqlx::query("INSERT INTO rule_targets (rule_id, target_id) VALUES ($1, $2)").bind(id).bind(target).execute(&mut *tx).await?;
+        sqlx::query("INSERT INTO rule_targets (rule_id, target_id) VALUES ($1, $2)")
+            .bind(id)
+            .bind(target)
+            .execute(&mut *tx)
+            .await?;
     }
     tx.commit().await?;
     Ok(id)
@@ -424,16 +488,35 @@ mod tests {
 
     #[test]
     fn plages_horaires() {
-        let all = RuleRow { allow_sftp: false, allow_tunnels: false, record_input: false, days: 127, hour_from: None, hour_to: None, expires_at: None };
+        let all = RuleRow {
+            allow_sftp: false,
+            allow_tunnels: false,
+            record_input: false,
+            days: 127,
+            hour_from: None,
+            hour_to: None,
+            expires_at: None,
+        };
         assert!(all.active_now());
-        let expired = RuleRow { expires_at: Some(Utc::now() - chrono::Duration::minutes(1)), ..all.clone() };
+        let expired = RuleRow {
+            expires_at: Some(Utc::now() - chrono::Duration::minutes(1)),
+            ..all.clone()
+        };
         assert!(!expired.active_now());
         let no_day = RuleRow { days: 0, ..all.clone() };
         assert!(!no_day.active_now());
         let hour = Local::now().hour() as i16;
-        let here = RuleRow { hour_from: Some(hour), hour_to: Some(hour + 1), ..all.clone() };
+        let here = RuleRow {
+            hour_from: Some(hour),
+            hour_to: Some(hour + 1),
+            ..all.clone()
+        };
         assert!(here.active_now());
-        let elsewhere = RuleRow { hour_from: Some((hour + 2) % 24), hour_to: Some((hour + 3) % 24 + if (hour + 3) % 24 == 0 { 24 } else { 0 }), ..all };
+        let elsewhere = RuleRow {
+            hour_from: Some((hour + 2) % 24),
+            hour_to: Some((hour + 3) % 24 + if (hour + 3) % 24 == 0 { 24 } else { 0 }),
+            ..all
+        };
         assert!(!elsewhere.active_now());
     }
 }

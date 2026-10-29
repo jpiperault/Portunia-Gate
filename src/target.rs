@@ -30,12 +30,21 @@ impl Credentials {
 
 /// Identifiants du coffre pour une cible en mode coffre.
 pub fn vault_credentials(state: &State, target: &Target) -> Result<Credentials> {
-    let user = target.account.clone().ok_or_else(|| anyhow!("compte du coffre manquant pour {}", target.name))?;
-    let sealed = target.secret.as_deref().ok_or_else(|| anyhow!("secret du coffre manquant pour {}", target.name))?;
+    let user = target
+        .account
+        .clone()
+        .ok_or_else(|| anyhow!("compte du coffre manquant pour {}", target.name))?;
+    let sealed = target
+        .secret
+        .as_deref()
+        .ok_or_else(|| anyhow!("secret du coffre manquant pour {}", target.name))?;
     let plain = state.keys.open(&target.secret_purpose(), sealed)?;
     let text = String::from_utf8(plain).map_err(|_| anyhow!("secret du coffre illisible"))?;
     Ok(match target.secret_kind.as_str() {
-        "key" => Credentials::Key { user, key: Box::new(decode_secret_key(&text, None).map_err(|e| anyhow!("clé du coffre illisible : {e}"))?) },
+        "key" => Credentials::Key {
+            user,
+            key: Box::new(decode_secret_key(&text, None).map_err(|e| anyhow!("clé du coffre illisible : {e}"))?),
+        },
         _ => Credentials::Password { user, password: text },
     })
 }
@@ -86,7 +95,10 @@ pub async fn connect(state: &State, target: &Target, creds: &Credentials, actor:
         ..Default::default()
     });
     let seen = Arc::new(Mutex::new(None));
-    let client = Client { pinned: target.host_key.clone(), seen: seen.clone() };
+    let client = Client {
+        pinned: target.host_key.clone(),
+        seen: seen.clone(),
+    };
     let address = (target.host.as_str(), target.port as u16);
     let connected = tokio::time::timeout(std::time::Duration::from_secs(15), client::connect(config, address, client)).await;
     let seen = seen.lock().unwrap().clone();
@@ -115,15 +127,25 @@ pub async fn connect(state: &State, target: &Target, creds: &Credentials, actor:
     };
     if target.host_key.is_none() {
         if let Some(fp) = &seen {
-            model::pin_host_key(&state.db, target.id, fp).await?;
-            crate::audit::note(&state.db, actor, "cible.empreinte_memorisee", json!({ "cible": target.name, "empreinte": fp })).await;
+            if model::pin_host_key(&state.db, target.id, fp).await? {
+                crate::audit::note(
+                    &state.db,
+                    actor,
+                    "cible.empreinte_memorisee",
+                    json!({ "cible": target.name, "empreinte": fp }),
+                )
+                .await;
+            }
         }
     }
     let ok = match creds {
         Credentials::Password { user, password } => handle.authenticate_password(user, password).await?.success(),
         Credentials::Key { user, key } => {
             let hash = handle.best_supported_rsa_hash().await?.flatten();
-            handle.authenticate_publickey(user, PrivateKeyWithHashAlg::new(Arc::new((**key).clone()), hash)).await?.success()
+            handle
+                .authenticate_publickey(user, PrivateKeyWithHashAlg::new(Arc::new((**key).clone()), hash))
+                .await?
+                .success()
         }
     };
     if !ok {

@@ -17,7 +17,9 @@ impl Config {
             .map_err(|_| anyhow::anyhow!("HEIMDIA_DATABASE_URL manquant (ex. postgres://heimdia:…@postgres/heimdia)"))?;
         Ok(Self {
             database_url,
-            data_dir: std::env::var_os("HEIMDIA_DATA_DIR").map(PathBuf::from).unwrap_or_else(|| "/var/lib/heimdia".into()),
+            data_dir: std::env::var_os("HEIMDIA_DATA_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| "/var/lib/heimdia".into()),
             ssh_listen: std::env::var("HEIMDIA_SSH_LISTEN").unwrap_or_else(|_| "0.0.0.0:2222".into()),
         })
     }

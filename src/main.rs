@@ -114,9 +114,14 @@ enum UserCmd {
 
 #[derive(Subcommand)]
 enum GroupCmd {
-    Add { name: String },
+    Add {
+        name: String,
+    },
     /// Ajoute des comptes à un groupe.
-    Member { group: String, logins: Vec<String> },
+    Member {
+        group: String,
+        logins: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -229,13 +234,19 @@ async fn connect_db(config: &Config) -> Result<PgPool> {
             }
         }
     }
-    Err(anyhow!("base PostgreSQL injoignable : {}", last.map(|e| e.to_string()).unwrap_or_default()))
+    Err(anyhow!(
+        "base PostgreSQL injoignable : {}",
+        last.map(|e| e.to_string()).unwrap_or_default()
+    ))
 }
 
 /// Enrôle le code TOTP : affiche le code QR et exige un premier code juste.
 async fn enroll_totp(state: &State, user: &model::User) -> Result<()> {
     let secret = keys::random::<20>()?;
-    let issuer = model::setting(&state.db, "nom").await?.and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_else(|| "Heimdia".into());
+    let issuer = model::setting(&state.db, "nom")
+        .await?
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or_else(|| "Heimdia".into());
     let uri = auth::otpauth_uri(&issuer, &user.login, &secret);
     println!("\nScannez ce code dans votre application d'authentification :\n");
     println!("{}", auth::qr_terminal(&uri)?);
@@ -256,7 +267,12 @@ async fn enroll_totp(state: &State, user: &model::User) -> Result<()> {
 
 fn parse_days(text: &str) -> Result<i16> {
     const NAMES: [&str; 7] = ["lun", "mar", "mer", "jeu", "ven", "sam", "dim"];
-    let index = |d: &str| NAMES.iter().position(|n| d.trim().to_lowercase().starts_with(n)).ok_or_else(|| anyhow!("jour inconnu : {d}"));
+    let index = |d: &str| {
+        NAMES
+            .iter()
+            .position(|n| d.trim().to_lowercase().starts_with(n))
+            .ok_or_else(|| anyhow!("jour inconnu : {d}"))
+    };
     let mut mask = 0i16;
     for part in text.split(',') {
         match part.split_once('-') {
@@ -282,6 +298,8 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "heimdia=info,russh=warn".into()))
         .with_target(false)
+        // Traces sur la sortie d'erreur : la sortie standard reste aux commandes d'administration.
+        .with_writer(std::io::stderr)
         .init();
     let cli = Cli::parse();
     let config = Config::from_env()?;
@@ -296,7 +314,13 @@ async fn main() -> Result<()> {
     match cli.command {
         Command::Init { .. } => unreachable!(),
         Command::Serve => {
-            audit::log(&state.db, "systeme", "service.demarre", json!({ "version": env!("CARGO_PKG_VERSION") })).await?;
+            audit::log(
+                &state.db,
+                "systeme",
+                "service.demarre",
+                json!({ "version": env!("CARGO_PKG_VERSION") }),
+            )
+            .await?;
             sshd::run(state).await
         }
         Command::User(cmd) => user_cmd(&state, cmd).await,
@@ -311,13 +335,23 @@ async fn main() -> Result<()> {
                 }
             }
             for e in audit::last(&state.db, last).await? {
-                println!("{:>6}  {}  {:<14} {:<26} {}", e.seq, e.at.with_timezone(&chrono::Local).format("%d/%m %H:%M:%S"), e.actor, e.event, e.detail);
+                println!(
+                    "{:>6}  {}  {:<14} {:<26} {}",
+                    e.seq,
+                    e.at.with_timezone(&chrono::Local).format("%d/%m %H:%M:%S"),
+                    e.actor,
+                    e.event,
+                    e.detail
+                );
             }
             Ok(())
         }
         Command::Sessions { last } => {
             for s in model::last_sessions(&state.db, last).await? {
-                let end = s.ended_at.map(|e| e.with_timezone(&chrono::Local).format("%H:%M:%S").to_string()).unwrap_or_else(|| "en cours".into());
+                let end = s
+                    .ended_at
+                    .map(|e| e.with_timezone(&chrono::Local).format("%H:%M:%S").to_string())
+                    .unwrap_or_else(|| "en cours".into());
                 println!(
                     "{}  {}  {:<12} {:<12} {:<7} {:<30} {:>9} o  {}",
                     &s.id.to_string()[..8],
@@ -337,7 +371,13 @@ async fn main() -> Result<()> {
                 bail!("réglage inconnu : auth_policy, banniere ou nom");
             }
             match value {
-                None => println!("{}", model::setting(&state.db, &key).await?.map(|v| v.to_string()).unwrap_or_else(|| "(défaut)".into())),
+                None => println!(
+                    "{}",
+                    model::setting(&state.db, &key)
+                        .await?
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "(défaut)".into())
+                ),
                 Some(v) => {
                     if key == "auth_policy" {
                         auth::Policy::parse(&v)?;
@@ -370,33 +410,59 @@ async fn init(config: Config, admin: &str, no_admin: bool) -> Result<()> {
     model::set_setting(&state.db, "signature_publique", json!(sig)).await?;
     println!("✓ Clé d'hôte SSH        {}", state.keys.host_fingerprint());
     println!("✓ Signature des enregistrements : clé publique {sig}");
-    println!("  À SAUVEGARDER hors du serveur : {}", state.config.data_dir.join("coffre.key").display());
+    println!(
+        "  À SAUVEGARDER hors du serveur : {}",
+        state.config.data_dir.join("coffre.key").display()
+    );
 
     let has_admin = model::users(&state.db).await?.iter().any(|u| u.role == "admin");
     if no_admin {
-        println!("
-Aucun administrateur créé (--no-admin) : lancez « heimdia init » pour le créer.");
+        println!(
+            "
+Aucun administrateur créé (--no-admin) : lancez « heimdia init » pour le créer."
+        );
     } else if has_admin {
         println!("\nUn administrateur existe déjà : rien d'autre à faire.");
     } else {
         println!("\nCompte administrateur : {admin}");
         let hash = auth::hash_password(&new_password()?)?;
         model::create_user(&state.db, admin, "admin", Some(hash), None).await?;
-        let user = model::user_by_login(&state.db, admin).await?.ok_or_else(|| anyhow!("compte introuvable"))?;
+        let user = model::user_by_login(&state.db, admin)
+            .await?
+            .ok_or_else(|| anyhow!("compte introuvable"))?;
         audit::log(&state.db, "console", "compte.cree", json!({ "compte": admin, "role": "admin" })).await?;
         enroll_totp(&state, &user).await?;
     }
-    audit::log(&state.db, "console", "installation", json!({ "version": env!("CARGO_PKG_VERSION") })).await?;
+    audit::log(
+        &state.db,
+        "console",
+        "installation",
+        json!({ "version": env!("CARGO_PKG_VERSION") }),
+    )
+    .await?;
     println!("\n✓ Prêt. Lancez le service : docker compose up -d");
     Ok(())
 }
 
 async fn user_cmd(state: &State, cmd: UserCmd) -> Result<()> {
     let db = &state.db;
-    let find = |login: String| async move { model::user_by_login(db, &login).await?.ok_or_else(|| anyhow!("Compte inconnu : {login}")) };
+    let find = |login: String| async move {
+        model::user_by_login(db, &login)
+            .await?
+            .ok_or_else(|| anyhow!("Compte inconnu : {login}"))
+    };
     match cmd {
-        UserCmd::Add { login, role, policy, no_password } => {
-            let hash = if no_password { None } else { Some(auth::hash_password(&new_password()?)?) };
+        UserCmd::Add {
+            login,
+            role,
+            policy,
+            no_password,
+        } => {
+            let hash = if no_password {
+                None
+            } else {
+                Some(auth::hash_password(&new_password()?)?)
+            };
             model::create_user(db, &login, &role, hash, policy).await?;
             audit::log(db, "console", "compte.cree", json!({ "compte": login, "role": role })).await?;
             let user = find(login).await?;
@@ -419,11 +485,21 @@ async fn user_cmd(state: &State, cmd: UserCmd) -> Result<()> {
         }
         UserCmd::Key { login, key } => {
             let user = find(login).await?;
-            let text = if std::path::Path::new(&key).exists() { std::fs::read_to_string(&key)? } else { key };
+            let text = if std::path::Path::new(&key).exists() {
+                std::fs::read_to_string(&key)?
+            } else {
+                key
+            };
             let public = russh::keys::PublicKey::from_openssh(text.trim()).map_err(|e| anyhow!("clé publique illisible : {e}"))?;
             let fp = public.fingerprint(russh::keys::HashAlg::Sha256).to_string();
             model::add_user_key(db, user.id, text.trim(), &fp, &String::from_utf8_lossy(public.comment().as_bytes())).await?;
-            audit::log(db, "console", "compte.cle_ajoutee", json!({ "compte": user.login, "empreinte": fp })).await?;
+            audit::log(
+                db,
+                "console",
+                "compte.cle_ajoutee",
+                json!({ "compte": user.login, "empreinte": fp }),
+            )
+            .await?;
             println!("Clé ajoutée : {fp}");
         }
         UserCmd::Totp { login } => {
@@ -433,14 +509,28 @@ async fn user_cmd(state: &State, cmd: UserCmd) -> Result<()> {
         UserCmd::Passwd { login } => {
             let user = find(login).await?;
             let hash = auth::hash_password(&new_password()?)?;
-            sqlx::query("UPDATE users SET password_hash = $2 WHERE id = $1").bind(user.id).bind(hash).execute(db).await?;
+            sqlx::query("UPDATE users SET password_hash = $2 WHERE id = $1")
+                .bind(user.id)
+                .bind(hash)
+                .execute(db)
+                .await?;
             audit::log(db, "console", "compte.mot_de_passe", json!({ "compte": user.login })).await?;
             println!("Mot de passe changé.");
         }
         UserCmd::Disable { login, undo } => {
             let user = find(login).await?;
-            sqlx::query("UPDATE users SET disabled = $2 WHERE id = $1").bind(user.id).bind(!undo).execute(db).await?;
-            audit::log(db, "console", if undo { "compte.reactive" } else { "compte.desactive" }, json!({ "compte": user.login })).await?;
+            sqlx::query("UPDATE users SET disabled = $2 WHERE id = $1")
+                .bind(user.id)
+                .bind(!undo)
+                .execute(db)
+                .await?;
+            audit::log(
+                db,
+                "console",
+                if undo { "compte.reactive" } else { "compte.desactive" },
+                json!({ "compte": user.login }),
+            )
+            .await?;
             println!("{}", if undo { "Compte réactivé." } else { "Compte désactivé." });
         }
     }
@@ -458,7 +548,9 @@ async fn group_cmd(state: &State, cmd: GroupCmd) -> Result<()> {
         GroupCmd::Member { group, logins } => {
             let gid = model::group_id(db, &group).await?;
             for login in logins {
-                let user = model::user_by_login(db, &login).await?.ok_or_else(|| anyhow!("Compte inconnu : {login}"))?;
+                let user = model::user_by_login(db, &login)
+                    .await?
+                    .ok_or_else(|| anyhow!("Compte inconnu : {login}"))?;
                 model::add_member(db, gid, user.id).await?;
                 audit::log(db, "console", "groupe.membre_ajoute", json!({ "groupe": group, "compte": login })).await?;
             }
@@ -471,25 +563,52 @@ async fn group_cmd(state: &State, cmd: GroupCmd) -> Result<()> {
 async fn target_cmd(state: &State, cmd: TargetCmd) -> Result<()> {
     let db = &state.db;
     match cmd {
-        TargetCmd::Add { name, host, port, mode, account, folder, password, key_file } => {
+        TargetCmd::Add {
+            name,
+            host,
+            port,
+            mode,
+            account,
+            folder,
+            password,
+            key_file,
+        } => {
             let secret: Option<(String, Vec<u8>)> = match (password, key_file) {
                 (true, Some(_)) => bail!("Choisissez --password ou --key-file, pas les deux"),
-                (true, None) => Some(("password".into(), prompt_secret("Mot de passe du compte sur la cible : ")?.into_bytes())),
+                (true, None) => Some((
+                    "password".into(),
+                    prompt_secret("Mot de passe du compte sur la cible : ")?.into_bytes(),
+                )),
                 (false, Some(path)) => {
                     let text = std::fs::read_to_string(&path).with_context(|| format!("lecture de {path}"))?;
-                    russh::keys::decode_secret_key(&text, None).map_err(|e| anyhow!("clé privée illisible (sans phrase de passe) : {e}"))?;
+                    russh::keys::decode_secret_key(&text, None)
+                        .map_err(|e| anyhow!("clé privée illisible (sans phrase de passe) : {e}"))?;
                     Some(("key".into(), text.into_bytes()))
                 }
                 (false, None) => None,
             };
             let kind = secret.as_ref().map(|s| s.0.clone()).unwrap_or_else(|| "none".into());
-            let new = model::NewTarget { name: name.clone(), folder, host: host.clone(), port, mode: mode.clone(), account, secret_kind: kind };
+            let new = model::NewTarget {
+                name: name.clone(),
+                folder,
+                host: host.clone(),
+                port,
+                mode: mode.clone(),
+                account,
+                secret_kind: kind,
+            };
             model::create_target(db, new, |id| match &secret {
                 Some((_, plain)) => Ok(Some(state.keys.seal(&format!("cible:{id}"), plain)?)),
                 None => Ok(None),
             })
             .await?;
-            audit::log(db, "console", "cible.creee", json!({ "cible": name, "adresse": format!("{host}:{port}"), "mode": mode })).await?;
+            audit::log(
+                db,
+                "console",
+                "cible.creee",
+                json!({ "cible": name, "adresse": format!("{host}:{port}"), "mode": mode }),
+            )
+            .await?;
             println!("Cible créée. L'empreinte de son serveur sera mémorisée à la première connexion.");
         }
         TargetCmd::List => {
@@ -512,11 +631,26 @@ async fn target_cmd(state: &State, cmd: TargetCmd) -> Result<()> {
 async fn rule_cmd(state: &State, cmd: RuleCmd) -> Result<()> {
     let db = &state.db;
     match cmd {
-        RuleCmd::Add { name, group, targets, sftp, tunnels, record_input, days, hours, expires } => {
+        RuleCmd::Add {
+            name,
+            group,
+            targets,
+            sftp,
+            tunnels,
+            record_input,
+            days,
+            hours,
+            expires,
+        } => {
             let group_id = model::group_id(db, &group).await?;
             let mut ids = Vec::new();
             for t in &targets {
-                ids.push(model::target_by_name(db, t).await?.ok_or_else(|| anyhow!("Cible inconnue : {t}"))?.id);
+                ids.push(
+                    model::target_by_name(db, t)
+                        .await?
+                        .ok_or_else(|| anyhow!("Cible inconnue : {t}"))?
+                        .id,
+                );
             }
             if ids.is_empty() {
                 bail!("Indiquez au moins une cible (--targets a,b)");
@@ -531,7 +665,12 @@ async fn rule_cmd(state: &State, cmd: RuleCmd) -> Result<()> {
             let expires_at = match expires {
                 Some(d) => {
                     let date = chrono::NaiveDate::parse_from_str(&d, "%Y-%m-%d").map_err(|_| anyhow!("Date : AAAA-MM-JJ"))?;
-                    let end = date.and_hms_opt(23, 59, 59).unwrap().and_local_timezone(chrono::Local).single().ok_or_else(|| anyhow!("date ambiguë"))?;
+                    let end = date
+                        .and_hms_opt(23, 59, 59)
+                        .unwrap()
+                        .and_local_timezone(chrono::Local)
+                        .single()
+                        .ok_or_else(|| anyhow!("date ambiguë"))?;
                     Some(end.with_timezone(&chrono::Utc))
                 }
                 None => None,
@@ -539,11 +678,26 @@ async fn rule_cmd(state: &State, cmd: RuleCmd) -> Result<()> {
             let days = days.as_deref().map(parse_days).transpose()?.unwrap_or(127);
             model::create_rule(
                 db,
-                model::NewRule { name: name.clone(), group: group_id, targets: ids, allow_sftp: sftp, allow_tunnels: tunnels, record_input, days, hours, expires_at },
+                model::NewRule {
+                    name: name.clone(),
+                    group: group_id,
+                    targets: ids,
+                    allow_sftp: sftp,
+                    allow_tunnels: tunnels,
+                    record_input,
+                    days,
+                    hours,
+                    expires_at,
+                },
             )
             .await?;
-            audit::log(db, "console", "regle.creee", json!({ "regle": name, "groupe": group, "cibles": targets, "sftp": sftp, "tunnels": tunnels, "frappe": record_input }))
-                .await?;
+            audit::log(
+                db,
+                "console",
+                "regle.creee",
+                json!({ "regle": name, "groupe": group, "cibles": targets, "sftp": sftp, "tunnels": tunnels, "frappe": record_input }),
+            )
+            .await?;
             println!("Règle créée.");
         }
     }
