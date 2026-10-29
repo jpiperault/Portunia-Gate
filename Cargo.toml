@@ -1,0 +1,28 @@
+[package]
+name = "heimdia"
+version = "0.1.0"
+description = "Bastion SSH de Portunia : accès contrôlés, coffre, enregistrement et journal d'audit"
+edition = "2021"
+publish = false
+
+[dependencies]
+anyhow = "1"
+argon2 = { version = "0.5", default-features = false, features = ["alloc", "password-hash"] }
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
+clap = { version = "4", features = ["derive"] }
+qrcode = { version = "0.14", default-features = false }
+ring = "0.17"
+rpassword = "7"
+# Même moteur SSH que Portunia (ring, sans aws-lc).
+russh = { version = "0.64", default-features = false, features = ["ring", "rsa", "flate2"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "uuid", "chrono", "json", "migrate", "macros"] }
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[profile.release]
+strip = true

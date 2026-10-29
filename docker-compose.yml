@@ -1,0 +1,36 @@
+# Heimdia, taille « petite » : le bastion et sa base sur un même serveur.
+# Avant le premier lancement : cp .env.example .env, puis remplissez .env.
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: heimdia
+      POSTGRES_USER: heimdia
+      POSTGRES_PASSWORD: ${HEIMDIA_DB_PASSWORD:?définissez HEIMDIA_DB_PASSWORD dans .env}
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U heimdia -d heimdia"]
+      interval: 5s
+      retries: 20
+
+  heimdia:
+    build: .
+    image: heimdia:${HEIMDIA_VERSION:-dev}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      HEIMDIA_DATABASE_URL: postgres://heimdia:${HEIMDIA_DB_PASSWORD}@postgres/heimdia
+      TZ: ${TZ:-Europe/Paris}
+    ports:
+      - "${HEIMDIA_SSH_PORT:-2222}:2222"
+    volumes:
+      - donnees:/var/lib/heimdia
+
+volumes:
+  postgres:
+  donnees:
