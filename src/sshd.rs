@@ -207,6 +207,26 @@ impl server::Handler for Conn {
             self.fail("mot de passe", "compte inconnu ou désactivé").await;
             return Ok(Auth::reject());
         };
+        // Jeton à usage unique remis par l'API à Portunia, pour ce compte et ce serveur.
+        if password.starts_with("hj1_") {
+            let (_, wanted) = split_login(requested);
+            let target = match wanted {
+                Some(name) => model::target_by_name(&self.state.db, name).await?.map(|t| t.id),
+                None => None,
+            };
+            if crate::api::consume_ticket(&self.state.db, password, user.id, target).await? {
+                audit::note(
+                    &self.state.db,
+                    &user.login,
+                    "auth.reussie",
+                    json!({ "facteurs": ["jeton Portunia"], "adresse": self.addr }),
+                )
+                .await;
+                return Ok(Auth::Accept);
+            }
+            self.fail("jeton", "jeton invalide, expiré ou déjà utilisé").await;
+            return Ok(Auth::reject());
+        }
         let policy = user.policy(&self.state.db).await?;
         if !policy.could_use(&self.factors, Factor::Password) {
             return Ok(Auth::reject());

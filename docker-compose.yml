@@ -26,8 +26,10 @@ services:
     environment:
       HEIMDIA_DATABASE_URL: postgres://heimdia:${HEIMDIA_DB_PASSWORD}@postgres/heimdia
       TZ: ${TZ:-Europe/Paris}
+      HEIMDIA_SSH_PUBLIC_PORT: ${HEIMDIA_SSH_PORT:-2222}
     ports:
       - "${HEIMDIA_SSH_PORT:-2222}:2222"
+      - "${HEIMDIA_API_PORT:-8443}:8443"
     volumes:
       - donnees:/var/lib/heimdia
 

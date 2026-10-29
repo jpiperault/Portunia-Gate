@@ -25,7 +25,7 @@ pub fn random<const N: usize>() -> Result<[u8; N]> {
 }
 
 /// Écrit un fichier lisible par le seul propriétaire, sans jamais en écraser un existant.
-fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+pub fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]

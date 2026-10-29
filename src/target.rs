@@ -154,3 +154,53 @@ pub async fn connect(state: &State, target: &Target, creds: &Credentials, actor:
     }
     Ok(handle)
 }
+
+/// Crée une clé ed25519 pour le compte du serveur, l'installe avec le mot de passe donné
+/// une seule fois, puis vérifie qu'elle fonctionne. Renvoie la clé privée (texte OpenSSH).
+pub async fn install_new_key(state: &State, target: &Target, account: &str, password: &str, actor: &str) -> Result<String> {
+    use russh::keys::ssh_key::{private::Ed25519Keypair, LineEnding};
+    let key = PrivateKey::from(Ed25519Keypair::from_seed(&crate::keys::random::<32>()?));
+    let public = key.public_key().to_openssh().map_err(|e| anyhow!("clé publique : {e}"))?;
+    let line = format!(
+        "{public} heimdia-{}",
+        target.name.replace(|c: char| !c.is_ascii_alphanumeric() && c != '-', "_")
+    );
+    let creds = Credentials::Password {
+        user: account.to_string(),
+        password: password.to_string(),
+    };
+    let handle = match connect(state, target, &creds, actor).await {
+        Ok(h) => h,
+        Err(ConnectError::Refused) => return Err(anyhow!("Mot de passe refusé par {} pour le compte {account}", target.name)),
+        Err(ConnectError::Other(e)) => return Err(e),
+    };
+    let mut channel = handle.channel_open_session().await?;
+    let command = format!("umask 077; mkdir -p ~/.ssh && printf '%s\n' '{line}' >> ~/.ssh/authorized_keys");
+    channel.exec(true, command.as_bytes()).await?;
+    let mut status = None;
+    while let Some(msg) = channel.wait().await {
+        if let russh::ChannelMsg::ExitStatus { exit_status } = msg {
+            status = Some(exit_status);
+        }
+    }
+    let _ = handle.disconnect(russh::Disconnect::ByApplication, "", "fr").await;
+    if status != Some(0) {
+        return Err(anyhow!("Installation de la clé impossible sur {} (code {status:?})", target.name));
+    }
+    let check = Credentials::Key {
+        user: account.to_string(),
+        key: Box::new(key.clone()),
+    };
+    match connect(state, target, &check, actor).await {
+        Ok(h) => {
+            let _ = h.disconnect(russh::Disconnect::ByApplication, "", "fr").await;
+        }
+        Err(_) => {
+            return Err(anyhow!(
+                "La clé a été ajoutée mais {} la refuse (authentification par clé désactivée ?)",
+                target.name
+            ))
+        }
+    }
+    Ok(key.to_openssh(LineEnding::LF).map_err(|e| anyhow!("clé : {e}"))?.to_string())
+}

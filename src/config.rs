@@ -9,6 +9,10 @@ pub struct Config {
     pub data_dir: PathBuf,
     /// Écoute SSH : HEIMDIA_SSH_LISTEN (par défaut 0.0.0.0:2222).
     pub ssh_listen: String,
+    /// Écoute de l'API HTTPS pour Portunia : HEIMDIA_API_LISTEN (par défaut 0.0.0.0:8443).
+    pub api_listen: String,
+    /// Port SSH vu des utilisateurs (redirection Docker) : HEIMDIA_SSH_PUBLIC_PORT.
+    pub ssh_public_port: u16,
 }
 
 impl Config {
@@ -21,6 +25,11 @@ impl Config {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| "/var/lib/heimdia".into()),
             ssh_listen: std::env::var("HEIMDIA_SSH_LISTEN").unwrap_or_else(|_| "0.0.0.0:2222".into()),
+            api_listen: std::env::var("HEIMDIA_API_LISTEN").unwrap_or_else(|_| "0.0.0.0:8443".into()),
+            ssh_public_port: std::env::var("HEIMDIA_SSH_PUBLIC_PORT")
+                .ok()
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(2222),
         })
     }
 

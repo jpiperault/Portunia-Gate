@@ -49,6 +49,8 @@ pub struct User {
     pub totp_last_step: i64,
     pub auth_policy: Option<String>,
     pub disabled: bool,
+    pub must_change_password: bool,
+    pub totp_pending: Option<Vec<u8>>,
 }
 
 impl User {
@@ -60,7 +62,15 @@ impl User {
     }
 }
 
-const USER_COLUMNS: &str = "id, login, display_name, role, password_hash, totp_secret, totp_last_step, auth_policy, disabled";
+const USER_COLUMNS: &str =
+    "id, login, display_name, role, password_hash, totp_secret, totp_last_step, auth_policy, disabled, must_change_password, totp_pending";
+
+pub async fn user_by_id(db: &PgPool, id: Uuid) -> Result<Option<User>> {
+    Ok(sqlx::query_as(&format!("SELECT {USER_COLUMNS} FROM users WHERE id = $1"))
+        .bind(id)
+        .fetch_optional(db)
+        .await?)
+}
 
 pub async fn user_by_login(db: &PgPool, login: &str) -> Result<Option<User>> {
     Ok(sqlx::query_as(&format!("SELECT {USER_COLUMNS} FROM users WHERE login = $1"))
@@ -221,6 +231,13 @@ impl Target {
 
 const TARGET_COLUMNS: &str = "id, name, folder, host, port, mode, account, secret_kind, secret, host_key";
 
+pub async fn target_by_id(db: &PgPool, id: Uuid) -> Result<Option<Target>> {
+    Ok(sqlx::query_as(&format!("SELECT {TARGET_COLUMNS} FROM targets WHERE id = $1"))
+        .bind(id)
+        .fetch_optional(db)
+        .await?)
+}
+
 pub async fn target_by_name(db: &PgPool, name: &str) -> Result<Option<Target>> {
     Ok(
         sqlx::query_as(&format!("SELECT {TARGET_COLUMNS} FROM targets WHERE lower(name) = lower($1)"))
@@ -313,21 +330,31 @@ struct RuleRow {
 
 impl RuleRow {
     fn active_now(&self) -> bool {
-        let now = Local::now();
-        if self.expires_at.is_some_and(|e| e <= Utc::now()) {
-            return false;
-        }
-        let day_bit = 1i16 << now.weekday().num_days_from_monday();
-        if self.days & day_bit == 0 {
-            return false;
-        }
-        let hour = now.hour() as i16;
-        match (self.hour_from, self.hour_to) {
-            (Some(from), Some(to)) if from < to => hour >= from && hour < to,
-            // Plage qui passe minuit (22 h - 6 h).
-            (Some(from), Some(to)) => hour >= from || hour < to,
-            _ => true,
-        }
+        rule_state(self.days, self.hour_from, self.hour_to, self.expires_at) == "active"
+    }
+}
+
+/// État d'une règle en ce moment : « active », « hors_plage » ou « expiree ».
+pub fn rule_state(days: i16, hour_from: Option<i16>, hour_to: Option<i16>, expires_at: Option<DateTime<Utc>>) -> &'static str {
+    let now = Local::now();
+    if expires_at.is_some_and(|e| e <= Utc::now()) {
+        return "expiree";
+    }
+    let day_bit = 1i16 << now.weekday().num_days_from_monday();
+    if days & day_bit == 0 {
+        return "hors_plage";
+    }
+    let hour = now.hour() as i16;
+    let inside = match (hour_from, hour_to) {
+        (Some(from), Some(to)) if from < to => hour >= from && hour < to,
+        // Plage qui passe minuit (22 h - 6 h).
+        (Some(from), Some(to)) => hour >= from || hour < to,
+        _ => true,
+    };
+    if inside {
+        "active"
+    } else {
+        "hors_plage"
     }
 }
 
@@ -425,15 +452,19 @@ pub async fn create_rule(db: &PgPool, r: NewRule) -> Result<Uuid> {
 // ---------- Sessions ----------
 
 pub async fn session_start(db: &PgPool, id: Uuid, user: Uuid, target: Uuid, kind: &str, detail: &str, client: &str) -> Result<()> {
-    sqlx::query("INSERT INTO sessions (id, user_id, target_id, kind, detail, client_addr) VALUES ($1, $2, $3, $4, $5, $6)")
-        .bind(id)
-        .bind(user)
-        .bind(target)
-        .bind(kind)
-        .bind(detail)
-        .bind(client)
-        .execute(db)
-        .await?;
+    // Les noms sont copiés : l'historique reste lisible si le compte ou le serveur est supprimé.
+    sqlx::query(
+        "INSERT INTO sessions (id, user_id, target_id, kind, detail, client_addr, user_login, target_name)
+         VALUES ($1, $2, $3, $4, $5, $6, (SELECT login FROM users WHERE id = $2), (SELECT name FROM targets WHERE id = $3))",
+    )
+    .bind(id)
+    .bind(user)
+    .bind(target)
+    .bind(kind)
+    .bind(detail)
+    .bind(client)
+    .execute(db)
+    .await?;
     Ok(())
 }
 
@@ -463,6 +494,7 @@ pub struct SessionRow {
     pub target: String,
     pub kind: String,
     pub detail: String,
+    pub client_addr: String,
     pub started_at: DateTime<Utc>,
     pub ended_at: Option<DateTime<Utc>>,
     pub recording: Option<String>,
@@ -471,9 +503,9 @@ pub struct SessionRow {
 
 pub async fn last_sessions(db: &PgPool, count: i64) -> Result<Vec<SessionRow>> {
     Ok(sqlx::query_as(
-        "SELECT s.id, u.login, t.name AS target, s.kind, s.detail, s.started_at, s.ended_at, s.recording, s.bytes
-         FROM sessions s JOIN users u ON u.id = s.user_id JOIN targets t ON t.id = s.target_id
-         ORDER BY s.started_at DESC LIMIT $1",
+        "SELECT s.id, s.user_login AS login, s.target_name AS target, s.kind, s.detail, s.client_addr, s.started_at, s.ended_at,
+                s.recording, s.bytes
+         FROM sessions s ORDER BY s.started_at DESC LIMIT $1",
     )
     .bind(count)
     .fetch_all(db)

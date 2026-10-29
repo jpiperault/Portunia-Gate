@@ -17,6 +17,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 COPY --from=build /heimdia /usr/local/bin/heimdia
 USER heimdia
 VOLUME /var/lib/heimdia
-EXPOSE 2222
+EXPOSE 2222 8443
 ENTRYPOINT ["heimdia"]
 CMD ["serve"]

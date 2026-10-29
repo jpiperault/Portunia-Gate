@@ -3,6 +3,7 @@
 //! `heimdia serve` lance le service ; les autres commandes administrent le bastion
 //! depuis le serveur (`docker compose exec heimdia heimdia …`).
 
+mod api;
 mod audit;
 mod auth;
 mod config;
@@ -11,6 +12,7 @@ mod model;
 mod recording;
 mod sshd;
 mod target;
+mod tls;
 
 use std::{io::IsTerminal, sync::Arc};
 
@@ -321,7 +323,12 @@ async fn main() -> Result<()> {
                 json!({ "version": env!("CARGO_PKG_VERSION") }),
             )
             .await?;
-            sshd::run(state).await
+            // Installations antérieures à l'API : le certificat est créé au premier démarrage.
+            if tls::create_missing(&state.config.data_dir, &tls_names())? {
+                tracing::info!("certificat de l'API créé, empreinte {}", tls::fingerprint(&state.config.data_dir)?);
+            }
+            tokio::try_join!(sshd::run(state.clone()), api::run(state.clone()))?;
+            Ok(())
         }
         Command::User(cmd) => user_cmd(&state, cmd).await,
         Command::Group(cmd) => group_cmd(&state, cmd).await,
@@ -392,10 +399,28 @@ async fn main() -> Result<()> {
     }
 }
 
+/// Noms du certificat de l'API : HEIMDIA_TLS_NAMES (séparés par des virgules), sinon « heimdia ».
+/// Portunia vérifie l'empreinte du certificat, pas son nom.
+fn tls_names() -> Vec<String> {
+    std::env::var("HEIMDIA_TLS_NAMES")
+        .ok()
+        .map(|v| {
+            v.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| vec!["heimdia".into(), "localhost".into()])
+}
+
 async fn init(config: Config, admin: &str, no_admin: bool) -> Result<()> {
     println!("Heimdia {}, première installation\n", env!("CARGO_PKG_VERSION"));
     for created in Keys::create_missing(&config.data_dir)? {
         println!("✓ Créé : {created}");
+    }
+    if tls::create_missing(&config.data_dir, &tls_names())? {
+        println!("✓ Créé : certificat de l'API");
     }
     std::fs::create_dir_all(config.recordings_dir())?;
     let db = connect_db(&config).await?;
@@ -409,6 +434,7 @@ async fn init(config: Config, admin: &str, no_admin: bool) -> Result<()> {
     let sig = base64::engine::general_purpose::STANDARD.encode(state.keys.signature_public_key());
     model::set_setting(&state.db, "signature_publique", json!(sig)).await?;
     println!("✓ Clé d'hôte SSH        {}", state.keys.host_fingerprint());
+    println!("✓ Certificat de l'API   SHA256 {}", tls::fingerprint(&state.config.data_dir)?);
     println!("✓ Signature des enregistrements : clé publique {sig}");
     println!(
         "  À SAUVEGARDER hors du serveur : {}",
