@@ -1,14 +1,15 @@
 [package]
 name = "heimdia"
-version = "0.6.0"
+version = "0.7.0"
 description = "Bastion SSH de Portunia : accès contrôlés, coffre, enregistrement et journal d'audit"
 edition = "2021"
 publish = false
 
 [dependencies]
 anyhow = "1"
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
 axum-server = { version = "0.7", features = ["tls-rustls-no-provider"] }
+ureq = { version = "2", default-features = false, features = ["tls"] }
 argon2 = { version = "0.5", default-features = false, features = ["alloc", "password-hash"] }
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }

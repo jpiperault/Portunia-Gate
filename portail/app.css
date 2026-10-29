@@ -1,0 +1,72 @@
+/* Portail web de Heimdia : connexion, liste des serveurs, terminal. Clair ou sombre selon le système. */
+:root {
+  --bg: #eef1f5; --card: #ffffff; --line: #dde1e8; --text: #1b1f27; --muted: #5e6675; --accent: #2563d6; --accent-ink: #ffffff;
+  --field: #ffffff; --danger: #c23b3b; --danger-soft: #f8dfdf; --warn: #b5650f; --warn-soft: #fbead6; --ok: #1d8a57;
+  --ssh-bg: #d7f2e4; --ssh: #17633f; --rdp-bg: #dbe7fb; --rdp: #1f4fa8; --term: #111215;
+  --ui: 'Segoe UI Variable', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  --mono: 'Cascadia Mono', Consolas, 'SF Mono', ui-monospace, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f1115; --card: #171a20; --line: #262a33; --text: #e9ebef; --muted: #9aa1ad; --accent: #6aa5ff; --accent-ink: #0e1a2e;
+    --field: #0f1115; --danger: #ff7b7b; --danger-soft: #3d1c1e; --warn: #f0a35b; --warn-soft: #3a2a14; --ok: #4cc38a;
+    --ssh-bg: #1f3b2e; --ssh: #7fdbaa; --rdp-bg: #1f2f4a; --rdp: #8fb8ff;
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { margin: 0; height: 100%; }
+body { background: var(--bg); color: var(--text); font: 14px/1.45 var(--ui); }
+button, input, select { font: inherit; color: inherit; }
+button { cursor: pointer; }
+a { color: var(--accent); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.loading { text-align: center; color: var(--muted); padding: 60px 16px; }
+
+/* Connexion */
+.center { min-height: 100%; display: grid; place-items: center; padding: 40px 16px; }
+.card { width: 100%; max-width: 380px; background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 26px 24px; display: flex; flex-direction: column; gap: 14px; box-shadow: 0 10px 40px rgb(0 0 0 / .08); }
+.card h1 { margin: 0; font-size: 18px; }
+.brand { display: flex; align-items: center; gap: 10px; font-weight: 650; font-size: 15px; }
+.mark { width: 28px; height: 28px; border-radius: 7px; background: var(--accent); color: var(--accent-ink); display: grid; place-items: center; font-weight: 700; }
+.legal { font-size: 12px; color: var(--muted); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; margin: 0; white-space: pre-line; }
+label { display: flex; flex-direction: column; gap: 5px; font-size: 13px; }
+input { padding: 9px 11px; border-radius: 8px; border: 1px solid var(--line); background: var(--field); font-size: 14px; }
+input.code { letter-spacing: .3em; font-family: var(--mono); }
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 1px solid var(--line); background: var(--card); border-radius: 8px; padding: 7px 12px; font-size: 13px; text-decoration: none; color: var(--text); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; padding: 9px 12px; }
+.btn:disabled { opacity: .6; cursor: wait; }
+.error { color: var(--danger); font-size: 13px; margin: 0; }
+.foot { font-size: 11.5px; color: var(--muted); text-align: center; margin: 0; }
+
+/* Liste des serveurs */
+.top { display: flex; align-items: center; gap: 12px; padding: 12px 18px; border-bottom: 1px solid var(--line); background: var(--card); flex-wrap: wrap; position: sticky; top: 0; z-index: 2; }
+.top .grow, .sbar .grow { flex: 1; }
+.timer { font-size: 12px; padding: 3px 9px; border-radius: 999px; background: var(--bg); border: 1px solid var(--line); color: var(--muted); font-variant-numeric: tabular-nums; }
+.who { font-size: 12.5px; color: var(--muted); }
+.home { padding: 18px; display: flex; flex-direction: column; gap: 14px; max-width: 1100px; margin: 0 auto; }
+.home input[type=search] { max-width: 420px; width: 100%; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; }
+.fold { grid-column: 1 / -1; font-size: 11px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); padding-top: 6px; }
+.srv { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; border-radius: 10px; background: var(--card); border: 1px solid var(--line); text-align: left; }
+.srv:hover:not(:disabled) { border-color: var(--accent); }
+.srv:disabled { opacity: .55; cursor: not-allowed; }
+.srv b { font-size: 14px; overflow-wrap: anywhere; }
+.srv small { color: var(--muted); font-size: 11.5px; }
+.tags { display: flex; gap: 6px; flex-wrap: wrap; }
+.tag { font-size: 10px; font-weight: 600; padding: 1px 6px; border-radius: 4px; background: var(--warn-soft); color: var(--warn); }
+.tag.ssh { background: var(--ssh-bg); color: var(--ssh); }
+.tag.rdp { background: var(--rdp-bg); color: var(--rdp); }
+.tag.plain { background: var(--bg); color: var(--muted); }
+.empty { color: var(--muted); }
+
+/* Terminal */
+.session-page { display: flex; flex-direction: column; height: 100%; overflow: hidden; background: var(--term); }
+.sbar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: var(--card); border-bottom: 1px solid var(--line); flex-wrap: wrap; font-size: 13px; }
+.rec { display: inline-flex; align-items: center; gap: 6px; padding: 2px 9px; border-radius: 999px; background: var(--danger-soft); color: var(--danger); font-weight: 600; font-size: 11.5px; }
+.rec i { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.term { flex: 1; min-height: 0; padding: 8px 4px 4px 10px; }
+.notice { position: fixed; right: max(16px, env(safe-area-inset-right, 0px)); bottom: max(16px, env(safe-area-inset-bottom, 0px)); max-width: 340px; background: var(--card); color: var(--text); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; box-shadow: 0 10px 30px rgb(0 0 0 / .35); z-index: 5; }
+.notice-actions { display: flex; gap: 8px; flex-wrap: wrap; }

@@ -214,12 +214,17 @@ impl server::Handler for Conn {
                 Some(name) => model::target_by_name(&self.state.db, name).await?.map(|t| t.id),
                 None => None,
             };
-            if crate::api::consume_ticket(&self.state.db, password, user.id, target).await? {
+            if let Some(real) = crate::api::consume_ticket(&self.state.db, password, user.id, target).await? {
+                // Portail web : la connexion vient du bastion lui-même, l'adresse utile est celle du navigateur.
+                let via = if real.is_empty() { "jeton Portunia" } else { "portail web" };
+                if !real.is_empty() {
+                    self.addr = real;
+                }
                 audit::note(
                     &self.state.db,
                     &user.login,
                     "auth.reussie",
-                    json!({ "facteurs": ["jeton Portunia"], "adresse": self.addr }),
+                    json!({ "facteurs": [via], "adresse": self.addr }),
                 )
                 .await;
                 return Ok(Auth::Accept);

@@ -2,7 +2,7 @@
 
 Bastion SSH de [Portunia](https://github.com/jpiperault/Portunia) : les utilisateurs passent par Heimdia pour atteindre les serveurs ; Heimdia vérifie qui ils sont, décide où ils peuvent aller, fournit si besoin le compte du serveur sans le leur montrer, enregistre les sessions et trace tout dans un journal infalsifiable.
 
-> État : **version 0.6, Bureau à distance en rebond** (serveurs Windows ouverts depuis Portunia à travers le bastion), relecture des sessions SSH (0.5). Les modes coffre et enregistré en RDP arrivent ensuite (voir [Feuille de route](#feuille-de-route)).
+> État : **version 0.7, portail web** (serveurs SSH ouverts depuis un navigateur, derrière Cloudflare), Bureau à distance en rebond (0.6), relecture des sessions (0.5). Voir la [Feuille de route](#feuille-de-route).
 
 ## Ce que fait Heimdia
 
@@ -16,6 +16,7 @@ Bastion SSH de [Portunia](https://github.com/jpiperault/Portunia) : les utilisat
 | **Journal d'audit** | Connexions, échecs, sessions, changements d'administration. Chaque événement contient l'empreinte du précédent : une ligne supprimée ou modifiée se voit (`heimdia audit --verify`). |
 | **Portunia** | Extension Heimdia : le bastion s'ajoute dans la barre latérale, ses serveurs s'ouvrent avec un jeton à usage unique, les administrateurs gèrent tout depuis Portunia (serveurs et coffre, comptes, groupes, règles, réglages) et les auditeurs relisent les sessions et le journal. |
 | **Bureau à distance** | Serveurs Windows (RDP) derrière le bastion, ouverts depuis Portunia. Version 0.6 : mode rebond (voir [Bureau à distance](#bureau-à-distance-rdp)). |
+| **Portail web** | Pour qui n'a pas Portunia sous la main : une page de connexion et un terminal dans le navigateur, derrière Cloudflare, sans port ouvert. Activé ou coupé d'un clic dans Portunia (voir [Portail web](#portail-web)). |
 | **Autres clients** | N'importe quel client SSH : OpenSSH, PuTTY, MobaXterm, WinSCP (SFTP). |
 
 ## Installer
@@ -215,6 +216,34 @@ Les serveurs Windows se déclarent comme les autres : Administrer › Serveurs e
 
 Les modes **coffre** (compte Windows fourni par le bastion) et **enregistré**, l'enregistrement des sessions RDP et leur relecture arrivent dans les versions suivantes.
 
+## Portail web
+
+Une page web pour ouvrir ses serveurs SSH depuis n'importe quel navigateur, sans Portunia : connexion, liste des serveurs autorisés, terminal dans un onglet. Elle ne sert pas à l'administration. Le portail passe par le serveur SSH du bastion, avec un jeton à usage unique : mêmes règles, même coffre, même enregistrement, même journal. Une session web se relit dans l'audit comme une autre ; son adresse est suivie de « (web) ».
+
+**Sécurité**
+
+| | |
+|---|---|
+| Exposition | **Cloudflare Tunnel** (conseillé) : le service `cloudflared` ouvre une connexion sortante vers Cloudflare, aucun port entrant. Ou **proxy Cloudflare** : HTTPS sur le port 8446, n'accepte que les adresses de Cloudflare. |
+| Connexion | Mot de passe **et** code toujours exigés, même pour un compte qui s'en passe dans Portunia. Cinq essais par compte et vingt par adresse en dix minutes. Anti-robots **Cloudflare Turnstile** si ses clés sont réglées. |
+| Comptes | Seuls les membres du **groupe choisi** (« Accès web » par défaut). Première connexion et code perdu : pas sur le portail, mais avec Portunia ou l'administrateur. |
+| Session | Cookie « HttpOnly, Secure, SameSite=Strict », 1 heure par défaut ; fermeture après 15 minutes sans frappe (avertissement 90 s avant). |
+| Page | Rien de chargé depuis l'extérieur (sauf Turnstile), politique de contenu stricte, pas d'affichage dans un cadre d'un autre site, adresse publique vérifiée à chaque connexion. |
+| Serveurs | SSH en mode coffre ou enregistré. Les serveurs en rebond (de bout en bout) et le Bureau à distance restent avec Portunia. |
+| Journal | `portail.connexion`, `portail.echec`, `portail.active`, `portail.desactive`, `portail.modifie`, `portail.sessions_fermees`. |
+
+**Mise en place**
+
+1. **Créer le tunnel** dans Cloudflare Zero Trust › Networks › Tunnels › *Create a tunnel* (type Cloudflared), et copier son jeton (la longue suite après `--token`).
+2. **L'installer sur le bastion** : `sudo bash installer.sh portail` (paquet) ou `sudo ./installer.sh portail` (Docker), puis coller le jeton.
+3. **Publier l'adresse** : dans l'onglet *Public Hostname* du tunnel, ajouter l'adresse (ex. `acces.votre-domaine.fr`), type **HTTP**, URL `localhost:8445` (paquet) ou `heimdia:8445` (Docker).
+4. **Conseillé : Cloudflare Access** sur cette adresse (compte de l'entreprise exigé avant même la page de connexion), et **Turnstile** (clés à saisir dans Portunia).
+5. **Activer** dans Portunia : menu **⋯** du bastion › **Administrer** › **Portail web** : adresse publique, groupe autorisé, durées, copier-coller, puis l'interrupteur. Créer le groupe et y ajouter les comptes concernés.
+
+Couper le portail (interrupteur) affiche « Portail fermé » et ferme aussitôt les sessions web en cours ; **Fermer toutes les sessions web** les ferme sans couper le portail.
+
+Proxy Cloudflare au lieu du tunnel : dans `/etc/heimdia/heimdia.env`, `HEIMDIA_PORTAL_TLS_LISTEN=0.0.0.0:8446` (paquet), ou `HEIMDIA_PORTAL_PORT=0.0.0.0:8446` dans `.env` (Docker), puis redémarrer ; dans Cloudflare, l'adresse proxifiée pointe vers ce port en HTTPS (mode SSL « Full »).
+
 ## Se connecter sans Portunia
 
 ```bash
@@ -277,5 +306,6 @@ Voir aussi [docs/exploitation.md](docs/exploitation.md) : sauvegardes, mise à j
 2. **Intégration Portunia** : API, ajout du bastion dans Portunia, serveurs dans la barre latérale, jetons à usage unique, première connexion, administration complète, clé générée et installée sur les serveurs du coffre. Assistant d'installation (0.3), paquet Debian (0.4).
 3. **Audit** : relecture et recherche (0.5), vue en direct et coupure, vidéo MP4 à la demande, lecteur détachable, conservation réglable avec estimation du disque, syslog et CSV.
 4. **Bureau à distance** : rebond (0.6), puis coffre (le bastion ouvre la session Windows avec le compte du coffre), règles (presse-papiers, son), enregistrement signé et relecture, mode enregistré.
-5. **Exploitation** : sauvegarde intégrée, dépôt apt pour les mises à jour, paquet ARM, imports (Portunia, CSV), console web activable.
-6. **Console maître** : un Heimdia central pour les prestataires, des relais chez les clients.
+5. **Portail web** : SSH dans le navigateur derrière Cloudflare (0.7), puis Bureau à distance, clés d'accès (passkeys), personnalisation.
+6. **Exploitation** : sauvegarde intégrée, dépôt apt pour les mises à jour, paquet ARM, imports (Portunia, CSV), console web activable.
+7. **Console maître** : un Heimdia central pour les prestataires, des relais chez les clients.

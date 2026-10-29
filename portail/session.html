@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Session</title>
+<link rel="stylesheet" href="/static/xterm.css">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body class="session-page">
+<header class="sbar">
+  <b id="nom"></b>
+  <span class="tag" id="mode"></span>
+  <span class="rec" id="rec" hidden><i></i>Enregistré</span>
+  <span class="grow"></span>
+  <button class="btn" id="copier" type="button">Copier</button>
+  <button class="btn" id="coller" type="button">Coller</button>
+  <a class="btn" href="/">Mes serveurs</a>
+  <button class="btn" id="fermer" type="button">Fermer</button>
+</header>
+<div id="term" class="term"></div>
+<div id="notice" class="notice" hidden>
+  <b id="notice-titre"></b>
+  <span id="notice-texte"></span>
+  <div class="notice-actions" id="notice-actions"></div>
+</div>
+<script src="/static/xterm.js"></script>
+<script src="/static/addon-fit.js"></script>
+<script src="/static/session.js"></script>
+</body>
+</html>

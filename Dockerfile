@@ -5,6 +5,8 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY migrations migrations
 COPY src src
+# Pages du portail web, embarquées dans le binaire.
+COPY portail portail
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
     cargo build --release --locked && cp target/release/heimdia /heimdia

@@ -1,5 +1,6 @@
 # Heimdia, taille « petite » : le bastion et sa base sur un même serveur.
 # Installation : ./installer.sh (crée .env, construit, démarre). Voir README.md.
+# Portail web par Cloudflare Tunnel : ./installer.sh portail (ajoute COMPOSE_PROFILES=portail).
 
 services:
   postgres:
@@ -29,11 +30,30 @@ services:
       # Certificat de l'entreprise (fichiers PEM copiés dans /var/lib/heimdia) ; vide = auto-signé.
       HEIMDIA_TLS_CERT: ${HEIMDIA_TLS_CERT:-}
       HEIMDIA_TLS_KEY: ${HEIMDIA_TLS_KEY:-}
+      # Portail web : HTTP pour cloudflared (réseau interne de Compose, jamais publié),
+      # HTTPS pour le proxy Cloudflare (adresses de Cloudflare seulement).
+      HEIMDIA_PORTAL_LISTEN: 0.0.0.0:8445
+      HEIMDIA_PORTAL_TLS_LISTEN: 0.0.0.0:8446
+      HEIMDIA_TUNNEL_METRICS: cloudflared:20241
     ports:
       - "${HEIMDIA_SSH_PORT:-2222}:2222"
       - "${HEIMDIA_API_PORT:-8443}:8443"
+      # Proxy Cloudflare : HEIMDIA_PORTAL_PORT=0.0.0.0:8446 dans .env pour l'ouvrir au réseau.
+      - "${HEIMDIA_PORTAL_PORT:-127.0.0.1:8446}:8446"
     volumes:
       - donnees:/var/lib/heimdia
+
+  # Cloudflare Tunnel : connexion sortante vers Cloudflare, aucun port entrant.
+  # Dans Cloudflare Zero Trust, le nom public du tunnel pointe vers http://heimdia:8445.
+  cloudflared:
+    image: cloudflare/cloudflared:2026.9.1
+    profiles: ["portail"]
+    restart: unless-stopped
+    command: tunnel --no-autoupdate --metrics 0.0.0.0:20241 run
+    environment:
+      TUNNEL_TOKEN: ${HEIMDIA_TUNNEL_TOKEN:-}
+    depends_on:
+      - heimdia
 
 volumes:
   postgres:

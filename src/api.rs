@@ -110,6 +110,8 @@ pub async fn run(state: Arc<State>) -> anyhow::Result<()> {
         .route("/api/v1/admin/journal.csv", get(admin_journal_csv))
         .route("/api/v1/admin/sessions", get(admin_sessions))
         .route("/api/v1/admin/reglages", get(admin_settings).put(admin_settings_update))
+        .route("/api/v1/admin/portail", get(admin_portal).put(admin_portal_update))
+        .route("/api/v1/admin/portail/fermer-sessions", post(admin_portal_close))
         .route("/api/v1/audit/sessions", get(audit_sessions))
         .route("/api/v1/audit/sessions/{id}/enregistrement", get(audit_recording))
         .with_state(api);
@@ -457,14 +459,7 @@ async fn ticket(AxState(api): Ctx, headers: HeaderMap, Path(nom): Path<String>) 
             format!("{} ne vous est pas autorisé en ce moment", target.name),
         ));
     }
-    let ticket = format!("hj1_{}", token()?);
-    sqlx::query("DELETE FROM ssh_tickets WHERE expires_at < now()").execute(db).await?;
-    sqlx::query("INSERT INTO ssh_tickets (ticket_hash, user_id, target_id, expires_at) VALUES ($1, $2, $3, now() + interval '60 seconds')")
-        .bind(sha256_hex(ticket.as_bytes()))
-        .bind(user.id)
-        .bind(target.id)
-        .execute(db)
-        .await?;
+    let ticket = issue_ticket(db, user.id, target.id, None).await?;
     Ok(Json(json!({
         "ticket": ticket,
         "utilisateur_ssh": format!("{}%{}", user.login, target.name),
@@ -477,16 +472,36 @@ async fn ticket(AxState(api): Ctx, headers: HeaderMap, Path(nom): Path<String>) 
     })))
 }
 
+/// Jeton SSH à usage unique (60 s) pour ce compte et ce serveur. `client_addr` : adresse
+/// réelle de l'utilisateur quand c'est le portail web qui se connecte pour lui.
+pub async fn issue_ticket(db: &sqlx::PgPool, user: Uuid, target: Uuid, client_addr: Option<&str>) -> anyhow::Result<String> {
+    let ticket = format!("hj1_{}", token()?);
+    sqlx::query("DELETE FROM ssh_tickets WHERE expires_at < now()").execute(db).await?;
+    sqlx::query(
+        "INSERT INTO ssh_tickets (ticket_hash, user_id, target_id, expires_at, client_addr) VALUES ($1, $2, $3, now() + interval '60 seconds', $4)",
+    )
+    .bind(sha256_hex(ticket.as_bytes()))
+    .bind(user)
+    .bind(target)
+    .bind(client_addr)
+    .execute(db)
+    .await?;
+    Ok(ticket)
+}
+
 /// Utilisé par le serveur SSH : un jeton valide pour ce compte et ce serveur est consommé.
-pub async fn consume_ticket(db: &sqlx::PgPool, ticket: &str, user: Uuid, target: Option<Uuid>) -> anyhow::Result<bool> {
-    let Some(target) = target else { return Ok(false) };
-    let done = sqlx::query("DELETE FROM ssh_tickets WHERE ticket_hash = $1 AND user_id = $2 AND target_id = $3 AND expires_at > now()")
-        .bind(sha256_hex(ticket.as_bytes()))
-        .bind(user)
-        .bind(target)
-        .execute(db)
-        .await?;
-    Ok(done.rows_affected() == 1)
+/// Renvoie `Some(adresse réelle)` (vide si le jeton n'en porte pas), `None` s'il est refusé.
+pub async fn consume_ticket(db: &sqlx::PgPool, ticket: &str, user: Uuid, target: Option<Uuid>) -> anyhow::Result<Option<String>> {
+    let Some(target) = target else { return Ok(None) };
+    let done: Option<Option<String>> = sqlx::query_scalar(
+        "DELETE FROM ssh_tickets WHERE ticket_hash = $1 AND user_id = $2 AND target_id = $3 AND expires_at > now() RETURNING client_addr",
+    )
+    .bind(sha256_hex(ticket.as_bytes()))
+    .bind(user)
+    .bind(target)
+    .fetch_optional(db)
+    .await?;
+    Ok(done.map(Option::unwrap_or_default))
 }
 
 // ---------- Administration : cibles ----------
@@ -1519,4 +1534,120 @@ async fn audit_recording(AxState(api): Ctx, headers: HeaderMap, Path(id): Path<U
         "commandes_sensibles": sensitive_commands(state).await?,
         "consultations": views.into_iter().map(|(qui, date, evenement)| json!({ "qui": qui, "date": date, "evenement": evenement })).collect::<Vec<_>>(),
     })))
+}
+
+// ---------- Administration : portail web ----------
+
+async fn admin_portal(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
+    admin(&api, &headers).await?;
+    let state = &api.state;
+    let s = crate::portal::settings(state).await?;
+    let (logins, failures): (i64, i64) = sqlx::query_as(
+        "SELECT count(*) FILTER (WHERE event = 'portail.connexion'), count(*) FILTER (WHERE event = 'portail.echec')
+         FROM audit WHERE at >= date_trunc('day', now())",
+    )
+    .fetch_one(&state.db)
+    .await?;
+    let groups: Vec<String> = sqlx::query_scalar("SELECT name FROM groups ORDER BY name").fetch_all(&state.db).await?;
+    Ok(Json(json!({
+        "actif": s.enabled,
+        "url": s.url,
+        "groupe": s.group,
+        "groupes": groups,
+        "duree_h": s.hours,
+        "inactivite_min": s.idle_min,
+        "presse_papiers": s.clipboard,
+        "turnstile_site": s.turnstile_site,
+        "turnstile_secret_defini": s.turnstile_secret.is_some(),
+        "ecoute": { "tunnel": state.config.portal_listen, "proxy": state.config.portal_tls_listen },
+        "tunnel": crate::portal::tunnel_status(state).await,
+        "sessions_en_cours": state.web.active(),
+        "connexions_jour": logins,
+        "echecs_jour": failures,
+    })))
+}
+
+#[derive(Deserialize)]
+struct PortalBody {
+    actif: Option<bool>,
+    url: Option<String>,
+    groupe: Option<String>,
+    duree_h: Option<i64>,
+    inactivite_min: Option<i64>,
+    presse_papiers: Option<bool>,
+    turnstile_site: Option<String>,
+    /// Vide : efface le secret ; absent : le garde.
+    turnstile_secret: Option<String>,
+}
+
+async fn admin_portal_update(AxState(api): Ctx, headers: HeaderMap, Json(body): Json<PortalBody>) -> ApiResult {
+    let actor = admin(&api, &headers).await?;
+    let state = &api.state;
+    let db = &state.db;
+    let mut changed = serde_json::Map::new();
+    if let Some(url) = body.url {
+        let url = url.trim().trim_end_matches('/').to_string();
+        if !url.is_empty() && !url.starts_with("https://") {
+            return Err(err(StatusCode::BAD_REQUEST, "Adresse publique : https://… (Cloudflare fournit le certificat)"));
+        }
+        model::set_setting(db, "portail_url", json!(url)).await?;
+        changed.insert("url".into(), json!(url));
+    }
+    if let Some(g) = body.groupe {
+        model::set_setting(db, "portail_groupe", json!(g.trim())).await?;
+        changed.insert("groupe".into(), json!(g.trim()));
+    }
+    if let Some(h) = body.duree_h {
+        if !(1..=12).contains(&h) {
+            return Err(err(StatusCode::BAD_REQUEST, "Durée d'une session web : 1 à 12 heures"));
+        }
+        model::set_setting(db, "portail_duree_h", json!(h)).await?;
+        changed.insert("duree_h".into(), json!(h));
+    }
+    if let Some(m) = body.inactivite_min {
+        if !(5..=240).contains(&m) {
+            return Err(err(StatusCode::BAD_REQUEST, "Inactivité : 5 à 240 minutes"));
+        }
+        model::set_setting(db, "portail_inactivite_min", json!(m)).await?;
+        changed.insert("inactivite_min".into(), json!(m));
+    }
+    if let Some(v) = body.presse_papiers {
+        model::set_setting(db, "portail_presse_papiers", json!(v)).await?;
+        changed.insert("presse_papiers".into(), json!(v));
+    }
+    if let Some(site) = body.turnstile_site {
+        model::set_setting(db, "portail_turnstile_site", json!(site.trim())).await?;
+        changed.insert("turnstile_site".into(), json!(site.trim()));
+    }
+    if let Some(secret) = body.turnstile_secret {
+        let sealed = if secret.trim().is_empty() { String::new() } else { crate::portal::seal_turnstile(state, secret.trim())? };
+        model::set_setting(db, "portail_turnstile_secret", json!(sealed)).await?;
+        changed.insert("turnstile_secret".into(), json!(if sealed.is_empty() { "effacé" } else { "changé" }));
+    }
+    if let Some(on) = body.actif {
+        let was = crate::portal::settings(state).await?.enabled;
+        model::set_setting(db, "portail_actif", json!(on)).await?;
+        if was != on {
+            if !on {
+                // Désactivé : plus de connexion, et les terminaux web ouverts se ferment.
+                sqlx::query("DELETE FROM web_sessions").execute(db).await?;
+                state.web.close_all();
+            }
+            audit::note(db, &actor.login, if on { "portail.active" } else { "portail.desactive" }, json!({})).await;
+        }
+    }
+    if !changed.is_empty() {
+        audit::note(db, &actor.login, "portail.modifie", Value::Object(changed)).await;
+    }
+    Ok(Json(json!({ "etat": "ok" })))
+}
+
+async fn admin_portal_close(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
+    let actor = admin(&api, &headers).await?;
+    let db = &api.state.db;
+    let open = api.state.web.active();
+    sqlx::query("DELETE FROM web_sessions").execute(db).await?;
+    api.state.web.close_all();
+    audit::note(db, &actor.login, "portail.sessions_fermees", json!({ "terminaux": open })).await;
+    Ok(Json(json!({ "etat": "ok", "fermees": open })))
 }

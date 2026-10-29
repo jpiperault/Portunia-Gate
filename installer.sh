@@ -7,6 +7,7 @@
 #   ./installer.sh info              informations à saisir dans Portunia
 #   ./installer.sh mise-a-jour       installe la dernière version et redémarre le bastion
 #   ./installer.sh admin LOGIN       crée un administrateur de secours (mot de passe provisoire)
+#   ./installer.sh portail          installe Cloudflare Tunnel pour le portail web (jeton demandé)
 #
 # Sans terminal (automatisation), les réponses viennent des variables HEIMDIA_NOM, HEIMDIA_ADMIN,
 # HEIMDIA_SSH_PORT, HEIMDIA_API_PORT et TZ, ou des valeurs par défaut.
@@ -47,15 +48,15 @@ while [ $# -gt 0 ]; do
   case $1 in
     --docker) MODE=docker ;;
     --paquet) PACKAGE=$(readlink -f "${2:?--paquet attend un fichier .deb}"); shift ;;
-    info | mise-a-jour | admin) ACTION=$1; ACTION_ARG=${2:-}; [ -z "$ACTION_ARG" ] || shift ;;
-    *) die "Usage : $0 [--docker] [--paquet FICHIER.deb] [info | mise-a-jour | admin IDENTIFIANT]" ;;
+    info | mise-a-jour | admin | portail) ACTION=$1; ACTION_ARG=${2:-}; [ -z "$ACTION_ARG" ] || shift ;;
+    *) die "Usage : $0 [--docker] [--paquet FICHIER.deb] [info | mise-a-jour | admin IDENTIFIANT | portail]" ;;
   esac
   shift
 done
 
 if [ "$(id -u)" -ne 0 ]; then
   command -v sudo >/dev/null || die "Lancez l'assistant en root."
-  exec sudo --preserve-env=HEIMDIA_NOM,HEIMDIA_ADMIN,HEIMDIA_SSH_PORT,HEIMDIA_API_PORT,TZ,HEIMDIA_RELEASES -- "$SELF" "${ARGS[@]}"
+  exec sudo --preserve-env=HEIMDIA_NOM,HEIMDIA_ADMIN,HEIMDIA_SSH_PORT,HEIMDIA_API_PORT,TZ,HEIMDIA_RELEASES,HEIMDIA_TUNNEL_TOKEN -- "$SELF" "${ARGS[@]}"
 fi
 BACKUP_OWNER=${SUDO_USER:-root}
 
@@ -446,18 +447,68 @@ info() {
   summary
 }
 
+# ---------- Portail web (Cloudflare Tunnel) ----------
+
+# Remplace ou ajoute un réglage du fichier .env (mode Docker).
+set_env() {
+  if grep -q "^$1=" "$ENV_FILE"; then sed -i "s|^$1=.*|$1=$2|" "$ENV_FILE"; else echo "$1=$2" >>"$ENV_FILE"; fi
+}
+
+# cloudflared depuis le dépôt de Cloudflare (mis à jour avec le système).
+install_cloudflared() {
+  if command -v cloudflared >/dev/null; then ok "cloudflared déjà installé"; return; fi
+  install -d -m 755 /usr/share/keyrings
+  curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg -o /usr/share/keyrings/cloudflare-main.gpg ||
+    die "Téléchargement de la clé du dépôt Cloudflare impossible."
+  echo "deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared any main" \
+    >/etc/apt/sources.list.d/cloudflared.list
+  { apt-get update -qq && apt-get install -y -qq cloudflared; } >/dev/null || die "Installation de cloudflared impossible."
+  ok "cloudflared installé (dépôt Cloudflare)"
+}
+
+# Tunnel sortant vers Cloudflare pour le portail web : aucun port entrant à ouvrir.
+setup_portal() {
+  echo "${B}Heimdia — portail web par Cloudflare Tunnel${N}"
+  echo "  Dans Cloudflare Zero Trust › Networks › Tunnels, créez un tunnel « Cloudflared »,"
+  echo "  puis copiez le jeton de sa commande d'installation (la longue suite après --token)."
+  local token=${HEIMDIA_TUNNEL_TOKEN:-} service
+  if [ -z "$token" ] && interactive; then read -r -s -p "  Jeton du tunnel : " token; echo; fi
+  token=$(tr -d '[:space:]' <<<"$token")
+  [ -n "$token" ] || die "Jeton du tunnel manquant."
+  [[ "$token" =~ ^[A-Za-z0-9+/=_-]+$ ]] || die "Ce jeton ne ressemble pas à un jeton de tunnel Cloudflare."
+  if [ "$MODE" = docker ]; then
+    set_env HEIMDIA_TUNNEL_TOKEN "$token"
+    set_env COMPOSE_PROFILES portail
+    local out
+    out=$(compose up -d 2>&1) || { echo "$out"; die "Le tunnel ne démarre pas."; }
+    service=heimdia:8445
+  else
+    install_cloudflared
+    cloudflared service uninstall >/dev/null 2>&1 || true
+    cloudflared service install "$token" >/dev/null 2>&1 || die "Installation du service cloudflared impossible."
+    service=localhost:8445
+  fi
+  ok "Tunnel installé : connexion sortante vers Cloudflare, aucun port à ouvrir"
+  echo
+  echo "  Dans Cloudflare, onglet « Public Hostname » du tunnel : ajoutez votre adresse"
+  echo "  (ex. acces.votre-domaine.fr), type ${B}HTTP${N}, URL ${B}$service${N}."
+  echo "  Puis dans Portunia : Administrer › Portail web › activez le portail."
+}
+
 menu() {
   echo "${B}Heimdia est déjà installé${N} ${D}($([ "$MODE" = docker ] && echo "Docker, $DIR" || echo "paquet Debian"))${N}"
   echo
   echo "  1) Afficher les informations pour Portunia"
   echo "  2) Mettre à jour"
   echo "  3) Créer un administrateur (mot de passe provisoire)"
-  echo "  4) Quitter"
+  echo "  4) Installer le portail web (Cloudflare Tunnel)"
+  echo "  5) Quitter"
   echo
   case $(ask "Votre choix" 1) in
     1) info ;;
     2) update ;;
     3) add_admin ;;
+    4) setup_portal ;;
     *) exit 0 ;;
   esac
 }
@@ -479,5 +530,6 @@ case $ACTION in
   info) info ;;
   mise-a-jour) update ;;
   admin) add_admin "$ACTION_ARG" ;;
+  portail) setup_portal ;;
   '') menu ;;
 esac

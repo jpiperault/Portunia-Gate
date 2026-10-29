@@ -9,6 +9,7 @@ mod auth;
 mod config;
 mod keys;
 mod model;
+mod portal;
 mod recording;
 mod replay;
 mod sshd;
@@ -28,6 +29,8 @@ pub struct State {
     pub db: PgPool,
     pub keys: Keys,
     pub config: Config,
+    /// Terminaux ouverts depuis le portail web.
+    pub web: portal::Live,
 }
 
 #[derive(Parser)]
@@ -358,7 +361,7 @@ async fn run(cli: Cli) -> Result<()> {
     }
     let db = connect_db(&config).await?;
     let keys = Keys::load(&config.data_dir)?;
-    let state = Arc::new(State { db, keys, config });
+    let state = Arc::new(State { db, keys, config, web: portal::Live::default() });
 
     match cli.command {
         Command::Init { .. } => unreachable!(),
@@ -390,7 +393,7 @@ async fn run(cli: Cli) -> Result<()> {
             if tls::create_missing(&state.config.data_dir, &tls_names())? {
                 tracing::info!("certificat de l'API créé, empreinte {}", tls::fingerprint(&state.config.data_dir)?);
             }
-            tokio::try_join!(sshd::run(state.clone()), api::run(state.clone()))?;
+            tokio::try_join!(sshd::run(state.clone()), api::run(state.clone()), portal::run(state.clone()))?;
             Ok(())
         }
         Command::User(cmd) => user_cmd(&state, cmd).await,
@@ -489,7 +492,7 @@ async fn init(config: Config, admin: &str, no_admin: bool, provisional: bool, no
     let db = connect_db(&config).await?;
     println!("✓ Base PostgreSQL prête");
     let keys = Keys::load(&config.data_dir)?;
-    let state = State { db, keys, config };
+    let state = State { db, keys, config, web: portal::Live::default() };
     if model::setting(&state.db, "site_id").await?.is_none() {
         model::set_setting(&state.db, "site_id", json!(uuid::Uuid::new_v4())).await?;
     }
