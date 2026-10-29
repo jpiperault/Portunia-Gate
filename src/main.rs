@@ -313,6 +313,11 @@ fn parse_days(text: &str) -> Result<i16> {
 
 #[tokio::main]
 async fn main() {
+    // Sortie lue par « head » ou un pipe fermé : s'arrêter sans erreur, comme les outils Unix.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
     let cli = Cli::parse();
     // Le service trace son activité ; les commandes d'administration n'affichent que les avertissements.
     let default_filter = if matches!(cli.command, Command::Serve) {
@@ -323,6 +328,8 @@ async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| default_filter.into()))
         .with_target(false)
+        // Couleurs au terminal seulement : journalctl et les fichiers reçoivent du texte simple.
+        .with_ansi(std::io::stderr().is_terminal())
         // Traces sur la sortie d'erreur : la sortie standard reste aux commandes d'administration.
         .with_writer(std::io::stderr)
         .init();

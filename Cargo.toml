@@ -1,6 +1,6 @@
 [package]
 name = "heimdia"
-version = "0.3.0"
+version = "0.4.0"
 description = "Bastion SSH de Portunia : accès contrôlés, coffre, enregistrement et journal d'audit"
 edition = "2021"
 publish = false
@@ -27,6 +27,31 @@ tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# Paquet Debian (cargo deb --target x86_64-unknown-linux-musl) : binaire autonome, valable
+# sur Debian 12 et 13 et Ubuntu 22.04 et suivantes. Configuration par installer.sh.
+[package.metadata.deb]
+maintainer = "Julien Piperault <jpiperault@users.noreply.github.com>"
+copyright = "Julien Piperault"
+extended-description = """\
+Les utilisateurs passent par Heimdia pour atteindre les serveurs : contrôle des accès, \
+compte fourni par le coffre, sessions enregistrées et signées, journal d'audit chaîné. \
+S'administre depuis Portunia."""
+section = "net"
+priority = "optional"
+depends = "systemd, passwd, util-linux"
+recommends = "postgresql"
+maintainer-scripts = "debian/"
+assets = [
+    ["target/release/heimdia", "usr/lib/heimdia/heimdia", "755"],
+    ["debian/heimdia.sh", "usr/bin/heimdia", "755"],
+    ["debian/heimdia.service", "usr/lib/systemd/system/heimdia.service", "644"],
+    ["README.md", "usr/share/doc/heimdia/README.md", "644"],
+    ["docs/exploitation.md", "usr/share/doc/heimdia/exploitation.md", "644"],
+]
 
 [profile.release]
 strip = true

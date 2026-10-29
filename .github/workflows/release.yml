@@ -1,0 +1,64 @@
+# Publie une version de Heimdia : à chaque tag vX.Y.Z poussé sur GitHub, compile le paquet
+# Debian (binaire autonome, musl) et crée la release dans le dépôt PUBLIC
+# jpiperault/Heimdia-releases (le code reste privé ici). installer.sh y télécharge
+# heimdia_amd64.deb et vérifie son empreinte dans SHA256SUMS.
+#
+# Secret à définir dans ce dépôt (Settings > Secrets and variables > Actions) :
+#   RELEASES_TOKEN   jeton d'accès (fine-grained) avec le droit
+#                    « Contents : Read and write » sur Heimdia-releases
+name: Publier une version
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  paquet:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deb
+
+      - name: Paquet Debian
+        run: |
+          cargo deb --target x86_64-unknown-linux-musl
+          mkdir publie
+          cp target/x86_64-unknown-linux-musl/debian/heimdia_*.deb publie/
+          # Nom stable pour le lien « dernière version » utilisé par installer.sh.
+          cp publie/heimdia_*.deb publie/heimdia_amd64.deb
+          cp installer.sh publie/
+          cd publie && sha256sum *.deb installer.sh > SHA256SUMS && cat SHA256SUMS
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          token: ${{ secrets.RELEASES_TOKEN }}
+          repository: jpiperault/Heimdia-releases
+          # Le dépôt public ne contient pas ce code : le tag y est créé sur sa branche main.
+          target_commitish: main
+          tag_name: ${{ github.ref_name }}
+          name: Heimdia ${{ github.ref_name }}
+          body: |
+            Installation sur Debian 12/13 ou Ubuntu 22.04 et suivantes :
+
+            ```bash
+            curl -fsSLO https://github.com/jpiperault/Heimdia-releases/releases/latest/download/installer.sh
+            sudo bash installer.sh
+            ```
+
+            Mise à jour d'un bastion installé : `sudo bash installer.sh mise-a-jour`.
+          files: publie/*

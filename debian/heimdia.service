@@ -1,0 +1,44 @@
+# Bastion Heimdia (paquet Debian). Réglages : /etc/heimdia/heimdia.env
+[Unit]
+Description=Heimdia, bastion SSH de Portunia
+Documentation=https://github.com/jpiperault/Heimdia
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+User=_heimdia
+Group=_heimdia
+EnvironmentFile=/etc/heimdia/heimdia.env
+ExecStart=/usr/lib/heimdia/heimdia serve
+Restart=on-failure
+RestartSec=5
+UMask=0077
+LimitNOFILE=65536
+
+# Durcissement : le bastion n'écrit que dans /var/lib/heimdia et ne voit pas le reste du système.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/heimdia
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

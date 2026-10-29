@@ -2,7 +2,7 @@
 
 Bastion SSH de [Portunia](https://github.com/jpiperault/Portunia) : les utilisateurs passent par Heimdia pour atteindre les serveurs ; Heimdia vérifie qui ils sont, décide où ils peuvent aller, fournit si besoin le compte du serveur sans le leur montrer, enregistre les sessions et trace tout dans un journal infalsifiable.
 
-> État : **version 0.3, intégration dans Portunia et assistant d'installation**. La relecture et la vue en direct arrivent à l'étape 3 (voir [Feuille de route](#feuille-de-route)).
+> État : **version 0.4, paquet Debian et assistant d'installation**. La relecture et la vue en direct arrivent à l'étape 3 (voir [Feuille de route](#feuille-de-route)).
 
 ## Ce que fait Heimdia
 
@@ -18,25 +18,55 @@ Bastion SSH de [Portunia](https://github.com/jpiperault/Portunia) : les utilisat
 
 ## Installer
 
-### Ce qu'il faut
+Deux façons d'installer, avec le même assistant :
 
-- Un serveur **Debian 12 ou 13** ou **Ubuntu 22.04 ou plus récent** (machine virtuelle ou container LXC), avec un accès root ou sudo.
-- **2 processeurs, 4 Go de mémoire, 20 Go de disque.** Heimdia lui-même se contente de 1 Go de mémoire : les 4 Go servent à le compiler à l'installation. Avec moins, l'assistant propose un fichier d'échange temporaire.
-- Dans un **container LXC Proxmox** : activez les options *nesting* et *keyctl* (Options › Features), puis redémarrez le container.
-- Docker est installé par l'assistant s'il manque.
-- Les ports **2222** (SSH) et **8443** (API pour Portunia) joignables depuis les postes des utilisateurs.
+| | **Paquet Debian** (recommandé) | **Docker** |
+|---|---|---|
+| Installation | 1 à 2 minutes : paquet déjà compilé | 10 à 30 minutes : compilation sur le serveur |
+| Serveur conseillé | 1 processeur, 2 Go de mémoire, 10 Go de disque | 2 processeurs, 4 Go de mémoire, 20 Go de disque |
+| Container LXC | Rien à activer | Options *nesting* et *keyctl* obligatoires |
+| Fonctionnement | Service systemd durci, PostgreSQL de la distribution | Deux conteneurs (Heimdia et PostgreSQL) |
+| Mise à jour | `sudo bash installer.sh mise-a-jour` (télécharge la dernière version) | `sudo ./installer.sh mise-a-jour` (`git pull` puis recompilation) |
+| Processeurs | x86-64 (amd64) | x86-64 et ARM |
 
-### Installation
+Dans les deux cas : un serveur **Debian 12 ou 13** ou **Ubuntu 22.04 ou plus récent** (machine virtuelle ou container LXC) avec un accès root ou sudo, et les ports **2222** (SSH) et **8443** (API pour Portunia) joignables depuis les postes des utilisateurs.
+
+### Installation en paquet Debian
+
+```bash
+curl -fsSLO https://github.com/jpiperault/Heimdia-releases/releases/latest/download/installer.sh
+sudo bash installer.sh
+```
+
+L'assistant télécharge la dernière version de Heimdia, vérifie son empreinte SHA-256, installe le paquet et PostgreSQL, crée la base (accès local par socket, sans mot de passe) et le service `heimdia`.
+
+Fichiers installés :
+
+| | |
+|---|---|
+| `/usr/lib/heimdia/heimdia` | Le programme |
+| `/usr/bin/heimdia` | La commande d'administration (`sudo heimdia …`) |
+| `/etc/heimdia/heimdia.env` | Réglages : ports, fuseau, accès à la base |
+| `/var/lib/heimdia/` | Clés, certificat de l'API, enregistrements des sessions |
+| Base PostgreSQL `heimdia` | Comptes, serveurs, règles, sessions, journal |
+
+Le service tourne sous un compte système dédié (`_heimdia`), n'écrit que dans `/var/lib/heimdia` et ne voit ni les dossiers personnels ni le reste du système. Commandes utiles : `sudo systemctl status heimdia`, `sudo journalctl -u heimdia -f`.
+
+Installer un paquet précis (sans accès à Internet, ou une version antérieure) : `sudo bash installer.sh --paquet heimdia_0.4.0_amd64.deb`.
+
+### Installation avec Docker
 
 ```bash
 git clone https://github.com/jpiperault/Heimdia.git
 cd Heimdia
-sudo ./installer.sh
+sudo ./installer.sh --docker
 ```
 
-Le dépôt est privé : `git clone` demande votre identifiant GitHub et, en guise de mot de passe, un jeton d'accès (GitHub › Settings › Developer settings › Personal access tokens, droit de lecture sur le dépôt).
+Le dépôt est privé : `git clone` demande votre identifiant GitHub et, en guise de mot de passe, un jeton d'accès (GitHub › Settings › Developer settings › Personal access tokens, droit de lecture sur le dépôt). L'assistant installe Docker s'il manque et, avec moins de 4 Go de mémoire, propose un fichier d'échange temporaire pour la compilation. Dans un container LXC Proxmox, activez d'abord *nesting* et *keyctl* (Options › Features) puis redémarrez le container.
 
-L'assistant vérifie le serveur, installe Docker si besoin, puis pose cinq questions ; la touche Entrée garde la valeur proposée :
+### Les questions
+
+L'assistant pose cinq questions ; la touche Entrée garde la valeur proposée :
 
 | Question | Valeur proposée | |
 |---|---|---|
@@ -46,7 +76,7 @@ L'assistant vérifie le serveur, installe Docker si besoin, puis pose cinq quest
 | Port de l'API | 8443 | |
 | Fuseau horaire | celui du serveur | Sert aux plages horaires des règles d'accès. |
 
-Il compile ensuite Heimdia (10 à 30 minutes la première fois), crée les clés, le certificat, la base et le compte administrateur, démarre le bastion et affiche ce qu'il faut saisir dans Portunia :
+Il crée ensuite les clés, le certificat, la base et le compte administrateur, démarre le bastion et affiche ce qu'il faut saisir dans Portunia :
 
 ```
   ┌──────────────────────────────────────────────────────────────────────────
@@ -66,38 +96,50 @@ Le bastion redémarre seul avec le serveur.
 
 ### Sauvegarder la clé du coffre, tout de suite
 
-La **clé du coffre** chiffre les mots de passe des serveurs et les codes TOTP. Sans elle, une restauration perd tous ces secrets. L'assistant en dépose une copie dans `sauvegarde/coffre.key` : copiez-la hors du serveur (gestionnaire de mots de passe, coffre de l'entreprise), puis effacez cette copie.
+La **clé du coffre** chiffre les mots de passe des serveurs et les codes TOTP. Sans elle, une restauration perd tous ces secrets. L'assistant en dépose une copie dans votre dossier personnel (`~/heimdia-coffre.key`) : copiez-la hors du serveur (gestionnaire de mots de passe, coffre de l'entreprise), puis effacez cette copie. L'assistant affiche les commandes exactes, par exemple :
 
 ```bash
-scp julien@192.168.1.20:/home/julien/Heimdia/sauvegarde/coffre.key .   # depuis votre poste
-rm sauvegarde/coffre.key                                                # sur le serveur
+scp julien@192.168.1.20:/home/julien/heimdia-coffre.key .   # depuis votre poste
+rm ~/heimdia-coffre.key                                      # sur le serveur
 ```
-
-L'assistant affiche la commande `scp` exacte, avec le dossier où vous avez cloné Heimdia.
 
 ### Relancer l'assistant
 
-`sudo ./installer.sh` sur un bastion déjà installé ouvre un menu :
+`sudo bash installer.sh` sur un bastion déjà installé ouvre un menu :
 
 | Choix | Commande directe | |
 |---|---|---|
-| Informations pour Portunia | `sudo ./installer.sh info` | Adresse et empreinte à donner aux utilisateurs. |
-| Mettre à jour | `sudo ./installer.sh mise-a-jour` | Récupère la dernière version (`git pull`), recompile et redémarre. **Les sessions ouvertes sont coupées.** |
-| Créer un administrateur | `sudo ./installer.sh admin julien` | Administrateur de secours avec un mot de passe provisoire, par exemple si le seul administrateur a perdu son téléphone. |
+| Informations pour Portunia | `sudo bash installer.sh info` | Adresse et empreinte à donner aux utilisateurs. |
+| Mettre à jour | `sudo bash installer.sh mise-a-jour` | Installe la dernière version et redémarre. **Les sessions ouvertes sont coupées.** |
+| Créer un administrateur | `sudo bash installer.sh admin julien` | Administrateur de secours avec un mot de passe provisoire, par exemple si le seul administrateur a perdu son téléphone. |
 
-Une installation interrompue (coupure, manque de mémoire) se reprend en relançant `sudo ./installer.sh` : les réglages déjà saisis sont proposés de nouveau.
+En mode Docker, lancez l'assistant depuis le dossier du dépôt (`sudo ./installer.sh`).
+
+Une installation interrompue (coupure, erreur) se reprend en relançant l'assistant : les réglages déjà saisis sont proposés de nouveau.
 
 ### Sans questions (automatisation)
 
 Hors terminal, l'assistant prend les valeurs proposées, ou celles des variables `HEIMDIA_NOM`, `HEIMDIA_ADMIN`, `HEIMDIA_SSH_PORT`, `HEIMDIA_API_PORT` et `TZ` :
 
 ```bash
-sudo HEIMDIA_ADMIN=julien HEIMDIA_NOM="Bastion ACME" ./installer.sh </dev/null
+sudo HEIMDIA_ADMIN=julien HEIMDIA_NOM="Bastion ACME" bash installer.sh </dev/null
 ```
 
 ### Certificat de l'entreprise
 
-Le certificat de l'API est auto-signé : Portunia le reconnaît par son empreinte, ce qui suffit. Pour utiliser plutôt un certificat de l'entreprise (fichiers PEM, certificat suivi de sa chaîne), depuis le dossier d'installation :
+Le certificat de l'API est auto-signé : Portunia le reconnaît par son empreinte, ce qui suffit. Pour utiliser plutôt un certificat de l'entreprise (fichiers PEM, certificat suivi de sa chaîne) :
+
+Paquet Debian :
+
+```bash
+sudo install -o _heimdia -g _heimdia -m 600 cert.pem /var/lib/heimdia/entreprise.crt
+sudo install -o _heimdia -g _heimdia -m 600 cle.pem /var/lib/heimdia/entreprise.key
+echo 'HEIMDIA_TLS_CERT=/var/lib/heimdia/entreprise.crt' | sudo tee -a /etc/heimdia/heimdia.env
+echo 'HEIMDIA_TLS_KEY=/var/lib/heimdia/entreprise.key' | sudo tee -a /etc/heimdia/heimdia.env
+sudo systemctl restart heimdia
+```
+
+Docker, depuis le dossier du dépôt :
 
 ```bash
 sudo docker compose cp cert.pem heimdia:/var/lib/heimdia/entreprise.crt
@@ -184,7 +226,7 @@ Voir aussi [docs/exploitation.md](docs/exploitation.md) : sauvegardes, mise à j
 ## Feuille de route
 
 1. **Socle** : proxy SSH, trois modes, coffre, comptes et TOTP, droits, enregistrement signé, journal chaîné, Docker Compose.
-2. **Intégration Portunia** : API, ajout du bastion dans Portunia, serveurs dans la barre latérale, jetons à usage unique, première connexion, administration complète, clé générée et installée sur les serveurs du coffre. Assistant d'installation (0.3).
+2. **Intégration Portunia** : API, ajout du bastion dans Portunia, serveurs dans la barre latérale, jetons à usage unique, première connexion, administration complète, clé générée et installée sur les serveurs du coffre. Assistant d'installation (0.3), paquet Debian (0.4).
 3. **Audit** : relecture et recherche, vue en direct et coupure, conservation réglable avec estimation du disque, syslog et CSV.
-4. **Exploitation** : sauvegarde intégrée, image prête à l'emploi (sans compilation), imports (Portunia, CSV), console web activable.
+4. **Exploitation** : sauvegarde intégrée, dépôt apt pour les mises à jour, paquet ARM, imports (Portunia, CSV), console web activable.
 5. **Console maître** : un Heimdia central pour les prestataires, des relais chez les clients.

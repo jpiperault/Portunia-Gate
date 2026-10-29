@@ -1,0 +1,13 @@
+#!/bin/sh
+set -e
+
+if [ -d /run/systemd/system ]; then systemctl daemon-reload || true; fi
+
+if [ "$1" = purge ]; then
+  rm -rf /etc/heimdia
+  # Les données (clé du coffre, enregistrements) et la base sont gardées : les effacer doit être
+  # un geste délibéré (rm -rf /var/lib/heimdia ; sudo -u postgres dropdb heimdia).
+  echo "Heimdia : /var/lib/heimdia et la base PostgreSQL « heimdia » sont conservées." >&2
+fi
+
+exit 0
