@@ -46,7 +46,15 @@ enum Command {
         /// Prépare la base et les clés sans créer d'administrateur.
         #[arg(long)]
         no_admin: bool,
+        /// Mot de passe provisoire affiché : l'administrateur le change et enrôle son code dans Portunia.
+        #[arg(long)]
+        provisoire: bool,
+        /// Nom du bastion affiché dans Portunia et les applications d'authentification.
+        #[arg(long)]
+        nom: Option<String>,
     },
+    /// Version, empreintes à comparer dans Portunia et nombre de comptes.
+    Info,
     /// Lance le bastion.
     Serve,
     /// Comptes des utilisateurs.
@@ -89,6 +97,7 @@ enum UserCmd {
     /// Crée un compte (mot de passe demandé, puis enrôlement du code si nécessaire).
     Add {
         login: String,
+        /// user, auditor ou admin.
         #[arg(long, default_value = "user")]
         role: String,
         /// Combinaisons acceptées, ex. « password+totp,key+totp » (vide = réglage général).
@@ -97,9 +106,16 @@ enum UserCmd {
         /// Pas de mot de passe (connexion par clé uniquement).
         #[arg(long)]
         no_password: bool,
+        /// Mot de passe provisoire affiché : l'utilisateur le change et enrôle son code dans Portunia.
+        #[arg(long, conflicts_with = "no_password")]
+        provisoire: bool,
     },
     /// Liste les comptes.
     List,
+    /// Supprime un compte (ses sessions passées restent dans le journal).
+    Delete { login: String },
+    /// Change le rôle d'un compte : user, auditor ou admin.
+    Role { login: String, role: String },
     /// Ajoute une clé SSH publique (texte « ssh-ed25519 AAAA… » ou chemin d'un fichier .pub).
     Key { login: String, key: String },
     /// Enrôle (ou réenrôle) le code TOTP.
@@ -296,18 +312,37 @@ fn parse_days(text: &str) -> Result<i16> {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() {
+    let cli = Cli::parse();
+    // Le service trace son activité ; les commandes d'administration n'affichent que les avertissements.
+    let default_filter = if matches!(cli.command, Command::Serve) {
+        "heimdia=info,russh=warn"
+    } else {
+        "heimdia=warn,russh=warn"
+    };
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "heimdia=info,russh=warn".into()))
+        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| default_filter.into()))
         .with_target(false)
         // Traces sur la sortie d'erreur : la sortie standard reste aux commandes d'administration.
         .with_writer(std::io::stderr)
         .init();
-    let cli = Cli::parse();
+    if let Err(e) = run(cli).await {
+        eprintln!("Erreur : {e:#}");
+        std::process::exit(1);
+    }
+}
+
+async fn run(cli: Cli) -> Result<()> {
     let config = Config::from_env()?;
 
-    if let Command::Init { admin, no_admin } = &cli.command {
-        return init(config, admin, *no_admin).await;
+    if let Command::Init {
+        admin,
+        no_admin,
+        provisoire,
+        nom,
+    } = &cli.command
+    {
+        return init(config, admin, *no_admin, *provisoire, nom.as_deref()).await;
     }
     let db = connect_db(&config).await?;
     let keys = Keys::load(&config.data_dir)?;
@@ -315,6 +350,22 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Command::Init { .. } => unreachable!(),
+        Command::Info => {
+            let nom = model::setting(&state.db, "nom")
+                .await?
+                .and_then(|v| v.as_str().map(str::to_owned))
+                .unwrap_or_else(|| "Heimdia".into());
+            let users = model::users(&state.db).await?;
+            println!("{nom} · Heimdia {}", env!("CARGO_PKG_VERSION"));
+            println!("Clé d'hôte SSH        {}", state.keys.host_fingerprint());
+            println!("Certificat de l'API   {}", tls::fingerprint(&state.config.data_dir)?);
+            println!(
+                "Comptes               {} dont {} administrateur(s)",
+                users.len(),
+                users.iter().filter(|u| u.role == "admin").count()
+            );
+            Ok(())
+        }
         Command::Serve => {
             audit::log(
                 &state.db,
@@ -414,7 +465,7 @@ fn tls_names() -> Vec<String> {
         .unwrap_or_else(|| vec!["heimdia".into(), "localhost".into()])
 }
 
-async fn init(config: Config, admin: &str, no_admin: bool) -> Result<()> {
+async fn init(config: Config, admin: &str, no_admin: bool, provisional: bool, nom: Option<&str>) -> Result<()> {
     println!("Heimdia {}, première installation\n", env!("CARGO_PKG_VERSION"));
     for created in Keys::create_missing(&config.data_dir)? {
         println!("✓ Créé : {created}");
@@ -430,11 +481,14 @@ async fn init(config: Config, admin: &str, no_admin: bool) -> Result<()> {
     if model::setting(&state.db, "site_id").await?.is_none() {
         model::set_setting(&state.db, "site_id", json!(uuid::Uuid::new_v4())).await?;
     }
+    if let Some(nom) = nom.map(str::trim).filter(|n| !n.is_empty()) {
+        model::set_setting(&state.db, "nom", json!(nom)).await?;
+    }
     use base64::Engine;
     let sig = base64::engine::general_purpose::STANDARD.encode(state.keys.signature_public_key());
     model::set_setting(&state.db, "signature_publique", json!(sig)).await?;
     println!("✓ Clé d'hôte SSH        {}", state.keys.host_fingerprint());
-    println!("✓ Certificat de l'API   SHA256 {}", tls::fingerprint(&state.config.data_dir)?);
+    println!("✓ Certificat de l'API   {}", tls::fingerprint(&state.config.data_dir)?);
     println!("✓ Signature des enregistrements : clé publique {sig}");
     println!(
         "  À SAUVEGARDER hors du serveur : {}",
@@ -451,13 +505,7 @@ Aucun administrateur créé (--no-admin) : lancez « heimdia init » pour le cr�
         println!("\nUn administrateur existe déjà : rien d'autre à faire.");
     } else {
         println!("\nCompte administrateur : {admin}");
-        let hash = auth::hash_password(&new_password()?)?;
-        model::create_user(&state.db, admin, "admin", Some(hash), None).await?;
-        let user = model::user_by_login(&state.db, admin)
-            .await?
-            .ok_or_else(|| anyhow!("compte introuvable"))?;
-        audit::log(&state.db, "console", "compte.cree", json!({ "compte": admin, "role": "admin" })).await?;
-        enroll_totp(&state, &user).await?;
+        create_account(&state, admin, "admin", None, false, provisional).await?;
     }
     audit::log(
         &state.db,
@@ -466,7 +514,58 @@ Aucun administrateur créé (--no-admin) : lancez « heimdia init » pour le cr�
         json!({ "version": env!("CARGO_PKG_VERSION") }),
     )
     .await?;
-    println!("\n✓ Prêt. Lancez le service : docker compose up -d");
+    println!("\n✓ Prêt.");
+    Ok(())
+}
+
+/// Crée un compte depuis la console. Provisoire : mot de passe affiché une fois, que l'utilisateur
+/// change à sa première connexion dans Portunia, où il enrôle aussi son code. Sinon : mot de passe
+/// saisi et code enrôlé ici ; un enrôlement abandonné supprime le compte au lieu de le laisser
+/// à moitié créé.
+async fn create_account(
+    state: &State,
+    login: &str,
+    role: &str,
+    policy: Option<String>,
+    no_password: bool,
+    provisional: bool,
+) -> Result<()> {
+    let db = &state.db;
+    if !["user", "auditor", "admin"].contains(&role) {
+        bail!("rôle : user, auditor ou admin");
+    }
+    if model::user_by_login(db, login).await?.is_some() {
+        bail!("le compte {login} existe déjà");
+    }
+    let temp = provisional.then(auth::temp_password).transpose()?;
+    let hash = match (&temp, no_password) {
+        (Some(temp), _) => Some(auth::hash_password(temp)?),
+        (None, true) => None,
+        (None, false) => Some(auth::hash_password(&new_password()?)?),
+    };
+    let id = model::create_user(db, login, role, hash, policy).await?;
+    if temp.is_some() {
+        sqlx::query("UPDATE users SET must_change_password = true WHERE id = $1")
+            .bind(id)
+            .execute(db)
+            .await?;
+    } else {
+        let user = model::user_by_id(db, id).await?.ok_or_else(|| anyhow!("compte introuvable"))?;
+        if user.policy(db).await?.needs_totp() {
+            if let Err(e) = enroll_totp(state, &user).await {
+                sqlx::query("DELETE FROM users WHERE id = $1").bind(id).execute(db).await?;
+                bail!("{e} ; compte non créé, relancez la commande");
+            }
+        }
+    }
+    audit::log(db, "console", "compte.cree", json!({ "compte": login, "role": role })).await?;
+    match temp {
+        Some(temp) => println!(
+            "Compte {login} créé. Mot de passe provisoire : {temp}\n\
+             À la première connexion dans Portunia, l'utilisateur choisit son mot de passe puis scanne son code QR."
+        ),
+        None => println!("Compte {login} créé."),
+    }
     Ok(())
 }
 
@@ -483,19 +582,33 @@ async fn user_cmd(state: &State, cmd: UserCmd) -> Result<()> {
             role,
             policy,
             no_password,
+            provisoire,
         } => {
-            let hash = if no_password {
-                None
-            } else {
-                Some(auth::hash_password(&new_password()?)?)
-            };
-            model::create_user(db, &login, &role, hash, policy).await?;
-            audit::log(db, "console", "compte.cree", json!({ "compte": login, "role": role })).await?;
+            let policy = policy.map(|p| auth::Policy::parse(&p).map(|p| p.to_string())).transpose()?;
+            create_account(state, &login, &role, policy, no_password, provisoire).await?;
+        }
+        UserCmd::Delete { login } => {
             let user = find(login).await?;
-            if user.policy(db).await?.needs_totp() {
-                enroll_totp(state, &user).await?;
+            let admins = model::users(db).await?.iter().filter(|u| u.role == "admin" && !u.disabled).count();
+            if user.role == "admin" && admins <= 1 {
+                bail!("c'est le dernier administrateur : créez-en un autre avant de le supprimer");
             }
-            println!("Compte créé.");
+            sqlx::query("DELETE FROM users WHERE id = $1").bind(user.id).execute(db).await?;
+            audit::log(db, "console", "compte.supprime", json!({ "compte": user.login })).await?;
+            println!("Compte {} supprimé.", user.login);
+        }
+        UserCmd::Role { login, role } => {
+            if !["user", "auditor", "admin"].contains(&role.as_str()) {
+                bail!("rôle : user, auditor ou admin");
+            }
+            let user = find(login).await?;
+            sqlx::query("UPDATE users SET role = $2 WHERE id = $1")
+                .bind(user.id)
+                .bind(&role)
+                .execute(db)
+                .await?;
+            audit::log(db, "console", "compte.modifie", json!({ "compte": user.login, "role": role })).await?;
+            println!("{} est maintenant {role}.", user.login);
         }
         UserCmd::List => {
             for u in model::users(db).await? {

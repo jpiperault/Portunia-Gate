@@ -9,6 +9,14 @@ use argon2::{
 };
 use ring::hmac;
 
+/// Mot de passe provisoire lisible à dicter : 3 groupes de 4 caractères sans ambiguïté.
+pub fn temp_password() -> Result<String> {
+    const ALPHABET: &[u8] = b"abcdefghjkmnpqrstuvwxyzACDEFGHJKLMNPQRTUVWXY34679";
+    let bytes = crate::keys::random::<12>()?;
+    let chars: Vec<char> = bytes.iter().map(|b| ALPHABET[*b as usize % ALPHABET.len()] as char).collect();
+    Ok(chars.chunks(4).map(|c| c.iter().collect::<String>()).collect::<Vec<_>>().join("-"))
+}
+
 pub fn hash_password(password: &str) -> Result<String> {
     if password.chars().count() < 10 {
         bail!("Le mot de passe doit contenir au moins 10 caractères");

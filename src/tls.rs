@@ -11,7 +11,9 @@ pub struct TlsFiles {
 }
 
 pub fn files(data_dir: &Path) -> TlsFiles {
-    match (std::env::var_os("HEIMDIA_TLS_CERT"), std::env::var_os("HEIMDIA_TLS_KEY")) {
+    // Variables vides (Docker Compose les transmet ainsi quand .env ne les définit pas) : non définies.
+    let var = |name| std::env::var_os(name).filter(|v| !v.is_empty());
+    match (var("HEIMDIA_TLS_CERT"), var("HEIMDIA_TLS_KEY")) {
         (Some(cert), Some(key)) => TlsFiles {
             cert: cert.into(),
             key: key.into(),

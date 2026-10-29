@@ -1,5 +1,5 @@
 # Heimdia, taille « petite » : le bastion et sa base sur un même serveur.
-# Avant le premier lancement : cp .env.example .env, puis remplissez .env.
+# Installation : ./installer.sh (crée .env, construit, démarre). Voir README.md.
 
 services:
   postgres:
@@ -18,7 +18,6 @@ services:
 
   heimdia:
     build: .
-    image: heimdia:${HEIMDIA_VERSION:-dev}
     restart: unless-stopped
     depends_on:
       postgres:
@@ -27,6 +26,9 @@ services:
       HEIMDIA_DATABASE_URL: postgres://heimdia:${HEIMDIA_DB_PASSWORD}@postgres/heimdia
       TZ: ${TZ:-Europe/Paris}
       HEIMDIA_SSH_PUBLIC_PORT: ${HEIMDIA_SSH_PORT:-2222}
+      # Certificat de l'entreprise (fichiers PEM copiés dans /var/lib/heimdia) ; vide = auto-signé.
+      HEIMDIA_TLS_CERT: ${HEIMDIA_TLS_CERT:-}
+      HEIMDIA_TLS_KEY: ${HEIMDIA_TLS_KEY:-}
     ports:
       - "${HEIMDIA_SSH_PORT:-2222}:2222"
       - "${HEIMDIA_API_PORT:-8443}:8443"

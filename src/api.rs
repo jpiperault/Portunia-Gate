@@ -292,6 +292,10 @@ async fn login(AxState(api): Ctx, ConnectInfo(addr): ConnectInfo<SocketAddr>, Js
         match &user.totp_secret {
             // Pas encore enrôlé : on propose un secret, confirmé par un premier code juste.
             None => {
+                // Un code tapé avant d'avoir vu le code QR (ancien secret, autre outil) ne compte pas :
+                // on affiche d'abord le code QR au lieu de refuser.
+                let shown = user.totp_pending.is_some();
+                let code = if shown { code } else { String::new() };
                 let sealed = match &user.totp_pending {
                     Some(sealed) => sealed.clone(),
                     None => {
@@ -762,14 +766,6 @@ struct UserBody {
     desactive: bool,
 }
 
-/// Mot de passe provisoire lisible à dicter : 3 groupes de 4 caractères sans ambiguïté.
-fn temp_password() -> anyhow::Result<String> {
-    const ALPHABET: &[u8] = b"abcdefghjkmnpqrstuvwxyzACDEFGHJKLMNPQRTUVWXY34679";
-    let bytes = random::<12>()?;
-    let chars: Vec<char> = bytes.iter().map(|b| ALPHABET[*b as usize % ALPHABET.len()] as char).collect();
-    Ok(chars.chunks(4).map(|c| c.iter().collect::<String>()).collect::<Vec<_>>().join("-"))
-}
-
 async fn set_groups(db: &sqlx::PgPool, user: Uuid, groups: &[String]) -> anyhow::Result<()> {
     let mut tx = db.begin().await?;
     sqlx::query("DELETE FROM group_members WHERE user_id = $1")
@@ -803,7 +799,7 @@ async fn admin_user_create(AxState(api): Ctx, headers: HeaderMap, Json(body): Js
     let actor = admin(&api, &headers).await?;
     let db = &api.state.db;
     let login = body.login.unwrap_or_default().trim().to_string();
-    let password = temp_password()?;
+    let password = auth::temp_password()?;
     let id = model::create_user(
         db,
         &login,
@@ -904,7 +900,7 @@ async fn admin_user_temp_password(AxState(api): Ctx, headers: HeaderMap, Path(id
     let user = model::user_by_id(db, id)
         .await?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "Compte inconnu"))?;
-    let password = temp_password()?;
+    let password = auth::temp_password()?;
     sqlx::query("UPDATE users SET password_hash = $2, must_change_password = true WHERE id = $1")
         .bind(id)
         .bind(auth::hash_password(&password)?)
