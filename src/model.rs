@@ -230,14 +230,16 @@ pub async fn target_by_name(db: &PgPool, name: &str) -> Result<Option<Target>> {
     )
 }
 
-/// Cible en mode rebond désignée par son adresse (connexion « ssh -J »).
-pub async fn target_by_address(db: &PgPool, host: &str, port: i32) -> Result<Option<Target>> {
+/// Cibles en mode rebond désignées par leur adresse ou leur nom (connexion « ssh -J »).
+/// Plusieurs cibles peuvent partager une adresse : l'appelant garde celle qui est autorisée.
+pub async fn rebond_targets_at(db: &PgPool, host: &str, port: i32) -> Result<Vec<Target>> {
     Ok(sqlx::query_as(&format!(
-        "SELECT {TARGET_COLUMNS} FROM targets WHERE (lower(host) = lower($1) OR lower(name) = lower($1)) AND port = $2 ORDER BY name LIMIT 1"
+        "SELECT {TARGET_COLUMNS} FROM targets
+         WHERE mode = 'rebond' AND (lower(host) = lower($1) OR lower(name) = lower($1)) AND port = $2 ORDER BY name"
     ))
     .bind(host)
     .bind(port)
-    .fetch_optional(db)
+    .fetch_all(db)
     .await?)
 }
 

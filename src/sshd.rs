@@ -412,8 +412,8 @@ impl server::Handler for Conn {
         };
         let db = &self.state.db;
         // 1. Rebond de bout en bout (ssh -J) vers une cible en mode rebond.
-        if let Some(t) = model::target_by_address(db, host, port as i32).await? {
-            if t.mode == "rebond" && model::access(db, ctx.user.id, t.id).await?.is_some() {
+        for t in model::rebond_targets_at(db, host, port as i32).await? {
+            if model::access(db, ctx.user.id, t.id).await?.is_some() {
                 reply.accept().await;
                 tokio::spawn(async move {
                     if let Err(e) = relay_tcp(ctx, t, channel).await {
