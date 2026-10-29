@@ -306,8 +306,14 @@ const INDEX: &str = include_str!("../portail/index.html");
 const SESSION: &str = include_str!("../portail/session.html");
 const DESKTOP: &str = include_str!("../portail/bureau.html");
 
+/// Pages et scripts portent la version du bastion dans les adresses de leurs fichiers
+/// (`?v=__V__`) : après une mise à jour, le navigateur charge les nouveaux, pas ceux en cache.
+fn versioned(text: &str) -> String {
+    text.replace("__V__", env!("CARGO_PKG_VERSION"))
+}
+
 fn page(html: &'static str) -> Response {
-    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
+    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], versioned(html)).into_response()
 }
 
 async fn page_index() -> Response {
@@ -330,12 +336,17 @@ async fn asset(Path(fichier): Path<String>) -> Response {
         "xterm.js" => ("text/javascript; charset=utf-8", include_bytes!("../portail/xterm.js")),
         "xterm.css" => ("text/css; charset=utf-8", include_bytes!("../portail/xterm.css")),
         "addon-fit.js" => ("text/javascript; charset=utf-8", include_bytes!("../portail/addon-fit.js")),
-        "bureau.js" => ("text/javascript; charset=utf-8", include_bytes!("../portail/bureau.js")),
+        // Ses imports portent aussi la version.
+        "bureau.js" => {
+            let text = versioned(include_str!("../portail/bureau.js"));
+            return ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8"), (header::CACHE_CONTROL, "public, max-age=86400")], text).into_response();
+        }
         "iron-remote-desktop.js" => ("text/javascript; charset=utf-8", include_bytes!("../portail/iron-remote-desktop.js")),
         "iron-remote-desktop-rdp.js" => ("text/javascript; charset=utf-8", include_bytes!("../portail/iron-remote-desktop-rdp.js")),
         _ => return StatusCode::NOT_FOUND.into_response(),
     };
-    ([(header::CONTENT_TYPE, kind), (header::CACHE_CONTROL, "public, max-age=3600")], body).into_response()
+    // Adresses versionnées : un jour de cache sans risque de garder une ancienne version.
+    ([(header::CONTENT_TYPE, kind), (header::CACHE_CONTROL, "public, max-age=86400")], body).into_response()
 }
 
 // ---------- Session du navigateur ----------
@@ -843,6 +854,15 @@ mod tests {
         assert!(from_cloudflare("2606:4700::1".parse().unwrap()));
         assert!(!from_cloudflare("192.168.1.10".parse().unwrap()));
         assert!(!from_cloudflare("8.8.8.8".parse().unwrap()));
+    }
+
+    #[test]
+    fn adresses_versionnees() {
+        let v = format!("?v={}", env!("CARGO_PKG_VERSION"));
+        for text in [INDEX, SESSION, DESKTOP, include_str!("../portail/bureau.js")] {
+            let served = versioned(text);
+            assert!(served.contains(&v) && !served.contains("__V__"));
+        }
     }
 
     #[test]

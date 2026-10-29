@@ -112,6 +112,8 @@ document.getElementById('term').addEventListener('paste', (e) => { if (!clipboar
     document.getElementById('copier').hidden = !clipboard;
     document.getElementById('coller').hidden = !clipboard;
     const s = (list.serveurs || []).find((x) => x.nom === nom);
+    // Serveur Bureau à distance (lien ancien ou page en cache) : la bonne page.
+    if (s?.protocole === 'rdp') { location.replace(`/bureau/${encodeURIComponent(nom)}`); return; }
     if (s) {
       document.getElementById('mode').textContent = { coffre: 'Coffre', enregistre: 'Enregistré', rebond: 'Rebond' }[s.mode] || s.mode;
       document.getElementById('rec').hidden = s.mode === 'rebond';

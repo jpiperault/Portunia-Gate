@@ -1,7 +1,7 @@
 // Portail web de Heimdia : Bureau à distance dans le navigateur (client IronRDP), à travers
 // le passage RDCleanPath du bastion.
-import '/static/iron-remote-desktop.js';
-import { Backend, init, displayControl } from '/static/iron-remote-desktop-rdp.js';
+import '/static/iron-remote-desktop.js?v=__V__';
+import { Backend, init, displayControl } from '/static/iron-remote-desktop-rdp.js?v=__V__';
 
 const nom = decodeURIComponent(location.pathname.split('/').pop() || '');
 document.getElementById('nom').textContent = nom;
