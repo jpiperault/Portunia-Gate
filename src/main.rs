@@ -150,8 +150,12 @@ enum TargetCmd {
         name: String,
         #[arg(long)]
         host: String,
-        #[arg(long, default_value_t = 22)]
-        port: i32,
+        /// Port (22 en SSH, 3389 en Bureau à distance par défaut).
+        #[arg(long)]
+        port: Option<i32>,
+        /// ssh ou rdp (Bureau à distance, mode rebond pour l'instant).
+        #[arg(long, default_value = "ssh")]
+        protocol: String,
         /// rebond, enregistre ou coffre.
         #[arg(long, default_value = "coffre")]
         mode: String,
@@ -714,12 +718,14 @@ async fn target_cmd(state: &State, cmd: TargetCmd) -> Result<()> {
             name,
             host,
             port,
+            protocol,
             mode,
             account,
             folder,
             password,
             key_file,
         } => {
+            let port = port.unwrap_or(if protocol == "rdp" { 3389 } else { 22 });
             let secret: Option<(String, Vec<u8>)> = match (password, key_file) {
                 (true, Some(_)) => bail!("Choisissez --password ou --key-file, pas les deux"),
                 (true, None) => Some((
@@ -743,6 +749,7 @@ async fn target_cmd(state: &State, cmd: TargetCmd) -> Result<()> {
                 mode: mode.clone(),
                 account,
                 secret_kind: kind,
+                protocole: protocol.clone(),
             };
             model::create_target(db, new, |id| match &secret {
                 Some((_, plain)) => Ok(Some(state.keys.seal(&format!("cible:{id}"), plain)?)),
@@ -761,9 +768,10 @@ async fn target_cmd(state: &State, cmd: TargetCmd) -> Result<()> {
         TargetCmd::List => {
             for t in model::targets(db).await? {
                 println!(
-                    "{:<16} {:<12} {:<24} {:<10} {:<12} {}",
+                    "{:<16} {:<12} {:<4} {:<24} {:<10} {:<12} {}",
                     t.name,
                     t.folder,
+                    t.protocole,
                     format!("{}:{}", t.host, t.port),
                     t.mode,
                     t.account.unwrap_or_default(),

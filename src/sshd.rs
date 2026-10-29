@@ -585,7 +585,8 @@ async fn read_line(channel: &mut Channel<Msg>, echo: bool, pty: &mut Option<PtyI
 
 /// Menu des serveurs autorisés quand le nom ne désigne pas de cible.
 async fn choose_target(ctx: &Ctx, channel: &mut Channel<Msg>, pty: &mut Option<PtyInfo>) -> Result<Option<Target>> {
-    let targets = model::allowed_targets(&ctx.state.db, ctx.user.id).await?;
+    // Les serveurs Bureau à distance s'ouvrent depuis Portunia, pas dans ce terminal.
+    let targets: Vec<Target> = model::allowed_targets(&ctx.state.db, ctx.user.id).await?.into_iter().filter(|t| !t.is_rdp()).collect();
     let name = model::setting(&ctx.state.db, "nom")
         .await?
         .and_then(|v| v.as_str().map(str::to_owned))
@@ -670,6 +671,11 @@ async fn shell(ctx: Arc<Ctx>, mut channel: Channel<Msg>, mut pty: Option<PtyInfo
         close(&channel, 1).await;
         return Ok(());
     };
+    if target.is_rdp() {
+        say(&channel, &format!("{} est un serveur Bureau à distance : ouvrez-le depuis Portunia.\n", target.name)).await;
+        close(&channel, 1).await;
+        return Ok(());
+    }
 
     say(&channel, &format!("Connexion à {}…\n", target.name)).await;
     let Some((handle, creds_user)) = connect_interactive(&ctx, &target, &mut channel, &mut pty).await? else {
@@ -969,22 +975,55 @@ async fn sftp(ctx: Arc<Ctx>, mut channel: Channel<Msg>, name: String) -> Result<
     Ok(())
 }
 
+/// Relaie dans les deux sens jusqu'à la fin de l'un des côtés ; renvoie les octets passés
+/// dans chaque sens, même si la connexion se termine sur une erreur (un serveur Windows
+/// coupe brutalement après un refus d'identifiants).
+async fn relay_counted<A, B>(a: A, b: B) -> (u64, u64)
+where
+    A: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    B: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    async fn pump<R: tokio::io::AsyncRead + Unpin, W: tokio::io::AsyncWrite + Unpin>(mut from: R, mut to: W) -> u64 {
+        let mut buf = vec![0u8; 32 * 1024];
+        let mut total = 0;
+        while let Ok(n) = from.read(&mut buf).await {
+            if n == 0 || to.write_all(&buf[..n]).await.is_err() {
+                break;
+            }
+            total += n as u64;
+        }
+        let _ = to.shutdown().await;
+        total
+    }
+    let (ar, aw) = tokio::io::split(a);
+    let (br, bw) = tokio::io::split(b);
+    // Le premier sens qui se termine arrête l'autre : la session est finie.
+    let up = pump(ar, bw);
+    let down = pump(br, aw);
+    tokio::pin!(up, down);
+    tokio::select! {
+        u = &mut up => (u, tokio::time::timeout(std::time::Duration::from_secs(2), &mut down).await.unwrap_or(0)),
+        d = &mut down => (tokio::time::timeout(std::time::Duration::from_secs(2), &mut up).await.unwrap_or(0), d),
+    }
+}
+
 /// Rebond de bout en bout : le bastion relaie les octets chiffrés sans les lire.
 async fn relay_tcp(ctx: Arc<Ctx>, target: Target, channel: Channel<Msg>) -> Result<()> {
     let id = Uuid::new_v4();
     let db = &ctx.state.db;
-    let mut tcp = tokio::net::TcpStream::connect((target.host.as_str(), target.port as u16)).await?;
-    model::session_start(db, id, ctx.user.id, target.id, "rebond", "ssh -J", &ctx.addr).await?;
+    let tcp = tokio::net::TcpStream::connect((target.host.as_str(), target.port as u16)).await?;
+    let detail = if target.is_rdp() { "rdp" } else { "ssh -J" };
+    model::session_start(db, id, ctx.user.id, target.id, "rebond", detail, &ctx.addr).await?;
     audit::note(
         db,
         &ctx.user.login,
         "rebond.ouvert",
-        json!({ "session": id, "cible": target.name, "adresse": ctx.addr }),
+        json!({ "session": id, "cible": target.name, "protocole": target.protocole, "adresse": ctx.addr }),
     )
     .await;
     let started = std::time::Instant::now();
-    let mut stream = channel.into_stream();
-    let (up, down) = tokio::io::copy_bidirectional(&mut stream, &mut tcp).await.unwrap_or((0, 0));
+    let (up, down) = relay_counted(channel.into_stream(), tcp).await;
     let _ = model::session_end(
         db,
         id,

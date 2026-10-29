@@ -427,6 +427,7 @@ async fn servers(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
                 "hote": t.host,
                 "port": t.port,
                 "compte": t.account,
+                "protocole": t.protocole,
                 "sftp": access.sftp && t.vaulted(),
                 "tunnels": access.tunnels && t.vaulted(),
             }));
@@ -472,6 +473,7 @@ async fn ticket(AxState(api): Ctx, headers: HeaderMap, Path(nom): Path<String>) 
         "hote": target.host,
         "port": target.port,
         "compte": target.account,
+        "protocole": target.protocole,
     })))
 }
 
@@ -515,10 +517,17 @@ struct TargetBody {
     mode: String,
     compte: Option<String>,
     secret: Option<SecretBody>,
+    /// ssh (par défaut) ou rdp.
+    #[serde(default = "default_protocol")]
+    protocole: String,
 }
 
 fn default_port() -> i32 {
     22
+}
+
+fn default_protocol() -> String {
+    "ssh".into()
 }
 
 fn target_json(t: &model::Target) -> Value {
@@ -532,6 +541,7 @@ fn target_json(t: &model::Target) -> Value {
         "compte": t.account,
         "secret": t.secret_kind,
         "empreinte": t.host_key,
+        "protocole": t.protocole,
     })
 }
 
@@ -550,6 +560,10 @@ fn check_target(body: &TargetBody) -> Result<(), ApiError> {
     }
     if body.nom.contains('%') || body.nom.contains(char::is_whitespace) {
         return Err(err(StatusCode::BAD_REQUEST, "Le nom ne doit contenir ni espace ni « % »"));
+    }
+    model::check_protocol(&body.protocole, &body.mode).map_err(|e| err(StatusCode::BAD_REQUEST, e.to_string()))?;
+    if body.protocole == "rdp" && matches!(&body.secret, Some(SecretBody::Generer { .. }) | Some(SecretBody::Cle { .. })) {
+        return Err(err(StatusCode::BAD_REQUEST, "Bureau à distance : le coffre garde un mot de passe, pas une clé SSH"));
     }
     Ok(())
 }
@@ -599,6 +613,7 @@ async fn admin_target_create(AxState(api): Ctx, headers: HeaderMap, Json(body): 
         secret_kind: "none".into(),
         secret: None,
         host_key: None,
+        protocole: body.protocole.clone(),
     };
     let secret = match body.secret {
         Some(s) => Some(resolve_secret(&api, &actor.login, &probe, s).await?),
@@ -612,6 +627,7 @@ async fn admin_target_create(AxState(api): Ctx, headers: HeaderMap, Json(body): 
         mode: probe.mode.clone(),
         account: probe.account.clone(),
         secret_kind: secret.as_ref().map(|s| s.0.clone()).unwrap_or_else(|| "none".into()),
+        protocole: probe.protocole.clone(),
     };
     let keys = &api.state.keys;
     let id = model::create_target(&api.state.db, new, |id| match &secret {
@@ -623,7 +639,7 @@ async fn admin_target_create(AxState(api): Ctx, headers: HeaderMap, Json(body): 
         &api.state.db,
         &actor.login,
         "cible.creee",
-        json!({ "cible": probe.name, "adresse": format!("{}:{}", probe.host, probe.port), "mode": probe.mode }),
+        json!({ "cible": probe.name, "adresse": format!("{}:{}", probe.host, probe.port), "mode": probe.mode, "protocole": probe.protocole }),
     )
     .await;
     Ok(Json(json!({ "id": id })))
@@ -658,7 +674,8 @@ async fn admin_target_update(AxState(api): Ctx, headers: HeaderMap, Path(id): Pa
         return Err(err(StatusCode::BAD_REQUEST, "Mode : rebond, enregistre ou coffre"));
     }
     sqlx::query(
-        "UPDATE targets SET name = $2, folder = $3, host = $4, port = $5, mode = $6, account = $7, secret_kind = $8, secret = $9, host_key = $10
+        "UPDATE targets SET name = $2, folder = $3, host = $4, port = $5, mode = $6, account = $7, secret_kind = $8, secret = $9, host_key = $10,
+                protocole = $11
          WHERE id = $1",
     )
     .bind(id)
@@ -671,6 +688,7 @@ async fn admin_target_update(AxState(api): Ctx, headers: HeaderMap, Path(id): Pa
     .bind(&kind)
     .bind(sealed)
     .bind(&probe.host_key)
+    .bind(&body.protocole)
     .execute(db)
     .await
     .map_err(|e| match &e {

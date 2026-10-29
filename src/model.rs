@@ -215,9 +215,25 @@ pub struct Target {
     pub secret_kind: String,
     pub secret: Option<Vec<u8>>,
     pub host_key: Option<String>,
+    /// ssh ou rdp (Bureau à distance).
+    pub protocole: String,
+}
+
+/// Protocole et mode compatibles. Bureau à distance : rebond seulement pour l'instant
+/// (le bastion relaie la connexion chiffrée sans la lire).
+pub fn check_protocol(protocole: &str, mode: &str) -> Result<()> {
+    match protocole {
+        "ssh" => Ok(()),
+        "rdp" if mode == "rebond" => Ok(()),
+        "rdp" => bail!("Bureau à distance : seul le mode rebond est disponible pour l'instant (coffre et enregistré arrivent)"),
+        _ => bail!("Protocole inconnu : ssh ou rdp"),
+    }
 }
 
 impl Target {
+    pub fn is_rdp(&self) -> bool {
+        self.protocole == "rdp"
+    }
     pub fn records(&self) -> bool {
         self.mode != "rebond"
     }
@@ -229,7 +245,7 @@ impl Target {
     }
 }
 
-const TARGET_COLUMNS: &str = "id, name, folder, host, port, mode, account, secret_kind, secret, host_key";
+const TARGET_COLUMNS: &str = "id, name, folder, host, port, mode, account, secret_kind, secret, host_key, protocole";
 
 pub async fn target_by_id(db: &PgPool, id: Uuid) -> Result<Option<Target>> {
     Ok(sqlx::query_as(&format!("SELECT {TARGET_COLUMNS} FROM targets WHERE id = $1"))
@@ -276,19 +292,22 @@ pub struct NewTarget {
     pub mode: String,
     pub account: Option<String>,
     pub secret_kind: String,
+    pub protocole: String,
 }
 
 pub async fn create_target(db: &PgPool, t: NewTarget, seal: impl FnOnce(Uuid) -> Result<Option<Vec<u8>>>) -> Result<Uuid> {
     if !["rebond", "enregistre", "coffre"].contains(&t.mode.as_str()) {
         bail!("Mode inconnu : rebond, enregistre ou coffre");
     }
+    check_protocol(&t.protocole, &t.mode)?;
     if t.mode == "coffre" && (t.account.is_none() || t.secret_kind == "none") {
         bail!("En mode coffre, indiquez le compte de la cible et son secret");
     }
     let id = Uuid::new_v4();
     let secret = seal(id)?;
     sqlx::query(
-        "INSERT INTO targets (id, name, folder, host, port, mode, account, secret_kind, secret) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        "INSERT INTO targets (id, name, folder, host, port, mode, account, secret_kind, secret, protocole)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
     )
     .bind(id)
     .bind(&t.name)
@@ -299,6 +318,7 @@ pub async fn create_target(db: &PgPool, t: NewTarget, seal: impl FnOnce(Uuid) ->
     .bind(&t.account)
     .bind(&t.secret_kind)
     .bind(secret)
+    .bind(&t.protocole)
     .execute(db)
     .await
     .map_err(|e| if is_unique(&e) { anyhow!("La cible « {} » existe déjà", t.name) } else { e.into() })?;

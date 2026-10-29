@@ -2,7 +2,7 @@
 
 Bastion SSH de [Portunia](https://github.com/jpiperault/Portunia) : les utilisateurs passent par Heimdia pour atteindre les serveurs ; Heimdia vérifie qui ils sont, décide où ils peuvent aller, fournit si besoin le compte du serveur sans le leur montrer, enregistre les sessions et trace tout dans un journal infalsifiable.
 
-> État : **version 0.5, relecture des sessions** (lecteur avec la frappe en sous-titres, recherche, saisies masquées). La vue en direct arrive ensuite (voir [Feuille de route](#feuille-de-route)).
+> État : **version 0.6, Bureau à distance en rebond** (serveurs Windows ouverts depuis Portunia à travers le bastion), relecture des sessions SSH (0.5). Les modes coffre et enregistré en RDP arrivent ensuite (voir [Feuille de route](#feuille-de-route)).
 
 ## Ce que fait Heimdia
 
@@ -15,6 +15,7 @@ Bastion SSH de [Portunia](https://github.com/jpiperault/Portunia) : les utilisat
 | **Relecture** | Dans Portunia, comme une vidéo : la frappe en sous-titres, les pauses sautées, les commandes sensibles repérées, la recherche dans toutes les sessions. Les mots de passe tapés sont masqués ; chaque relecture est inscrite au journal. |
 | **Journal d'audit** | Connexions, échecs, sessions, changements d'administration. Chaque événement contient l'empreinte du précédent : une ligne supprimée ou modifiée se voit (`heimdia audit --verify`). |
 | **Portunia** | Extension Heimdia : le bastion s'ajoute dans la barre latérale, ses serveurs s'ouvrent avec un jeton à usage unique, les administrateurs gèrent tout depuis Portunia (serveurs et coffre, comptes, groupes, règles, réglages) et les auditeurs relisent les sessions et le journal. |
+| **Bureau à distance** | Serveurs Windows (RDP) derrière le bastion, ouverts depuis Portunia. Version 0.6 : mode rebond (voir [Bureau à distance](#bureau-à-distance-rdp)). |
 | **Autres clients** | N'importe quel client SSH : OpenSSH, PuTTY, MobaXterm, WinSCP (SFTP). |
 
 ## Installer
@@ -200,6 +201,20 @@ Menu **⋯** du bastion › **Audit** › **Sessions** (rôles administrateur et
 
 Les sessions enregistrées avant la version 0.5 se relisent, mais n'entrent pas dans la recherche.
 
+## Bureau à distance (RDP)
+
+Les serveurs Windows se déclarent comme les autres : Administrer › Serveurs et coffre › **Ajouter un serveur**, protocole **Bureau à distance (RDP)**, port 3389. Ils apparaissent sous le bastion dans Portunia avec un badge **RDP** et s'ouvrent dans un onglet Bureau à distance.
+
+**Version 0.6 : mode rebond seulement.** Portunia ouvre un tunnel à travers le bastion avec un jeton à usage unique (le même que pour SSH, sans code à retaper), puis se connecte au serveur Windows au bout de ce tunnel. La connexion RDP reste chiffrée de bout en bout : le bastion vérifie la règle, relaie et journalise (`rebond.ouvert`, durée, octets), sans voir le contenu ni l'enregistrer. L'utilisateur tape ses identifiants Windows à chaque ouverture ; Portunia ne les garde pas.
+
+| | |
+|---|---|
+| Réseau | Aucun port de plus sur le bastion : le tunnel passe par son port SSH (2222). Le bastion doit joindre le port 3389 des serveurs Windows. |
+| Client | Portunia (onglet Bureau à distance). L'extension Bureau à distance doit être activée ; sinon les serveurs RDP restent visibles, grisés. |
+| Terminal | Un serveur RDP n'apparaît pas dans le menu `ssh` du bastion et ne s'ouvre pas en terminal. |
+
+Les modes **coffre** (compte Windows fourni par le bastion) et **enregistré**, l'enregistrement des sessions RDP et leur relecture arrivent dans les versions suivantes.
+
 ## Se connecter sans Portunia
 
 ```bash
@@ -235,6 +250,7 @@ sudo heimdia group member "Admins Linux" marc julien
 sudo heimdia target add web-01 --host 10.0.1.11 --mode coffre --account admin --password --folder Production
 sudo heimdia target add rec-app --host 10.0.2.5 --mode enregistre --folder Recette
 sudo heimdia target add fw-edge --host 10.0.0.1 --mode rebond --folder Réseau
+sudo heimdia target add srv-ad-01 --host 10.0.3.10 --protocol rdp --mode rebond --folder Windows
 sudo heimdia target list
 
 # Règles
@@ -260,5 +276,6 @@ Voir aussi [docs/exploitation.md](docs/exploitation.md) : sauvegardes, mise à j
 1. **Socle** : proxy SSH, trois modes, coffre, comptes et TOTP, droits, enregistrement signé, journal chaîné, Docker Compose.
 2. **Intégration Portunia** : API, ajout du bastion dans Portunia, serveurs dans la barre latérale, jetons à usage unique, première connexion, administration complète, clé générée et installée sur les serveurs du coffre. Assistant d'installation (0.3), paquet Debian (0.4).
 3. **Audit** : relecture et recherche (0.5), vue en direct et coupure, vidéo MP4 à la demande, lecteur détachable, conservation réglable avec estimation du disque, syslog et CSV.
-4. **Exploitation** : sauvegarde intégrée, dépôt apt pour les mises à jour, paquet ARM, imports (Portunia, CSV), console web activable.
-5. **Console maître** : un Heimdia central pour les prestataires, des relais chez les clients.
+4. **Bureau à distance** : rebond (0.6), puis coffre (le bastion ouvre la session Windows avec le compte du coffre), règles (presse-papiers, son), enregistrement signé et relecture, mode enregistré.
+5. **Exploitation** : sauvegarde intégrée, dépôt apt pour les mises à jour, paquet ARM, imports (Portunia, CSV), console web activable.
+6. **Console maître** : un Heimdia central pour les prestataires, des relais chez les clients.
