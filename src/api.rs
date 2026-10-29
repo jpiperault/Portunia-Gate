@@ -110,6 +110,8 @@ pub async fn run(state: Arc<State>) -> anyhow::Result<()> {
         .route("/api/v1/admin/journal.csv", get(admin_journal_csv))
         .route("/api/v1/admin/sessions", get(admin_sessions))
         .route("/api/v1/admin/reglages", get(admin_settings).put(admin_settings_update))
+        .route("/api/v1/audit/sessions", get(audit_sessions))
+        .route("/api/v1/audit/sessions/{id}/enregistrement", get(audit_recording))
         .with_state(api);
     tracing::info!("API en écoute sur https://{listen}");
     axum_server::bind_rustls(listen, tls)
@@ -153,6 +155,7 @@ async fn bastion_info(state: &State) -> anyhow::Result<Value> {
         "empreinte_ssh": state.keys.host_fingerprint(),
         "memo_mot_de_passe": remember_allowed(state).await?,
         "duree_session_h": session_hours(state).await?,
+        "relecture_propres": own_sessions_allowed(state).await?,
     }))
 }
 
@@ -1269,6 +1272,8 @@ async fn admin_settings(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
         "politique": model::default_policy(&state.db).await?.to_string(),
         "duree_session_h": session_hours(state).await?,
         "memo_mot_de_passe": remember_allowed(state).await?,
+        "relecture_propres": own_sessions_allowed(state).await?,
+        "commandes_sensibles": sensitive_commands(state).await?,
     })))
 }
 
@@ -1279,6 +1284,8 @@ struct SettingsBody {
     politique: Option<String>,
     duree_session_h: Option<i64>,
     memo_mot_de_passe: Option<bool>,
+    relecture_propres: Option<bool>,
+    commandes_sensibles: Option<Vec<String>>,
 }
 
 async fn admin_settings_update(AxState(api): Ctx, headers: HeaderMap, Json(body): Json<SettingsBody>) -> ApiResult {
@@ -1309,6 +1316,189 @@ async fn admin_settings_update(AxState(api): Ctx, headers: HeaderMap, Json(body)
         model::set_setting(db, "memo_mot_de_passe", json!(v)).await?;
         changed.insert("memo_mot_de_passe".into(), json!(v));
     }
+    if let Some(v) = body.relecture_propres {
+        model::set_setting(db, "relecture_propres", json!(v)).await?;
+        changed.insert("relecture_propres".into(), json!(v));
+    }
+    if let Some(list) = body.commandes_sensibles {
+        let list: Vec<String> = list.into_iter().map(|c| c.trim().to_string()).filter(|c| !c.is_empty()).collect();
+        model::set_setting(db, "commandes_sensibles", json!(list)).await?;
+        changed.insert("commandes_sensibles".into(), json!(list));
+    }
     audit::note(db, &actor.login, "reglage.modifie", Value::Object(changed)).await;
     Ok(Json(json!({ "etat": "ok" })))
+}
+
+// ---------- Audit : relecture des sessions ----------
+
+/// Commandes repérées sur la barre de temps du lecteur (réglable).
+const SENSITIVE_DEFAULT: &[&str] = &[
+    "rm -rf", "rm -fr", "mkfs", "dd if=", "chmod -R 777", "shutdown", "reboot", "iptables -F", "userdel", "DROP TABLE", "DROP DATABASE",
+];
+
+async fn own_sessions_allowed(state: &State) -> anyhow::Result<bool> {
+    Ok(model::setting(&state.db, "relecture_propres").await?.and_then(|v| v.as_bool()).unwrap_or(false))
+}
+
+async fn sensitive_commands(state: &State) -> anyhow::Result<Vec<String>> {
+    Ok(match model::setting(&state.db, "commandes_sensibles").await? {
+        Some(Value::Array(list)) => list.into_iter().filter_map(|v| v.as_str().map(str::to_owned)).collect(),
+        _ => SENSITIVE_DEFAULT.iter().map(|s| s.to_string()).collect(),
+    })
+}
+
+/// Qui peut relire : administrateurs et auditeurs (toutes les sessions), et, si le réglage
+/// l'autorise, chaque compte pour ses propres sessions. Renvoie le compte et sa restriction.
+async fn reader(api: &Api, headers: &HeaderMap) -> Result<(User, Option<String>), ApiError> {
+    let user = caller(api, headers).await?;
+    if user.role == "admin" || user.role == "auditor" {
+        return Ok((user, None));
+    }
+    if own_sessions_allowed(&api.state).await? {
+        let own = user.login.clone();
+        return Ok((user, Some(own)));
+    }
+    Err(err(StatusCode::FORBIDDEN, "Relecture réservée aux administrateurs et auditeurs du bastion"))
+}
+
+/// Date « AAAA-MM-JJ » (minuit, heure du bastion) ou RFC 3339.
+fn parse_day(text: &str, end: bool) -> Result<DateTime<Utc>, ApiError> {
+    if let Ok(d) = DateTime::parse_from_rfc3339(text) {
+        return Ok(d.with_timezone(&Utc));
+    }
+    let day = chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d").map_err(|_| err(StatusCode::BAD_REQUEST, "Date attendue : AAAA-MM-JJ"))?;
+    let day = if end { day.succ_opt().unwrap_or(day) } else { day };
+    let local = day
+        .and_hms_opt(0, 0, 0)
+        .and_then(|d| d.and_local_timezone(chrono::Local).earliest())
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "Date invalide"))?;
+    Ok(local.with_timezone(&Utc))
+}
+
+#[derive(Deserialize)]
+struct AuditQuery {
+    compte: Option<String>,
+    serveur: Option<String>,
+    depuis: Option<String>,
+    jusqua: Option<String>,
+    texte: Option<String>,
+    frappe: Option<bool>,
+    limite: Option<i64>,
+}
+
+fn nonempty(v: Option<String>) -> Option<String> {
+    v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+async fn audit_sessions(AxState(api): Ctx, headers: HeaderMap, Query(q): Query<AuditQuery>) -> ApiResult {
+    let (_, own) = reader(&api, &headers).await?;
+    let restricted = own.is_some();
+    let text = nonempty(q.texte);
+    let filter = model::AuditFilter {
+        login: own.or(nonempty(q.compte)),
+        target: nonempty(q.serveur),
+        since: nonempty(q.depuis).map(|d| parse_day(&d, false)).transpose()?,
+        until: nonempty(q.jusqua).map(|d| parse_day(&d, true)).transpose()?,
+        text: text.clone(),
+        with_input: q.frappe.unwrap_or(false),
+        // Une recherche lit chaque fichier trouvé pour donner le moment : liste plus courte.
+        limit: q.limite.unwrap_or(200).clamp(1, if text.is_some() { 100 } else { 2000 }),
+    };
+    let rows = model::audit_sessions(&api.state.db, &filter).await?;
+    // Moment et extrait de la recherche, lus dans les fichiers (hors du fil de l'API).
+    let found: Vec<Option<(f64, String)>> = match &text {
+        Some(t) => {
+            let jobs: Vec<Option<String>> = rows.iter().map(|s| s.recording.clone()).collect();
+            let t = t.clone();
+            tokio::task::spawn_blocking(move || {
+                jobs.into_iter()
+                    .map(|path| path.and_then(|p| std::fs::read_to_string(p).ok()).and_then(|c| crate::replay::Cast::parse(&c).find(&t)))
+                    .collect()
+            })
+            .await
+            .map_err(|e| anyhow!("recherche : {e}"))?
+        }
+        None => vec![None; rows.len()],
+    };
+    let list: Vec<Value> = rows
+        .into_iter()
+        .zip(found)
+        .map(|(s, hit)| {
+            json!({
+                "id": s.id, "compte": s.login, "serveur": s.target, "type": s.kind, "detail": s.detail, "mode": s.mode,
+                "adresse": s.client_addr, "debut": s.started_at, "fin": s.ended_at, "enregistree": s.recording.is_some(),
+                "frappe": s.frappe, "octets": s.bytes,
+                "trouve": hit.map(|(t, extrait)| json!({ "t": t, "extrait": extrait })),
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "sessions": list, "propres_seulement": restricted })))
+}
+
+#[derive(Deserialize)]
+struct RecordingQuery {
+    reveler: Option<bool>,
+}
+
+async fn audit_recording(AxState(api): Ctx, headers: HeaderMap, Path(id): Path<Uuid>, Query(q): Query<RecordingQuery>) -> ApiResult {
+    let (user, own) = reader(&api, &headers).await?;
+    let state = &api.state;
+    let s = model::audit_session(&state.db, id)
+        .await?
+        .filter(|s| own.as_ref().is_none_or(|o| *o == s.login))
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "Session introuvable"))?;
+    let path = s.recording.clone().ok_or_else(|| err(StatusCode::NOT_FOUND, "Cette session n'a pas été enregistrée"))?;
+    let reveal = q.reveler.unwrap_or(false);
+    if reveal && user.role != "admin" {
+        return Err(err(StatusCode::FORBIDDEN, "Seul un administrateur peut révéler les saisies masquées"));
+    }
+    let raw = tokio::task::spawn_blocking(move || std::fs::read(path))
+        .await
+        .map_err(|e| anyhow!("lecture : {e}"))?
+        .map_err(|e| err(StatusCode::NOT_FOUND, format!("Fichier d'enregistrement illisible : {e}")))?;
+    let sha = sha256_hex(&raw);
+    let signature = match (&s.recording_sha256, &s.signature) {
+        (Some(expected), Some(sig)) => {
+            let sig = base64::engine::general_purpose::STANDARD.decode(sig).unwrap_or_default();
+            let message = crate::recording::signature_message(id, &sha);
+            if *expected == sha && state.keys.verify(message.as_bytes(), &sig) {
+                "verifiee"
+            } else {
+                "alteree"
+            }
+        }
+        // Session en cours ou interrompue : pas encore de signature.
+        _ => "absente",
+    };
+    let text = String::from_utf8_lossy(&raw);
+    let cast = crate::replay::Cast::parse(&text);
+    let hidden = cast.lines.iter().filter(|l| l.secret).count();
+    let content = if reveal { text.into_owned() } else { cast.masked() };
+    audit::note(
+        &state.db,
+        &user.login,
+        if reveal { "enregistrement.revele" } else { "enregistrement.consulte" },
+        json!({ "session": id, "cible": s.target, "compte": s.login }),
+    )
+    .await;
+    let views: Vec<(String, DateTime<Utc>, String)> = sqlx::query_as(
+        "SELECT actor, at, event FROM audit WHERE event IN ('enregistrement.consulte', 'enregistrement.revele') AND detail->>'session' = $1
+         ORDER BY seq DESC LIMIT 20",
+    )
+    .bind(id.to_string())
+    .fetch_all(&state.db)
+    .await?;
+    Ok(Json(json!({
+        "session": {
+            "id": s.id, "compte": s.login, "serveur": s.target, "type": s.kind, "detail": s.detail, "mode": s.mode,
+            "adresse": s.client_addr, "debut": s.started_at, "fin": s.ended_at, "frappe": s.frappe, "octets": raw.len(),
+        },
+        "cast": content,
+        "revele": reveal,
+        "saisies_masquees": hidden,
+        "signature": signature,
+        "empreinte": sha,
+        "commandes_sensibles": sensitive_commands(state).await?,
+        "consultations": views.into_iter().map(|(qui, date, evenement)| json!({ "qui": qui, "date": date, "evenement": evenement })).collect::<Vec<_>>(),
+    })))
 }

@@ -833,9 +833,12 @@ async fn finish(ctx: &Ctx, id: Uuid, recorder: Option<Recorder>, started: std::t
         signature: None,
         bytes: 0,
     };
+    let mut index = None;
     if let Some(rec) = recorder {
+        let with_input = rec.records_input();
         match rec.finish(&ctx.state.keys, id) {
             Ok((path, sha, sig, bytes)) => {
+                index = Some((path.clone(), with_input));
                 done = model::Finished {
                     recording: Some(path),
                     sha256: Some(sha),
@@ -849,6 +852,19 @@ async fn finish(ctx: &Ctx, id: Uuid, recorder: Option<Recorder>, started: std::t
     let bytes = done.bytes;
     if let Err(e) = model::session_end(&ctx.state.db, id, done).await {
         tracing::error!("fin de session {id} : {e:#}");
+    }
+    // Texte de la session pour la recherche de l'audit (saisies masquées exclues).
+    if let Some((path, with_input)) = index {
+        let text = tokio::task::spawn_blocking(move || std::fs::read_to_string(path).map(|c| crate::replay::Cast::parse(&c).search_text())).await;
+        match text {
+            Ok(Ok(text)) => {
+                if let Err(e) = model::session_index(&ctx.state.db, id, with_input, &text).await {
+                    tracing::error!("index de la session {id} : {e:#}");
+                }
+            }
+            Ok(Err(e)) => tracing::error!("index de la session {id} : {e}"),
+            Err(e) => tracing::error!("index de la session {id} : {e}"),
+        }
     }
     audit::note(
         &ctx.state.db,

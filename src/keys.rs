@@ -117,6 +117,13 @@ impl Keys {
     pub fn signature_public_key(&self) -> Vec<u8> {
         self.signer.public_key().as_ref().to_vec()
     }
+
+    /// Vérifie une signature produite par `sign` (clé publique du bastion).
+    pub fn verify(&self, message: &[u8], signature: &[u8]) -> bool {
+        ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, self.signer.public_key().as_ref())
+            .verify(message, signature)
+            .is_ok()
+    }
 }
 
 fn aad(purpose: &str) -> Vec<u8> {

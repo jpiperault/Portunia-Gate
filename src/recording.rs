@@ -34,8 +34,8 @@ impl Recorder {
         let mut out = BufWriter::new(File::create(&path)?);
         let header = json!({
             "version": 2,
-            "width": cols.max(1),
-            "height": rows.max(1),
+            "width": if cols < 10 { 80 } else { cols },
+            "height": if rows < 3 { 24 } else { rows },
             "timestamp": now.timestamp(),
             "title": title,
             "env": { "TERM": "xterm-256color" },
@@ -76,6 +76,10 @@ impl Recorder {
 
     pub fn resize(&mut self, cols: u32, rows: u32) {
         self.event("r", &format!("{cols}x{rows}"));
+    }
+
+    pub fn records_input(&self) -> bool {
+        self.record_input
     }
 
     pub fn flush(&mut self) {

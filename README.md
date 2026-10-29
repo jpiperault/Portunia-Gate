@@ -2,7 +2,7 @@
 
 Bastion SSH de [Portunia](https://github.com/jpiperault/Portunia) : les utilisateurs passent par Heimdia pour atteindre les serveurs ; Heimdia vérifie qui ils sont, décide où ils peuvent aller, fournit si besoin le compte du serveur sans le leur montrer, enregistre les sessions et trace tout dans un journal infalsifiable.
 
-> État : **version 0.4, paquet Debian et assistant d'installation**. La relecture et la vue en direct arrivent à l'étape 3 (voir [Feuille de route](#feuille-de-route)).
+> État : **version 0.5, relecture des sessions** (lecteur avec la frappe en sous-titres, recherche, saisies masquées). La vue en direct arrive ensuite (voir [Feuille de route](#feuille-de-route)).
 
 ## Ce que fait Heimdia
 
@@ -12,8 +12,9 @@ Bastion SSH de [Portunia](https://github.com/jpiperault/Portunia) : les utilisat
 | **Connexion au bastion** | Mot de passe, clé SSH et code TOTP (Google Authenticator, Microsoft Authenticator…), combinables au choix : politique générale et politique par compte. Un code ne sert qu'une fois. |
 | **Droits** | Des règles relient un groupe à des serveurs, avec jours, heures, date d'expiration, SFTP et tunnels autorisés ou non. Tout ce qui n'est pas permis est refusé. |
 | **Enregistrement** | Format asciicast (lisible par Portunia et asciinema), affichage seul ou aussi la frappe selon la règle. Chaque fichier est signé par le bastion. |
+| **Relecture** | Dans Portunia, comme une vidéo : la frappe en sous-titres, les pauses sautées, les commandes sensibles repérées, la recherche dans toutes les sessions. Les mots de passe tapés sont masqués ; chaque relecture est inscrite au journal. |
 | **Journal d'audit** | Connexions, échecs, sessions, changements d'administration. Chaque événement contient l'empreinte du précédent : une ligne supprimée ou modifiée se voit (`heimdia audit --verify`). |
-| **Portunia** | Extension Heimdia : le bastion s'ajoute dans la barre latérale, ses serveurs s'ouvrent avec un jeton à usage unique, et les administrateurs gèrent tout depuis Portunia (serveurs et coffre, comptes, groupes, règles, journal, sessions, réglages). |
+| **Portunia** | Extension Heimdia : le bastion s'ajoute dans la barre latérale, ses serveurs s'ouvrent avec un jeton à usage unique, les administrateurs gèrent tout depuis Portunia (serveurs et coffre, comptes, groupes, règles, réglages) et les auditeurs relisent les sessions et le journal. |
 | **Autres clients** | N'importe quel client SSH : OpenSSH, PuTTY, MobaXterm, WinSCP (SFTP). |
 
 ## Installer
@@ -162,11 +163,42 @@ L'empreinte change : les utilisateurs devront valider la nouvelle (`sudo heimdia
    - **coffre** : connexion directe, le bastion fournit le compte ;
    - **enregistré** : le serveur demande vos identifiants dans le terminal ;
    - **rebond** : Portunia demande vos identifiants du serveur, la connexion est chiffrée de bout en bout.
-7. **Administrer** (Portunia Équipes, compte administrateur) : menu **⋯** du bastion › **Administrer**. Un onglet s'ouvre avec les serveurs et le coffre, les comptes, les groupes, les règles, le journal, les sessions et les réglages.
+7. **Administrer** (Portunia Équipes, compte administrateur) : menu **⋯** du bastion › **Administrer**. Un onglet s'ouvre avec les serveurs et le coffre, les comptes, les groupes, les règles et les réglages.
+8. **Auditer** (Portunia Équipes, compte administrateur ou auditeur) : menu **⋯** du bastion › **Audit**. Un onglet s'ouvre avec les sessions et le journal (voir [Relire les sessions](#relire-les-sessions)).
 
-Les comptes suivants se créent depuis cet onglet : Portunia affiche un mot de passe provisoire à transmettre à l'utilisateur, qui suivra les étapes 2 à 5.
+Les comptes suivants se créent depuis l'onglet d'administration : Portunia affiche un mot de passe provisoire à transmettre à l'utilisateur, qui suivra les étapes 2 à 5.
 
 Rien ne s'affiche sous le bastion ? Aucune règle ne donne encore accès à un serveur : créez un serveur, un groupe contenant le compte, puis une règle qui les relie.
+
+## Relire les sessions
+
+Menu **⋯** du bastion › **Audit** › **Sessions** (rôles administrateur et auditeur).
+
+**Trouver une session** : filtres par compte, serveur et période, case « Avec frappe ». La recherche porte sur la frappe et sur le texte affiché de toutes les sessions enregistrées : la colonne « Trouvé » donne le moment et l'extrait, un clic ouvre la relecture à cet endroit.
+
+**Le lecteur**, dans un onglet :
+
+| | |
+|---|---|
+| Lecture | Lecture et pause (barre d'espace), ±10 s (flèches : ±5 s), vitesse 1× à 16×, plein écran. Un clic sur la barre de temps ou sur une ligne du panneau y saute. |
+| Pauses | Les moments sans activité de plus de 5 s sont hachurés sur la barre et sautés pendant la lecture (bouton « Sauter les pauses »). |
+| Sous-titres | Bouton **CC Frappe** : ce que la personne tape, touches spéciales comprises (Entrée, Tab, ⌫, Ctrl+C, flèches). |
+| Repères | Chaque commande ; en orange sudo, Ctrl+C et les saisies masquées ; en rouge les commandes sensibles ; en bas, les erreurs affichées. |
+| Panneau | **Frappe** : les lignes tapées, horodatées, avec recherche. **Informations** : compte, serveur, mode, adresse, durée, empreinte, signature, relectures précédentes. |
+| Signature | Vérifiée à chaque ouverture. Un fichier modifié depuis la session est signalé en rouge. |
+| Exports | **Enregistrement .cast** (lisible par asciinema) et **Transcription** (texte horodaté). |
+
+**Saisies masquées** : une frappe qui ne s'affiche pas à l'écran (mot de passe de sudo, su, ssh…) est remplacée par des points de longueur fixe, dans le lecteur comme dans la recherche. Elle reste dans le fichier signé : un administrateur peut la **révéler** (bouton dans le lecteur), et cette relecture est inscrite au journal (`enregistrement.revele`). L'export `.cast` d'une relecture masquée est une copie non signée ; celui d'une relecture révélée est le fichier d'origine, signé.
+
+**Sessions sans frappe** (règle qui n'enregistre que l'écran) : pas de sous-titres ; le panneau liste les commandes repérées à l'écran, après l'invite.
+
+**Chaque relecture est inscrite au journal** (`enregistrement.consulte`), et le lecteur affiche en filigrane le compte qui regarde.
+
+**Relire ses propres sessions** : Administrer › Réglages › « Chaque compte peut relire ses propres sessions ». Les comptes « utilisateur » voient alors **Mes sessions** dans le menu du bastion, sans pouvoir révéler les saisies masquées.
+
+**Commandes sensibles** : Administrer › Réglages, une par ligne (par défaut `rm -rf`, `mkfs`, `dd if=`, `shutdown`, `reboot`, `DROP TABLE`…).
+
+Les sessions enregistrées avant la version 0.5 se relisent, mais n'entrent pas dans la recherche.
 
 ## Se connecter sans Portunia
 
@@ -192,7 +224,7 @@ sudo heimdia user add marc --provisoire                      # mot de passe prov
 sudo heimdia user add marc                                   # mot de passe et code saisis ici
 sudo heimdia user add presta --policy "key+totp"             # clé SSH et code obligatoires
 sudo heimdia user key marc "ssh-ed25519 AAAA… marc@pc"
-sudo heimdia user role marc admin                            # user, auditor (journal en lecture) ou admin
+sudo heimdia user role marc auditor                          # user, auditor (relecture et journal) ou admin
 sudo heimdia user list | passwd marc | totp marc | disable marc | delete marc
 
 # Groupes
@@ -227,6 +259,6 @@ Voir aussi [docs/exploitation.md](docs/exploitation.md) : sauvegardes, mise à j
 
 1. **Socle** : proxy SSH, trois modes, coffre, comptes et TOTP, droits, enregistrement signé, journal chaîné, Docker Compose.
 2. **Intégration Portunia** : API, ajout du bastion dans Portunia, serveurs dans la barre latérale, jetons à usage unique, première connexion, administration complète, clé générée et installée sur les serveurs du coffre. Assistant d'installation (0.3), paquet Debian (0.4).
-3. **Audit** : relecture et recherche, vue en direct et coupure, conservation réglable avec estimation du disque, syslog et CSV.
+3. **Audit** : relecture et recherche (0.5), vue en direct et coupure, vidéo MP4 à la demande, lecteur détachable, conservation réglable avec estimation du disque, syslog et CSV.
 4. **Exploitation** : sauvegarde intégrée, dépôt apt pour les mises à jour, paquet ARM, imports (Portunia, CSV), console web activable.
 5. **Console maître** : un Heimdia central pour les prestataires, des relais chez les clients.

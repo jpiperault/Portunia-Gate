@@ -454,8 +454,9 @@ pub async fn create_rule(db: &PgPool, r: NewRule) -> Result<Uuid> {
 pub async fn session_start(db: &PgPool, id: Uuid, user: Uuid, target: Uuid, kind: &str, detail: &str, client: &str) -> Result<()> {
     // Les noms sont copiés : l'historique reste lisible si le compte ou le serveur est supprimé.
     sqlx::query(
-        "INSERT INTO sessions (id, user_id, target_id, kind, detail, client_addr, user_login, target_name)
-         VALUES ($1, $2, $3, $4, $5, $6, (SELECT login FROM users WHERE id = $2), (SELECT name FROM targets WHERE id = $3))",
+        "INSERT INTO sessions (id, user_id, target_id, kind, detail, client_addr, user_login, target_name, mode)
+         VALUES ($1, $2, $3, $4, $5, $6, (SELECT login FROM users WHERE id = $2), (SELECT name FROM targets WHERE id = $3),
+                 (SELECT mode FROM targets WHERE id = $3))",
     )
     .bind(id)
     .bind(user)
@@ -485,6 +486,81 @@ pub async fn session_end(db: &PgPool, id: Uuid, f: Finished) -> Result<()> {
         .execute(db)
         .await?;
     Ok(())
+}
+
+/// Index de relecture, calculé à la fermeture de l'enregistrement.
+pub async fn session_index(db: &PgPool, id: Uuid, frappe: bool, texte: &str) -> Result<()> {
+    sqlx::query("UPDATE sessions SET frappe = $2, texte = $3 WHERE id = $1")
+        .bind(id)
+        .bind(frappe)
+        .bind(texte)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+/// Session vue par l'audit (liste et lecteur).
+#[derive(sqlx::FromRow)]
+pub struct AuditSession {
+    pub id: Uuid,
+    pub login: String,
+    pub target: String,
+    pub kind: String,
+    pub detail: String,
+    pub mode: String,
+    pub client_addr: String,
+    pub started_at: DateTime<Utc>,
+    pub ended_at: Option<DateTime<Utc>>,
+    pub recording: Option<String>,
+    pub recording_sha256: Option<String>,
+    pub signature: Option<String>,
+    pub frappe: bool,
+    pub bytes: i64,
+}
+
+const AUDIT_COLUMNS: &str = "s.id, s.user_login AS login, s.target_name AS target, s.kind, s.detail, s.mode, s.client_addr,
+    s.started_at, s.ended_at, s.recording, s.recording_sha256, s.signature, s.frappe, s.bytes";
+
+#[derive(Default)]
+pub struct AuditFilter {
+    pub login: Option<String>,
+    pub target: Option<String>,
+    pub since: Option<DateTime<Utc>>,
+    pub until: Option<DateTime<Utc>>,
+    /// Recherche dans le texte indexé (écran et frappe).
+    pub text: Option<String>,
+    pub with_input: bool,
+    pub limit: i64,
+}
+
+pub async fn audit_sessions(db: &PgPool, f: &AuditFilter) -> Result<Vec<AuditSession>> {
+    let like = f.text.as_ref().map(|t| format!("%{}%", t.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")));
+    Ok(sqlx::query_as(&format!(
+        "SELECT {AUDIT_COLUMNS} FROM sessions s
+         WHERE ($1::text IS NULL OR s.user_login = $1)
+           AND ($2::text IS NULL OR s.target_name = $2)
+           AND ($3::timestamptz IS NULL OR s.started_at >= $3)
+           AND ($4::timestamptz IS NULL OR s.started_at < $4)
+           AND ($5::text IS NULL OR s.texte ILIKE $5)
+           AND (NOT $6 OR s.frappe)
+         ORDER BY s.started_at DESC LIMIT $7"
+    ))
+    .bind(&f.login)
+    .bind(&f.target)
+    .bind(f.since)
+    .bind(f.until)
+    .bind(like)
+    .bind(f.with_input)
+    .bind(f.limit)
+    .fetch_all(db)
+    .await?)
+}
+
+pub async fn audit_session(db: &PgPool, id: Uuid) -> Result<Option<AuditSession>> {
+    Ok(sqlx::query_as(&format!("SELECT {AUDIT_COLUMNS} FROM sessions s WHERE s.id = $1"))
+        .bind(id)
+        .fetch_optional(db)
+        .await?)
 }
 
 #[derive(sqlx::FromRow)]

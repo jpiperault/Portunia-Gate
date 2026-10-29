@@ -10,6 +10,7 @@ mod config;
 mod keys;
 mod model;
 mod recording;
+mod replay;
 mod sshd;
 mod target;
 mod tls;
