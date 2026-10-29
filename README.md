@@ -2,7 +2,7 @@
 
 Bastion SSH de [Portunia](https://github.com/jpiperault/Portunia) : les utilisateurs passent par Heimdia pour atteindre les serveurs ; Heimdia vérifie qui ils sont, décide où ils peuvent aller, fournit si besoin le compte du serveur sans le leur montrer, enregistre les sessions et trace tout dans un journal infalsifiable.
 
-> État : **étape 1, le socle**. L'intégration dans Portunia, la relecture et la vue en direct arrivent aux étapes suivantes (voir [Feuille de route](#feuille-de-route)).
+> État : **étape 2, intégration dans Portunia**. La relecture et la vue en direct arrivent à l'étape 3 (voir [Feuille de route](#feuille-de-route)).
 
 ## Ce que fait le socle
 
@@ -13,7 +13,9 @@ Bastion SSH de [Portunia](https://github.com/jpiperault/Portunia) : les utilisat
 | **Droits** | Des règles relient un groupe à des serveurs, avec jours, heures, date d'expiration, SFTP et tunnels autorisés ou non. Tout ce qui n'est pas permis est refusé. |
 | **Enregistrement** | Format asciicast (lisible par Portunia et asciinema), affichage seul ou aussi la frappe selon la règle. Chaque fichier est signé par le bastion. |
 | **Journal d'audit** | Connexions, échecs, sessions, changements d'administration. Chaque événement contient l'empreinte du précédent : une ligne supprimée ou modifiée se voit (`heimdia audit --verify`). |
-| **Clients** | N'importe quel client SSH : OpenSSH, PuTTY, MobaXterm, WinSCP (SFTP), et Portunia. |
+| **Clients** | N'importe quel client SSH : OpenSSH, PuTTY, MobaXterm, WinSCP (SFTP). |
+| **Portunia** | Extension Heimdia : le bastion s'ajoute dans la barre latérale (empreinte du certificat vérifiée, mot de passe et code), ses serveurs s'ouvrent avec un jeton à usage unique, et les administrateurs gèrent tout depuis Portunia (serveurs et coffre, comptes, groupes, règles, journal, sessions, réglages). |
+| **Première connexion** | Un compte créé par l'administrateur reçoit un mot de passe provisoire ; à sa première connexion dans Portunia, l'utilisateur le change puis enrôle lui-même son code par code QR. |
 
 ## Installer
 
@@ -28,7 +30,9 @@ docker compose run --rm heimdia init      # clés, base, compte administrateur e
 docker compose up -d
 ```
 
-`init` affiche l'empreinte SSH du bastion : notez-la, les utilisateurs la compareront à leur première connexion.
+Ports : **2222** (SSH) et **8443** (API HTTPS pour Portunia), modifiables dans `.env`. Le certificat de l'API est auto-signé ; Portunia le reconnaît par son empreinte. Pour un certificat d'entreprise, indiquez `HEIMDIA_TLS_CERT` et `HEIMDIA_TLS_KEY` (fichiers PEM).
+
+`init` affiche l'empreinte SSH du bastion et celle du certificat de l'API : notez-les, les utilisateurs les compareront à leur première connexion.
 
 **Sauvegardez tout de suite la clé du coffre** hors du serveur. Sans elle, les secrets des serveurs et les codes TOTP sont perdus :
 
@@ -84,8 +88,8 @@ Voir aussi [docs/exploitation.md](docs/exploitation.md) : sauvegardes, mise à j
 
 ## Feuille de route
 
-1. **Socle** (cette version) : proxy SSH, trois modes, coffre, comptes et TOTP, droits, enregistrement signé, journal chaîné, Docker Compose.
-2. **Intégration Portunia** : API, ajout du bastion dans Portunia, serveurs dans l'arbre, administration.
+1. **Socle** : proxy SSH, trois modes, coffre, comptes et TOTP, droits, enregistrement signé, journal chaîné, Docker Compose.
+2. **Intégration Portunia** (cette version) : API, ajout du bastion dans Portunia, serveurs dans la barre latérale, jetons à usage unique, première connexion, administration complète, clé générée et installée sur les serveurs du coffre.
 3. **Audit** : relecture et recherche, vue en direct et coupure, conservation réglable avec estimation du disque, syslog et CSV.
 4. **Exploitation** : sauvegarde intégrée, imports (Portunia, CSV), console web activable.
 5. **Console maître** : un Heimdia central pour les prestataires, des relais chez les clients.
