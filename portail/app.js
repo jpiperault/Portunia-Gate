@@ -138,11 +138,13 @@ async function home(state) {
         const ready = !s.indisponible;
         grid.append(h('button', {
           class: 'srv', type: 'button', disabled: !ready, title: s.indisponible || `Ouvrir ${s.nom} dans un nouvel onglet`,
-          onclick: () => window.open(`/session/${encodeURIComponent(s.nom)}`, '_blank', 'noopener'),
+          onclick: () => window.open(`/${s.protocole === 'rdp' ? 'bureau' : 'session'}/${encodeURIComponent(s.nom)}`, '_blank', 'noopener'),
         },
           h('b', {}, s.nom),
           h('span', { class: 'tags' }, h('span', { class: `tag ${s.protocole}` }, s.protocole.toUpperCase()), h('span', { class: `tag${s.mode === 'rebond' ? ' plain' : ''}` }, MODES[s.mode] || s.mode)),
-          h('small', {}, ready ? (s.mode === 'enregistre' ? 'Vos identifiants seront demandés dans le terminal' : 'Ouvrir dans un onglet de ce navigateur') : s.indisponible)));
+          h('small', {}, !ready ? s.indisponible
+            : s.protocole === 'rdp' ? 'Bureau à distance dans un onglet ; identifiants Windows demandés'
+            : s.mode === 'enregistre' ? 'Vos identifiants seront demandés dans le terminal' : 'Ouvrir dans un onglet de ce navigateur')));
       }
     }
     if (!list.length) grid.append(h('p', { class: 'empty' }, q ? 'Aucun serveur ne correspond.' : 'Aucun serveur ne vous est autorisé en ce moment.'));

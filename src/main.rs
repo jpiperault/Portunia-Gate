@@ -10,6 +10,7 @@ mod config;
 mod keys;
 mod model;
 mod portal;
+mod rdp;
 mod recording;
 mod replay;
 mod sshd;

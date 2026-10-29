@@ -2,7 +2,7 @@
 
 Bastion SSH de [Portunia](https://github.com/jpiperault/Portunia) : les utilisateurs passent par Heimdia pour atteindre les serveurs ; Heimdia vérifie qui ils sont, décide où ils peuvent aller, fournit si besoin le compte du serveur sans le leur montrer, enregistre les sessions et trace tout dans un journal infalsifiable.
 
-> État : **version 0.7, portail web** (serveurs SSH ouverts depuis un navigateur, derrière Cloudflare), Bureau à distance en rebond (0.6), relecture des sessions (0.5). Voir la [Feuille de route](#feuille-de-route).
+> État : **version 0.8, Bureau à distance enregistré**, aussi dans le navigateur (portail web) ; portail web SSH (0.7), Bureau à distance en rebond (0.6), relecture des sessions SSH (0.5). Voir la [Feuille de route](#feuille-de-route).
 
 ## Ce que fait Heimdia
 
@@ -15,7 +15,7 @@ Bastion SSH de [Portunia](https://github.com/jpiperault/Portunia) : les utilisat
 | **Relecture** | Dans Portunia, comme une vidéo : la frappe en sous-titres, les pauses sautées, les commandes sensibles repérées, la recherche dans toutes les sessions. Les mots de passe tapés sont masqués ; chaque relecture est inscrite au journal. |
 | **Journal d'audit** | Connexions, échecs, sessions, changements d'administration. Chaque événement contient l'empreinte du précédent : une ligne supprimée ou modifiée se voit (`heimdia audit --verify`). |
 | **Portunia** | Extension Heimdia : le bastion s'ajoute dans la barre latérale, ses serveurs s'ouvrent avec un jeton à usage unique, les administrateurs gèrent tout depuis Portunia (serveurs et coffre, comptes, groupes, règles, réglages) et les auditeurs relisent les sessions et le journal. |
-| **Bureau à distance** | Serveurs Windows (RDP) derrière le bastion, ouverts depuis Portunia. Version 0.6 : mode rebond (voir [Bureau à distance](#bureau-à-distance-rdp)). |
+| **Bureau à distance** | Serveurs Windows (RDP) derrière le bastion, ouverts depuis Portunia ou le portail web. Modes rebond et enregistré (voir [Bureau à distance](#bureau-à-distance-rdp)). |
 | **Portail web** | Pour qui n'a pas Portunia sous la main : une page de connexion et un terminal dans le navigateur, derrière Cloudflare, sans port ouvert. Activé ou coupé d'un clic dans Portunia (voir [Portail web](#portail-web)). |
 | **Autres clients** | N'importe quel client SSH : OpenSSH, PuTTY, MobaXterm, WinSCP (SFTP). |
 
@@ -206,19 +206,23 @@ Les sessions enregistrées avant la version 0.5 se relisent, mais n'entrent pas 
 
 Les serveurs Windows se déclarent comme les autres : Administrer › Serveurs et coffre › **Ajouter un serveur**, protocole **Bureau à distance (RDP)**, port 3389. Ils apparaissent sous le bastion dans Portunia avec un badge **RDP** et s'ouvrent dans un onglet Bureau à distance.
 
-**Version 0.6 : mode rebond seulement.** Portunia ouvre un tunnel à travers le bastion avec un jeton à usage unique (le même que pour SSH, sans code à retaper), puis se connecte au serveur Windows au bout de ce tunnel. La connexion RDP reste chiffrée de bout en bout : le bastion vérifie la règle, relaie et journalise (`rebond.ouvert`, durée, octets), sans voir le contenu ni l'enregistrer. L'utilisateur tape ses identifiants Windows à chaque ouverture ; Portunia ne les garde pas.
+Dans les deux modes, l'utilisateur tape ses identifiants Windows à chaque ouverture ; ni Portunia ni le bastion ne les gardent.
 
-| | |
-|---|---|
-| Réseau | Aucun port de plus sur le bastion : le tunnel passe par son port SSH (2222). Le bastion doit joindre le port 3389 des serveurs Windows. |
-| Client | Portunia (onglet Bureau à distance). L'extension Bureau à distance doit être activée ; sinon les serveurs RDP restent visibles, grisés. |
-| Terminal | Un serveur RDP n'apparaît pas dans le menu `ssh` du bastion et ne s'ouvre pas en terminal. |
+| | **Rebond** (0.6) | **Enregistré** (0.8) |
+|---|---|---|
+| Chemin | Tunnel par le port SSH du bastion (2222), avec un jeton à usage unique ; la connexion RDP est chiffrée de bout en bout. | Passage du bastion (RDCleanPath, sur le port de l'API ou du portail) avec un jeton à usage unique : le bastion ouvre la connexion chiffrée avec le serveur Windows et relaie la session. |
+| Ce que voit le bastion | Rien du contenu ; il vérifie la règle et journalise (`rebond.ouvert`, durée, octets). | La session (pour l'enregistrer), mais pas le mot de passe : l'authentification Windows (NLA) se fait entre le client et le serveur. |
+| Enregistrement | Non. | Oui, fichier signé (`.rdpcap`) ; relecture dans une prochaine version. |
+| Clients | Portunia. | Portunia et le **portail web** (Bureau à distance dans le navigateur). |
+| Certificat du serveur | Vérifié par le client. | Vérifié par le bastion : empreinte gardée à la première connexion, connexion refusée si elle change (`cible.empreinte_differente`). |
 
-Les modes **coffre** (compte Windows fourni par le bastion) et **enregistré**, l'enregistrement des sessions RDP et leur relecture arrivent dans les versions suivantes.
+Le bastion doit joindre le port 3389 des serveurs Windows. Dans Portunia, l'extension Bureau à distance doit être activée ; sinon les serveurs RDP restent visibles, grisés. Un serveur RDP n'apparaît pas dans le menu `ssh` du bastion et ne s'ouvre pas en terminal.
+
+Le mode **coffre** (compte Windows fourni par le bastion, sans rien taper) et la relecture des sessions RDP arrivent dans les versions suivantes.
 
 ## Portail web
 
-Une page web pour ouvrir ses serveurs SSH depuis n'importe quel navigateur, sans Portunia : connexion, liste des serveurs autorisés, terminal dans un onglet. Elle ne sert pas à l'administration. Le portail passe par le serveur SSH du bastion, avec un jeton à usage unique : mêmes règles, même coffre, même enregistrement, même journal. Une session web se relit dans l'audit comme une autre ; son adresse est suivie de « (web) ».
+Une page web pour ouvrir ses serveurs depuis n'importe quel navigateur, sans Portunia : connexion, liste des serveurs autorisés, terminal SSH ou Bureau à distance dans un onglet. Elle ne sert pas à l'administration. Le Bureau à distance passe par le passage RDCleanPath du bastion (serveurs en mode enregistré, voir [Bureau à distance](#bureau-à-distance-rdp)). Le portail passe par le serveur SSH du bastion, avec un jeton à usage unique : mêmes règles, même coffre, même enregistrement, même journal. Une session web se relit dans l'audit comme une autre ; son adresse est suivie de « (web) ».
 
 **Sécurité**
 
@@ -229,7 +233,7 @@ Une page web pour ouvrir ses serveurs SSH depuis n'importe quel navigateur, sans
 | Comptes | Seuls les membres du **groupe choisi** (« Accès web » par défaut). Première connexion et code perdu : pas sur le portail, mais avec Portunia ou l'administrateur. |
 | Session | Cookie « HttpOnly, Secure, SameSite=Strict », 1 heure par défaut ; fermeture après 15 minutes sans frappe (avertissement 90 s avant). |
 | Page | Rien de chargé depuis l'extérieur (sauf Turnstile), politique de contenu stricte, pas d'affichage dans un cadre d'un autre site, adresse publique vérifiée à chaque connexion. |
-| Serveurs | SSH en mode coffre ou enregistré. Les serveurs en rebond (de bout en bout) et le Bureau à distance restent avec Portunia. |
+| Serveurs | SSH en mode coffre ou enregistré ; Bureau à distance en mode enregistré (client RDP d'IronRDP dans la page, identifiants Windows tapés dans la page et envoyés au serveur, jamais au bastion). Les serveurs en rebond (de bout en bout) restent avec Portunia. |
 | Journal | `portail.connexion`, `portail.echec`, `portail.active`, `portail.desactive`, `portail.modifie`, `portail.sessions_fermees`. |
 
 **Mise en place**
@@ -305,7 +309,7 @@ Voir aussi [docs/exploitation.md](docs/exploitation.md) : sauvegardes, mise à j
 1. **Socle** : proxy SSH, trois modes, coffre, comptes et TOTP, droits, enregistrement signé, journal chaîné, Docker Compose.
 2. **Intégration Portunia** : API, ajout du bastion dans Portunia, serveurs dans la barre latérale, jetons à usage unique, première connexion, administration complète, clé générée et installée sur les serveurs du coffre. Assistant d'installation (0.3), paquet Debian (0.4).
 3. **Audit** : relecture et recherche (0.5), vue en direct et coupure, vidéo MP4 à la demande, lecteur détachable, conservation réglable avec estimation du disque, syslog et CSV.
-4. **Bureau à distance** : rebond (0.6), puis coffre (le bastion ouvre la session Windows avec le compte du coffre), règles (presse-papiers, son), enregistrement signé et relecture, mode enregistré.
-5. **Portail web** : SSH dans le navigateur derrière Cloudflare (0.7), puis Bureau à distance, clés d'accès (passkeys), personnalisation.
+4. **Bureau à distance** : rebond (0.6), enregistré avec enregistrement signé (0.8), puis relecture, coffre (le bastion ouvre la session Windows avec le compte du coffre), règles (presse-papiers, son).
+5. **Portail web** : SSH (0.7) et Bureau à distance (0.8) dans le navigateur derrière Cloudflare, puis clés d'accès (passkeys), personnalisation.
 6. **Exploitation** : sauvegarde intégrée, dépôt apt pour les mises à jour, paquet ARM, imports (Portunia, CSV), console web activable.
 7. **Console maître** : un Heimdia central pour les prestataires, des relais chez les clients.

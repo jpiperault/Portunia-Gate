@@ -110,6 +110,7 @@ pub async fn run(state: Arc<State>) -> anyhow::Result<()> {
         .route("/api/v1/admin/journal.csv", get(admin_journal_csv))
         .route("/api/v1/admin/sessions", get(admin_sessions))
         .route("/api/v1/admin/reglages", get(admin_settings).put(admin_settings_update))
+        .route("/api/v1/rdp", get(rdp_passage))
         .route("/api/v1/admin/portail", get(admin_portal).put(admin_portal_update))
         .route("/api/v1/admin/portail/fermer-sessions", post(admin_portal_close))
         .route("/api/v1/audit/sessions", get(audit_sessions))
@@ -487,6 +488,17 @@ pub async fn issue_ticket(db: &sqlx::PgPool, user: Uuid, target: Uuid, client_ad
     .execute(db)
     .await?;
     Ok(ticket)
+}
+
+/// Jeton présenté sans compte ni serveur (passage Bureau à distance) : consommé, il dit
+/// pour qui et vers quoi il a été émis, et l'adresse réelle qu'il porte.
+pub async fn take_ticket(db: &sqlx::PgPool, ticket: &str) -> anyhow::Result<Option<(Uuid, Uuid, Option<String>)>> {
+    Ok(sqlx::query_as(
+        "DELETE FROM ssh_tickets WHERE ticket_hash = $1 AND expires_at > now() RETURNING user_id, target_id, client_addr",
+    )
+    .bind(sha256_hex(ticket.as_bytes()))
+    .fetch_optional(db)
+    .await?)
 }
 
 /// Utilisé par le serveur SSH : un jeton valide pour ce compte et ce serveur est consommé.
@@ -1460,6 +1472,8 @@ async fn audit_sessions(AxState(api): Ctx, headers: HeaderMap, Query(q): Query<A
             json!({
                 "id": s.id, "compte": s.login, "serveur": s.target, "type": s.kind, "detail": s.detail, "mode": s.mode,
                 "adresse": s.client_addr, "debut": s.started_at, "fin": s.ended_at, "enregistree": s.recording.is_some(),
+                // Bureau à distance : enregistré et signé, relecture dans une prochaine version.
+                "relisible": s.recording.is_some() && s.kind != "rdp",
                 "frappe": s.frappe, "octets": s.bytes,
                 "trouve": hit.map(|(t, extrait)| json!({ "t": t, "extrait": extrait })),
             })
@@ -1481,6 +1495,9 @@ async fn audit_recording(AxState(api): Ctx, headers: HeaderMap, Path(id): Path<U
         .filter(|s| own.as_ref().is_none_or(|o| *o == s.login))
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "Session introuvable"))?;
     let path = s.recording.clone().ok_or_else(|| err(StatusCode::NOT_FOUND, "Cette session n'a pas été enregistrée"))?;
+    if s.kind == "rdp" {
+        return Err(err(StatusCode::CONFLICT, "Session Bureau à distance enregistrée et signée : sa relecture arrive dans une prochaine version"));
+    }
     let reveal = q.reveler.unwrap_or(false);
     if reveal && user.role != "admin" {
         return Err(err(StatusCode::FORBIDDEN, "Seul un administrateur peut révéler les saisies masquées"));
@@ -1534,6 +1551,20 @@ async fn audit_recording(AxState(api): Ctx, headers: HeaderMap, Path(id): Path<U
         "commandes_sensibles": sensitive_commands(state).await?,
         "consultations": views.into_iter().map(|(qui, date, evenement)| json!({ "qui": qui, "date": date, "evenement": evenement })).collect::<Vec<_>>(),
     })))
+}
+
+// ---------- Bureau à distance (Portunia) ----------
+
+/// Passage RDCleanPath pour Portunia : le jeton à usage unique de /serveurs/{nom}/ticket
+/// est présenté dans la demande RDCleanPath elle-même.
+async fn rdp_passage(
+    AxState(api): Ctx,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> Response {
+    let state = api.state.clone();
+    let addr = addr.ip().to_string();
+    ws.on_upgrade(move |socket| crate::rdp::relay(state, socket, crate::rdp::Origin::Portunia { addr }))
 }
 
 // ---------- Administration : portail web ----------

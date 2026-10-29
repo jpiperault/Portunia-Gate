@@ -219,13 +219,14 @@ pub struct Target {
     pub protocole: String,
 }
 
-/// Protocole et mode compatibles. Bureau à distance : rebond seulement pour l'instant
-/// (le bastion relaie la connexion chiffrée sans la lire).
+/// Protocole et mode compatibles. Bureau à distance : rebond (le bastion relaie la connexion
+/// chiffrée sans la lire) ou enregistré (le bastion relaie et enregistre ; identifiants
+/// Windows tapés par l'utilisateur). Le coffre arrive ensuite.
 pub fn check_protocol(protocole: &str, mode: &str) -> Result<()> {
     match protocole {
         "ssh" => Ok(()),
-        "rdp" if mode == "rebond" => Ok(()),
-        "rdp" => bail!("Bureau à distance : seul le mode rebond est disponible pour l'instant (coffre et enregistré arrivent)"),
+        "rdp" if mode == "rebond" || mode == "enregistre" => Ok(()),
+        "rdp" => bail!("Bureau à distance : modes rebond et enregistré pour l'instant (le coffre arrive)"),
         _ => bail!("Protocole inconnu : ssh ou rdp"),
     }
 }

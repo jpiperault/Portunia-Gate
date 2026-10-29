@@ -82,6 +82,19 @@ impl Live {
     pub fn close_all(&self) {
         self.close.send_modify(|g| *g += 1);
     }
+
+    pub fn active_inc(&self) {
+        self.active.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn active_dec(&self) {
+        self.active.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    /// Signal de fermeture, pour une session web qui commence.
+    pub fn subscribe(&self) -> watch::Receiver<u64> {
+        self.close.subscribe()
+    }
 }
 
 // ---------- Réglages ----------
@@ -186,6 +199,9 @@ fn router(state: Arc<State>, cloudflare_only: bool) -> Router {
         .route("/api/deconnexion", post(logout))
         .route("/api/serveurs", get(servers))
         .route("/ws/{nom}", get(terminal))
+        .route("/bureau/{nom}", get(page_desktop))
+        .route("/api/rdp/{nom}", post(desktop_ticket))
+        .route("/ws-rdp", get(desktop))
         .layer(middleware::from_fn_with_state(portal.clone(), guard))
         .with_state(portal)
 }
@@ -247,8 +263,10 @@ async fn guard(AxState(portal): Ctx, ConnectInfo(peer): ConnectInfo<SocketAddr>,
     h.insert(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static(
-            "default-src 'self'; script-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; \
-             style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+            // 'wasm-unsafe-eval' et data: : le client Bureau à distance (IronRDP) est un module
+            // WebAssembly embarqué dans son script, chargé depuis une adresse data:.
+            "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; \
+             style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
         ),
     );
     h.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
@@ -286,6 +304,7 @@ fn internal(e: impl std::fmt::Display) -> Response {
 
 const INDEX: &str = include_str!("../portail/index.html");
 const SESSION: &str = include_str!("../portail/session.html");
+const DESKTOP: &str = include_str!("../portail/bureau.html");
 
 fn page(html: &'static str) -> Response {
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
@@ -299,6 +318,10 @@ async fn page_session(Path(_nom): Path<String>) -> Response {
     page(SESSION)
 }
 
+async fn page_desktop(Path(_nom): Path<String>) -> Response {
+    page(DESKTOP)
+}
+
 async fn asset(Path(fichier): Path<String>) -> Response {
     let (kind, body): (&str, &'static [u8]) = match fichier.as_str() {
         "app.css" => ("text/css; charset=utf-8", include_bytes!("../portail/app.css")),
@@ -307,6 +330,9 @@ async fn asset(Path(fichier): Path<String>) -> Response {
         "xterm.js" => ("text/javascript; charset=utf-8", include_bytes!("../portail/xterm.js")),
         "xterm.css" => ("text/css; charset=utf-8", include_bytes!("../portail/xterm.css")),
         "addon-fit.js" => ("text/javascript; charset=utf-8", include_bytes!("../portail/addon-fit.js")),
+        "bureau.js" => ("text/javascript; charset=utf-8", include_bytes!("../portail/bureau.js")),
+        "iron-remote-desktop.js" => ("text/javascript; charset=utf-8", include_bytes!("../portail/iron-remote-desktop.js")),
+        "iron-remote-desktop-rdp.js" => ("text/javascript; charset=utf-8", include_bytes!("../portail/iron-remote-desktop-rdp.js")),
         _ => return StatusCode::NOT_FOUND.into_response(),
     };
     ([(header::CONTENT_TYPE, kind), (header::CACHE_CONTROL, "public, max-age=3600")], body).into_response()
@@ -534,8 +560,8 @@ async fn logout(AxState(portal): Ctx, headers: HeaderMap) -> Response {
 
 /// Peut s'ouvrir dans le navigateur : SSH, hors mode rebond (de bout en bout, il faut Portunia).
 fn web_ready(t: &model::Target) -> Option<&'static str> {
-    if t.is_rdp() {
-        Some("Bureau à distance : bientôt dans le navigateur, en attendant avec Portunia")
+    if t.is_rdp() && t.mode == "coffre" {
+        Some("Bureau à distance en mode coffre : bientôt dans le navigateur")
     } else if t.mode == "rebond" {
         Some("Disponible seulement avec Portunia (relais de bout en bout)")
     } else {
@@ -556,7 +582,7 @@ async fn servers(AxState(portal): Ctx, headers: HeaderMap) -> Response {
             .map(|t| {
                 json!({
                     "nom": t.name, "dossier": t.folder, "protocole": t.protocole,
-                    "mode": t.mode, "indisponible": web_ready(t),
+                    "mode": t.mode, "compte": t.account, "indisponible": web_ready(t),
                 })
             })
             .collect();
@@ -598,7 +624,7 @@ async fn terminal(
         let Some(w) = web_session(&portal, &headers, &s).await? else {
             return Ok(Err(err(StatusCode::UNAUTHORIZED, "Session expirée")));
         };
-        let target = model::target_by_name(&state.db, &nom).await?.filter(|t| web_ready(t).is_none());
+        let target = model::target_by_name(&state.db, &nom).await?.filter(|t| !t.is_rdp() && web_ready(t).is_none());
         let Some(target) = target else {
             return Ok(Err(err(StatusCode::NOT_FOUND, "Serveur indisponible dans le navigateur")));
         };
@@ -625,6 +651,62 @@ async fn terminal(
         }
         state.web.active.fetch_sub(1, Ordering::Relaxed);
     })
+}
+
+// ---------- Bureau à distance ----------
+
+/// Origine de la page : la même que l'adresse publique (ou que l'hôte demandé si elle n'est pas réglée).
+fn origin_ok(headers: &HeaderMap, public_url: &str) -> bool {
+    let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) else { return true };
+    let host = headers.get(header::HOST).and_then(|v| v.to_str().ok()).unwrap_or_default();
+    let expected = public_url.trim_end_matches('/');
+    if expected.is_empty() {
+        origin.ends_with(&format!("//{host}"))
+    } else {
+        origin.trim_end_matches('/') == expected
+    }
+}
+
+/// Jeton à usage unique pour ouvrir un serveur Bureau à distance depuis la page : le client
+/// RDP du navigateur le présente au passage (/ws-rdp).
+async fn desktop_ticket(AxState(portal): Ctx, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap, Path(nom): Path<String>) -> Response {
+    let ip = client_ip(&portal, peer, &headers);
+    let result = async {
+        let state = &portal.state;
+        let s = settings(state).await?;
+        if !same_site(&headers, &s.url) {
+            return Ok(err(StatusCode::FORBIDDEN, "Requête refusée"));
+        }
+        let Some(w) = web_session(&portal, &headers, &s).await? else {
+            return Ok(err(StatusCode::UNAUTHORIZED, "Session expirée"));
+        };
+        let target = model::target_by_name(&state.db, &nom).await?.filter(|t| t.is_rdp() && web_ready(t).is_none());
+        let Some(target) = target else {
+            return Ok(err(StatusCode::NOT_FOUND, "Serveur indisponible dans le navigateur"));
+        };
+        if model::access(&state.db, w.user.id, target.id).await?.is_none() {
+            return Ok(err(StatusCode::FORBIDDEN, "Serveur non autorisé en ce moment"));
+        }
+        let ticket = crate::api::issue_ticket(&state.db, w.user.id, target.id, Some(&format!("{ip} (web)"))).await?;
+        Ok::<_, anyhow::Error>(Json(json!({ "jeton": ticket, "compte": target.account })).into_response())
+    }
+    .await;
+    result.unwrap_or_else(internal)
+}
+
+/// Passage RDCleanPath du client RDP du navigateur.
+async fn desktop(AxState(portal): Ctx, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
+    let addr = client_ip(&portal, peer, &headers);
+    let url = match settings(&portal.state).await {
+        Ok(s) if s.enabled => s.url,
+        Ok(_) => return err(StatusCode::SERVICE_UNAVAILABLE, "Portail fermé"),
+        Err(e) => return internal(e),
+    };
+    if !origin_ok(&headers, &url) {
+        return err(StatusCode::FORBIDDEN, "Origine refusée");
+    }
+    let state = portal.state.clone();
+    ws.on_upgrade(move |socket| crate::rdp::relay(state, socket, crate::rdp::Origin::Portal { addr }))
 }
 
 /// Accepte seulement la clé du bastion lui-même (connexion locale).
