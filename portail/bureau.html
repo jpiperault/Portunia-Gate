@@ -1,32 +1,32 @@
 <!doctype html>
-<html lang="fr">
+<html lang="__L__">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
-<title>Bureau à distance</title>
+<title>{{Remote Desktop|Bureau à distance}}</title>
 <link rel="stylesheet" href="/static/app.css?v=__V__">
 </head>
 <body class="session-page desktop-page">
 <header class="sbar">
   <b id="nom"></b>
   <span class="tag rdp">RDP</span>
-  <span class="rec"><i></i>Enregistré</span>
+  <span class="rec"><i></i>{{Recorded|Enregistré}}</span>
   <span class="grow"></span>
-  <button class="btn" id="cad" type="button" disabled>Ctrl+Alt+Suppr</button>
-  <button class="btn" id="plein" type="button" disabled>Plein écran</button>
-  <a class="btn" href="/">Mes serveurs</a>
-  <button class="btn" id="fermer" type="button">Fermer</button>
+  <button class="btn" id="cad" type="button" disabled>{{Ctrl+Alt+Del|Ctrl+Alt+Suppr}}</button>
+  <button class="btn" id="plein" type="button" disabled>{{Full screen|Plein écran}}</button>
+  <a class="btn" href="/">{{My servers|Mes serveurs}}</a>
+  <button class="btn" id="fermer" type="button">{{Close|Fermer}}</button>
 </header>
 <main id="ecran" class="desktop">
   <form id="identifiants" class="card desktop-login" novalidate>
-    <h1>Identifiants Windows</h1>
-    <p class="legal">Ils sont envoyés au serveur Windows par une connexion chiffrée : le bastion relaie et enregistre la session, mais ne voit pas votre mot de passe.</p>
-    <label>Utilisateur<input id="utilisateur" autocomplete="username" spellcheck="false" autocapitalize="off" required></label>
-    <label>Mot de passe<input id="mdp" type="password" autocomplete="current-password" required></label>
-    <label>Domaine (facultatif)<input id="domaine" spellcheck="false" autocapitalize="off" placeholder="ACME"></label>
+    <h1>{{Windows credentials|Identifiants Windows}}</h1>
+    <p class="legal">{{They are sent to the Windows server over an encrypted connection: the bastion relays and records the session, but does not see your password.|Ils sont envoyés au serveur Windows par une connexion chiffrée : le bastion relaie et enregistre la session, mais ne voit pas votre mot de passe.}}</p>
+    <label>{{User|Utilisateur}}<input id="utilisateur" autocomplete="username" spellcheck="false" autocapitalize="off" required></label>
+    <label>{{Password|Mot de passe}}<input id="mdp" type="password" autocomplete="current-password" required></label>
+    <label>{{Domain (optional)|Domaine (facultatif)}}<input id="domaine" spellcheck="false" autocapitalize="off" placeholder="ACME"></label>
     <p class="error" id="erreur" role="alert"></p>
-    <button class="btn primary" type="submit" id="ouvrir">Ouvrir la session</button>
+    <button class="btn primary" type="submit" id="ouvrir">{{Open the session|Ouvrir la session}}</button>
   </form>
 </main>
 <div id="notice" class="notice" hidden>

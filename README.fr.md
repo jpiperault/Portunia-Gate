@@ -296,6 +296,7 @@ sudo heimdia rule add presta-db --group Prestataires --targets db-01 --expires 2
 sudo heimdia setting auth_policy "password+totp,key+totp"    # politique générale
 sudo heimdia setting banniere "Accès réservé. Les sessions sont enregistrées."
 sudo heimdia setting nom "Bastion ACME"
+sudo heimdia setting langue fr                             # en, fr, ou "" pour la langue du système
 
 # Contrôle
 sudo heimdia audit --verify --last 50

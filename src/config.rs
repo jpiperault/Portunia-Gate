@@ -26,7 +26,7 @@ pub struct Config {
 impl Config {
     pub fn from_env() -> anyhow::Result<Self> {
         let database_url = std::env::var("HEIMDIA_DATABASE_URL")
-            .map_err(|_| anyhow::anyhow!("HEIMDIA_DATABASE_URL manquant (ex. postgres://heimdia:…@postgres/heimdia)"))?;
+            .map_err(|_| anyhow::anyhow!(crate::t!("HEIMDIA_DATABASE_URL missing (e.g. postgres://heimdia:…@postgres/heimdia)", "HEIMDIA_DATABASE_URL manquant (ex. postgres://heimdia:…@postgres/heimdia)")))?;
         // Paquet Debian : HEIMDIA_SSH_PORT et HEIMDIA_API_PORT de /etc/heimdia/heimdia.env.
         // Docker : le conteneur écoute 2222 et 8443, Compose publie les ports choisis.
         let port = |name: &str| std::env::var(name).ok().and_then(|p| p.trim().parse::<u16>().ok());

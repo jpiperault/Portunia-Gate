@@ -151,14 +151,14 @@ struct Portal {
 type Ctx = AxState<Arc<Portal>>;
 
 pub async fn run(state: Arc<State>) -> Result<()> {
-    let http = state.config.portal_listen.parse::<SocketAddr>().map_err(|_| anyhow!("HEIMDIA_PORTAL_LISTEN invalide"))?;
+    let http = state.config.portal_listen.parse::<SocketAddr>().map_err(|_| anyhow!(t!("invalid HEIMDIA_PORTAL_LISTEN", "HEIMDIA_PORTAL_LISTEN invalide")))?;
     let tls = match &state.config.portal_tls_listen {
-        Some(a) => Some(a.parse::<SocketAddr>().map_err(|_| anyhow!("HEIMDIA_PORTAL_TLS_LISTEN invalide"))?),
+        Some(a) => Some(a.parse::<SocketAddr>().map_err(|_| anyhow!(t!("invalid HEIMDIA_PORTAL_TLS_LISTEN", "HEIMDIA_PORTAL_TLS_LISTEN invalide")))?),
         None => None,
     };
     let plain = router(state.clone(), false);
     let listener = tokio::net::TcpListener::bind(http).await?;
-    tracing::info!("portail web en écoute sur http://{http} (Cloudflare Tunnel)");
+    tracing::info!("{} http://{http} (Cloudflare Tunnel)", t!("web portal listening on", "portail web en écoute sur"));
     let plain_task = async move {
         axum::serve(listener, plain.into_make_service_with_connect_info::<SocketAddr>())
             .await
@@ -170,8 +170,8 @@ pub async fn run(state: Arc<State>) -> Result<()> {
             let files = crate::tls::files(&state.config.data_dir);
             let config = axum_server::tls_rustls::RustlsConfig::from_pem_file(&files.cert, &files.key)
                 .await
-                .map_err(|e| anyhow!("certificat du portail : {e}"))?;
-            tracing::info!("portail web en écoute sur https://{addr} (proxy Cloudflare)");
+                .map_err(|e| anyhow!(t!(format!("portal certificate: {e}"), format!("certificat du portail : {e}"))))?;
+            tracing::info!("{} https://{addr} (Cloudflare proxy)", t!("web portal listening on", "portail web en écoute sur"));
             let secure = router(state, true);
             let tls_task = async move {
                 axum_server::bind_rustls(addr, config)
@@ -203,6 +203,8 @@ fn router(state: Arc<State>, cloudflare_only: bool) -> Router {
         .route("/api/rdp/{nom}", post(desktop_ticket))
         .route("/ws-rdp", get(desktop))
         .layer(middleware::from_fn_with_state(portal.clone(), guard))
+        // Pages et messages dans la langue du sélecteur ou du navigateur.
+        .layer(middleware::from_fn(crate::lang::middleware))
         .with_state(portal)
 }
 
@@ -256,7 +258,7 @@ fn client_ip(portal: &Portal, peer: SocketAddr, headers: &HeaderMap) -> String {
 /// En-têtes de sécurité sur toutes les réponses ; l'écoute HTTPS refuse ce qui ne vient pas de Cloudflare.
 async fn guard(AxState(portal): Ctx, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: axum::extract::Request, next: Next) -> Response {
     if portal.cloudflare_only && !from_cloudflare(peer.ip()) {
-        return (StatusCode::FORBIDDEN, "Accès réservé à Cloudflare").into_response();
+        return (StatusCode::FORBIDDEN, t!("Access restricted to Cloudflare", "Accès réservé à Cloudflare")).into_response();
     }
     let mut res = next.run(req).await;
     let h = res.headers_mut();
@@ -296,8 +298,8 @@ fn err(status: StatusCode, text: &str) -> Response {
 }
 
 fn internal(e: impl std::fmt::Display) -> Response {
-    tracing::error!("portail : {e}");
-    err(StatusCode::INTERNAL_SERVER_ERROR, "Erreur du bastion")
+    tracing::error!("{} {e}", t!("portal:", "portail :"));
+    err(StatusCode::INTERNAL_SERVER_ERROR, t!("Bastion error", "Erreur du bastion"))
 }
 
 // ---------- Pages et fichiers ----------
@@ -312,8 +314,34 @@ fn versioned(text: &str) -> String {
     text.replace("__V__", env!("CARGO_PKG_VERSION"))
 }
 
+/// Page dans la langue de la requête : `__L__` devient « en » ou « fr », `{{English|Français}}`
+/// le texte de cette langue.
+fn localized(html: &str) -> String {
+    let fr = crate::lang::is_fr();
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(start) = rest.find("{{") {
+        out.push_str(&rest[..start]);
+        let Some(end) = rest[start..].find("}}") else { break };
+        let inner = &rest[start + 2..start + end];
+        let (en, fr_text) = inner.split_once('|').unwrap_or((inner, inner));
+        out.push_str(if fr { fr_text } else { en });
+        rest = &rest[start + end + 2..];
+    }
+    out.push_str(rest);
+    out.replace("__L__", crate::lang::get().code())
+}
+
 fn page(html: &'static str) -> Response {
-    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], versioned(html)).into_response()
+    (
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-cache"),
+            (header::VARY, "Cookie, Accept-Language"),
+        ],
+        localized(&versioned(html)),
+    )
+        .into_response()
 }
 
 async fn page_index() -> Response {
@@ -414,7 +442,7 @@ async fn status(AxState(portal): Ctx, headers: HeaderMap) -> Response {
         Ok::<_, anyhow::Error>(json!({
             "actif": s.enabled,
             "nom": text_setting(state, "nom", "Heimdia").await?,
-            "banniere": text_setting(state, "banniere", crate::sshd::DEFAULT_BANNER).await?,
+            "banniere": text_setting(state, "banniere", crate::sshd::default_banner()).await?,
             "turnstile": (!s.turnstile_site.is_empty() && s.turnstile_secret.is_some()).then_some(s.turnstile_site.clone()),
             "presse_papiers": s.clipboard,
             "inactivite_min": s.idle_min,
@@ -454,7 +482,7 @@ async fn failed(portal: &Portal, login: &str, ip: &str, why: &str) -> Response {
         json!({ "raison": why, "adresse": ip }),
     )
     .await;
-    err(StatusCode::UNAUTHORIZED, "Identifiant, mot de passe ou code incorrect")
+    err(StatusCode::UNAUTHORIZED, t!("Wrong login, password or code", "Identifiant, mot de passe ou code incorrect"))
 }
 
 /// Vérification Turnstile auprès de Cloudflare.
@@ -482,10 +510,10 @@ async fn login(AxState(portal): Ctx, ConnectInfo(peer): ConnectInfo<SocketAddr>,
         let state = &portal.state;
         let s = settings(state).await?;
         if !s.enabled {
-            return Ok(err(StatusCode::SERVICE_UNAVAILABLE, "Portail fermé"));
+            return Ok(err(StatusCode::SERVICE_UNAVAILABLE, t!("Portal closed", "Portail fermé")));
         }
         if !same_site(&headers, &s.url) {
-            return Ok(err(StatusCode::FORBIDDEN, "Requête refusée"));
+            return Ok(err(StatusCode::FORBIDDEN, t!("Request refused", "Requête refusée")));
         }
         let login = body.login.trim().to_string();
         {
@@ -493,12 +521,12 @@ async fn login(AxState(portal): Ctx, ConnectInfo(peer): ConnectInfo<SocketAddr>,
             f.retain(|_, (_, at)| at.elapsed() < Duration::from_secs(600));
             let too_many = |key: String, max: u32| f.get(&key).is_some_and(|(n, _)| *n >= max);
             if too_many(format!("compte:{login}"), 5) || too_many(format!("adresse:{ip}"), 20) {
-                return Ok(err(StatusCode::TOO_MANY_REQUESTS, "Trop d'essais : réessayez dans quelques minutes"));
+                return Ok(err(StatusCode::TOO_MANY_REQUESTS, t!("Too many attempts: try again in a few minutes", "Trop d'essais : réessayez dans quelques minutes")));
             }
         }
         if let Some(secret) = s.turnstile_secret.as_deref().filter(|_| !s.turnstile_site.is_empty()) {
             if !turnstile_ok(secret, &body.turnstile, &ip).await {
-                return Ok(err(StatusCode::FORBIDDEN, "Vérification anti-robots échouée : rechargez la page"));
+                return Ok(err(StatusCode::FORBIDDEN, t!("Anti-bot check failed: reload the page", "Vérification anti-robots échouée : rechargez la page")));
             }
         }
         let Some(user) = model::user_by_login(&state.db, &login).await?.filter(|u| !u.disabled) else {
@@ -512,7 +540,7 @@ async fn login(AxState(portal): Ctx, ConnectInfo(peer): ConnectInfo<SocketAddr>,
             audit::note(&state.db, &login, "portail.echec", json!({ "raison": "première connexion ou code non enrôlé", "adresse": ip })).await;
             return Ok(err(
                 StatusCode::FORBIDDEN,
-                "Première connexion ou code non enrôlé : connectez-vous d'abord avec Portunia, ou adressez-vous à votre administrateur",
+                t!("First sign-in or code not enrolled: sign in with Portunia first, or contact your administrator", "Première connexion ou code non enrôlé : connectez-vous d'abord avec Portunia, ou adressez-vous à votre administrateur"),
             ));
         }
         let secret = state.keys.open(&format!("totp:{}", user.id), user.totp_secret.as_deref().unwrap_or_default())?;
@@ -525,7 +553,7 @@ async fn login(AxState(portal): Ctx, ConnectInfo(peer): ConnectInfo<SocketAddr>,
         }
         if !in_group(&state.db, user.id, &s.group).await? {
             audit::note(&state.db, &login, "portail.echec", json!({ "raison": "hors du groupe du portail", "adresse": ip })).await;
-            return Ok(err(StatusCode::FORBIDDEN, "Ce compte n'a pas accès au portail web"));
+            return Ok(err(StatusCode::FORBIDDEN, t!("This account has no access to the web portal", "Ce compte n'a pas accès au portail web")));
         }
         {
             let mut f = portal.failures.lock().unwrap();
@@ -572,9 +600,9 @@ async fn logout(AxState(portal): Ctx, headers: HeaderMap) -> Response {
 /// Peut s'ouvrir dans le navigateur : SSH, hors mode rebond (de bout en bout, il faut Portunia).
 fn web_ready(t: &model::Target) -> Option<&'static str> {
     if t.is_rdp() && t.mode == "coffre" {
-        Some("Bureau à distance en mode coffre : bientôt dans le navigateur")
+        Some(t!("Remote Desktop in vault mode: coming soon in the browser", "Bureau à distance en mode coffre : bientôt dans le navigateur"))
     } else if t.mode == "rebond" {
-        Some("Disponible seulement avec Portunia (relais de bout en bout)")
+        Some(t!("Only available with Portunia (end-to-end relay)", "Disponible seulement avec Portunia (relais de bout en bout)"))
     } else {
         None
     }
@@ -585,7 +613,7 @@ async fn servers(AxState(portal): Ctx, headers: HeaderMap) -> Response {
         let state = &portal.state;
         let s = settings(state).await?;
         let Some(w) = web_session(&portal, &headers, &s).await? else {
-            return Ok(err(StatusCode::UNAUTHORIZED, "Session expirée"));
+            return Ok(err(StatusCode::UNAUTHORIZED, t!("Session expired", "Session expirée")));
         };
         let list: Vec<Value> = model::allowed_targets(&state.db, w.user.id)
             .await?
@@ -629,18 +657,18 @@ async fn terminal(
             let expected = s.url.trim_end_matches('/');
             let same = if expected.is_empty() { origin.ends_with(&format!("//{host}")) } else { origin.trim_end_matches('/') == expected };
             if !same {
-                return Ok(Err(err(StatusCode::FORBIDDEN, "Origine refusée")));
+                return Ok(Err(err(StatusCode::FORBIDDEN, t!("Origin refused", "Origine refusée"))));
             }
         }
         let Some(w) = web_session(&portal, &headers, &s).await? else {
-            return Ok(Err(err(StatusCode::UNAUTHORIZED, "Session expirée")));
+            return Ok(Err(err(StatusCode::UNAUTHORIZED, t!("Session expired", "Session expirée"))));
         };
         let target = model::target_by_name(&state.db, &nom).await?.filter(|t| !t.is_rdp() && web_ready(t).is_none());
         let Some(target) = target else {
-            return Ok(Err(err(StatusCode::NOT_FOUND, "Serveur indisponible dans le navigateur")));
+            return Ok(Err(err(StatusCode::NOT_FOUND, t!("Server unavailable in the browser", "Serveur indisponible dans le navigateur"))));
         };
         if model::access(&state.db, w.user.id, target.id).await?.is_none() {
-            return Ok(Err(err(StatusCode::FORBIDDEN, "Serveur non autorisé en ce moment")));
+            return Ok(Err(err(StatusCode::FORBIDDEN, t!("Server not allowed at the moment", "Serveur non autorisé en ce moment"))));
         }
         let ticket = crate::api::issue_ticket(&state.db, w.user.id, target.id, Some(&format!("{ip} (web)"))).await?;
         Ok::<_, anyhow::Error>(Ok((w, target, ticket, s.idle_min)))
@@ -653,15 +681,17 @@ async fn terminal(
     };
     let cols = size.cols.unwrap_or(120).clamp(20, 500);
     let rows = size.rows.unwrap_or(32).clamp(5, 200);
-    ws.on_upgrade(move |socket| async move {
+    // La tâche du WebSocket ne garde pas la langue de la requête : on la lui passe.
+    let lang = crate::lang::get();
+    ws.on_upgrade(move |socket| crate::lang::scope(lang, async move {
         let state = portal.state.clone();
         state.web.active.fetch_add(1, Ordering::Relaxed);
         let user = format!("{}%{}", w.user.login, target.name);
         if let Err(e) = bridge(&state, socket, &user, &ticket, cols, rows, w.expires, idle_min).await {
-            tracing::warn!("portail : terminal {user} : {e:#}");
+            tracing::warn!("{} {user}: {e:#}", t!("portal: terminal", "portail : terminal"));
         }
         state.web.active.fetch_sub(1, Ordering::Relaxed);
-    })
+    }))
 }
 
 // ---------- Bureau à distance ----------
@@ -686,17 +716,17 @@ async fn desktop_ticket(AxState(portal): Ctx, ConnectInfo(peer): ConnectInfo<Soc
         let state = &portal.state;
         let s = settings(state).await?;
         if !same_site(&headers, &s.url) {
-            return Ok(err(StatusCode::FORBIDDEN, "Requête refusée"));
+            return Ok(err(StatusCode::FORBIDDEN, t!("Request refused", "Requête refusée")));
         }
         let Some(w) = web_session(&portal, &headers, &s).await? else {
-            return Ok(err(StatusCode::UNAUTHORIZED, "Session expirée"));
+            return Ok(err(StatusCode::UNAUTHORIZED, t!("Session expired", "Session expirée")));
         };
         let target = model::target_by_name(&state.db, &nom).await?.filter(|t| t.is_rdp() && web_ready(t).is_none());
         let Some(target) = target else {
-            return Ok(err(StatusCode::NOT_FOUND, "Serveur indisponible dans le navigateur"));
+            return Ok(err(StatusCode::NOT_FOUND, t!("Server unavailable in the browser", "Serveur indisponible dans le navigateur")));
         };
         if model::access(&state.db, w.user.id, target.id).await?.is_none() {
-            return Ok(err(StatusCode::FORBIDDEN, "Serveur non autorisé en ce moment"));
+            return Ok(err(StatusCode::FORBIDDEN, t!("Server not allowed at the moment", "Serveur non autorisé en ce moment")));
         }
         let ticket = crate::api::issue_ticket(&state.db, w.user.id, target.id, Some(&format!("{ip} (web)"))).await?;
         Ok::<_, anyhow::Error>(Json(json!({ "jeton": ticket, "compte": target.account })).into_response())
@@ -710,14 +740,15 @@ async fn desktop(AxState(portal): Ctx, ConnectInfo(peer): ConnectInfo<SocketAddr
     let addr = client_ip(&portal, peer, &headers);
     let url = match settings(&portal.state).await {
         Ok(s) if s.enabled => s.url,
-        Ok(_) => return err(StatusCode::SERVICE_UNAVAILABLE, "Portail fermé"),
+        Ok(_) => return err(StatusCode::SERVICE_UNAVAILABLE, t!("Portal closed", "Portail fermé")),
         Err(e) => return internal(e),
     };
     if !origin_ok(&headers, &url) {
-        return err(StatusCode::FORBIDDEN, "Origine refusée");
+        return err(StatusCode::FORBIDDEN, t!("Origin refused", "Origine refusée"));
     }
     let state = portal.state.clone();
-    ws.on_upgrade(move |socket| crate::rdp::relay(state, socket, crate::rdp::Origin::Portal { addr }))
+    let lang = crate::lang::get();
+    ws.on_upgrade(move |socket| crate::lang::scope(lang, crate::rdp::relay(state, socket, crate::rdp::Origin::Portal { addr })))
 }
 
 /// Accepte seulement la clé du bastion lui-même (connexion locale).
@@ -753,9 +784,9 @@ async fn bridge(state: &State, mut socket: WebSocket, user: &str, ticket: &str, 
     let handler = Local { expected: state.keys.host_fingerprint() };
     let mut handle = tokio::time::timeout(Duration::from_secs(15), client::connect(config, ("127.0.0.1", state.config.ssh_local_port()), handler))
         .await
-        .map_err(|_| anyhow!("le serveur SSH du bastion ne répond pas"))??;
+        .map_err(|_| anyhow!(t!("the bastion's SSH server is not answering", "le serveur SSH du bastion ne répond pas")))??;
     if !handle.authenticate_password(user, ticket).await?.success() {
-        send_json(&mut socket, json!({ "t": "ferme", "raison": "Accès refusé par le bastion" })).await;
+        send_json(&mut socket, json!({ "t": "ferme", "raison": t!("Access denied by the bastion", "Accès refusé par le bastion") })).await;
         return Ok(());
     }
     let channel = handle.channel_open_session().await?;
@@ -776,7 +807,7 @@ async fn bridge(state: &State, mut socket: WebSocket, user: &str, ticket: &str, 
                         break "navigateur fermé".into();
                     }
                 }
-                Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => break "Session terminée".into(),
+                Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => break t!("Session ended", "Session terminée").into(),
                 _ => {}
             },
             incoming = socket.recv() => match incoming {
@@ -799,14 +830,14 @@ async fn bridge(state: &State, mut socket: WebSocket, user: &str, ticket: &str, 
                 Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break "navigateur fermé".into(),
                 _ => {}
             },
-            _ = closing.changed() => break "Session fermée par l'administrateur".into(),
+            _ = closing.changed() => break t!("Session closed by the administrator", "Session fermée par l'administrateur").into(),
             _ = tick.tick() => {
                 if Utc::now() >= expires {
-                    break "Session web expirée : reconnectez-vous".into();
+                    break t!("Web session expired: sign in again", "Session web expirée : reconnectez-vous").into();
                 }
                 let quiet = last_input.elapsed();
                 if quiet >= idle {
-                    break "Session fermée après une période d'inactivité".into();
+                    break t!("Session closed after a period of inactivity", "Session fermée après une période d'inactivité").into();
                 }
                 if !warned && quiet + IDLE_WARNING >= idle {
                     warned = true;

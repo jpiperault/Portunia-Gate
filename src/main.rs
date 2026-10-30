@@ -1,8 +1,10 @@
-//! Heimdia, le bastion SSH de Portunia.
+//! Heimdia, the SSH and Remote Desktop bastion of Portunia.
 //!
-//! `heimdia serve` lance le service ; les autres commandes administrent le bastion
-//! depuis le serveur (`docker compose exec heimdia heimdia …`).
+//! `heimdia serve` runs the service; the other commands administer the bastion from the
+//! server (`sudo heimdia …`). Messages follow the system's language (English or French).
 
+#[macro_use]
+mod lang;
 mod api;
 mod audit;
 mod auth;
@@ -36,7 +38,7 @@ pub struct State {
 }
 
 #[derive(Parser)]
-#[command(name = "heimdia", version, about = "Bastion SSH de Portunia")]
+#[command(name = "heimdia", version, about = "SSH and Remote Desktop bastion of Portunia (messages in English or French, following the system's language or HEIMDIA_LANG)")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -44,91 +46,91 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Première installation : base, clés et compte administrateur.
+    /// First install: database, keys and administrator account.
     Init {
-        /// Identifiant de l'administrateur.
+        /// Administrator login.
         #[arg(long, default_value = "admin")]
         admin: String,
-        /// Prépare la base et les clés sans créer d'administrateur.
+        /// Prepares the database and keys without creating an administrator.
         #[arg(long)]
         no_admin: bool,
-        /// Mot de passe provisoire affiché : l'administrateur le change et enrôle son code dans Portunia.
-        #[arg(long)]
+        /// Shows a temporary password: the administrator changes it and enrols their code in Portunia.
+        #[arg(long = "temporary", alias = "provisoire")]
         provisoire: bool,
-        /// Nom du bastion affiché dans Portunia et les applications d'authentification.
-        #[arg(long)]
+        /// Bastion name shown in Portunia and in authenticator apps.
+        #[arg(long = "name", alias = "nom")]
         nom: Option<String>,
     },
-    /// Version, empreintes à comparer dans Portunia et nombre de comptes.
+    /// Version, fingerprints to compare in Portunia, and number of accounts.
     Info,
-    /// Lance le bastion.
+    /// Runs the bastion.
     Serve,
-    /// Comptes des utilisateurs.
+    /// User accounts.
     #[command(subcommand)]
     User(UserCmd),
-    /// Groupes d'utilisateurs.
+    /// User groups.
     #[command(subcommand)]
     Group(GroupCmd),
-    /// Serveurs protégés par le bastion.
+    /// Servers protected by the bastion.
     #[command(subcommand)]
     Target(TargetCmd),
-    /// Règles d'accès.
+    /// Access rules.
     #[command(subcommand)]
     Rule(RuleCmd),
-    /// Journal d'audit.
+    /// Audit log.
     Audit {
-        /// Vérifie toute la chaîne.
+        /// Checks the whole chain.
         #[arg(long)]
         verify: bool,
-        /// Nombre d'événements affichés.
+        /// Number of events shown.
         #[arg(long, default_value_t = 30)]
         last: i64,
     },
-    /// Dernières sessions.
+    /// Latest sessions.
     Sessions {
         #[arg(long, default_value_t = 30)]
         last: i64,
     },
-    /// Réglages généraux (politique d'authentification, bannière, nom).
+    /// General settings: auth_policy, banner (banniere), name (nom), language (langue: en or fr).
     Setting {
-        /// auth_policy, banniere ou nom.
+        /// auth_policy, banner, name or language.
         key: String,
-        /// Nouvelle valeur ; sans valeur, affiche l'actuelle.
+        /// New value; without a value, shows the current one.
         value: Option<String>,
     },
 }
 
 #[derive(Subcommand)]
 enum UserCmd {
-    /// Crée un compte (mot de passe demandé, puis enrôlement du code si nécessaire).
+    /// Creates an account (password asked, then code enrolment if needed).
     Add {
         login: String,
-        /// user, auditor ou admin.
+        /// user, auditor or admin.
         #[arg(long, default_value = "user")]
         role: String,
-        /// Combinaisons acceptées, ex. « password+totp,key+totp » (vide = réglage général).
+        /// Accepted combinations, e.g. "password+totp,key+totp" (empty = global setting).
         #[arg(long)]
         policy: Option<String>,
-        /// Pas de mot de passe (connexion par clé uniquement).
+        /// No password (key sign-in only).
         #[arg(long)]
         no_password: bool,
-        /// Mot de passe provisoire affiché : l'utilisateur le change et enrôle son code dans Portunia.
-        #[arg(long, conflicts_with = "no_password")]
+        /// Shows a temporary password: the user changes it and enrols their code in Portunia.
+        #[arg(long = "temporary", alias = "provisoire", conflicts_with = "no_password")]
         provisoire: bool,
     },
-    /// Liste les comptes.
+    /// Lists accounts.
     List,
-    /// Supprime un compte (ses sessions passées restent dans le journal).
+    /// Deletes an account (its past sessions stay in the log).
     Delete { login: String },
-    /// Change le rôle d'un compte : user, auditor ou admin.
+    /// Changes an account's role: user, auditor or admin.
     Role { login: String, role: String },
-    /// Ajoute une clé SSH publique (texte « ssh-ed25519 AAAA… » ou chemin d'un fichier .pub).
+    /// Adds a public SSH key ("ssh-ed25519 AAAA…" text or path of a .pub file).
     Key { login: String, key: String },
-    /// Enrôle (ou réenrôle) le code TOTP.
+    /// Enrols (or re-enrols) the TOTP code.
     Totp { login: String },
-    /// Change le mot de passe.
+    /// Changes the password.
     Passwd { login: String },
-    /// Désactive ou réactive un compte.
+    /// Disables or re-enables an account.
     Disable {
         login: String,
         #[arg(long)]
@@ -138,10 +140,11 @@ enum UserCmd {
 
 #[derive(Subcommand)]
 enum GroupCmd {
+    /// Creates a group.
     Add {
         name: String,
     },
-    /// Ajoute des comptes à un groupe.
+    /// Adds accounts to a group.
     Member {
         group: String,
         logins: Vec<String>,
@@ -150,60 +153,61 @@ enum GroupCmd {
 
 #[derive(Subcommand)]
 enum TargetCmd {
-    /// Ajoute une cible.
+    /// Adds a server.
     Add {
         name: String,
         #[arg(long)]
         host: String,
-        /// Port (22 en SSH, 3389 en Bureau à distance par défaut).
+        /// Port (22 for SSH, 3389 for Remote Desktop by default).
         #[arg(long)]
         port: Option<i32>,
-        /// ssh ou rdp (Bureau à distance, mode rebond pour l'instant).
+        /// ssh or rdp (Remote Desktop).
         #[arg(long, default_value = "ssh")]
         protocol: String,
-        /// rebond, enregistre ou coffre.
+        /// coffre (vault), enregistre (recorded) or rebond (jump); also vault, recorded, jump.
         #[arg(long, default_value = "coffre")]
         mode: String,
-        /// Compte sur la cible.
+        /// Account on the server.
         #[arg(long)]
         account: Option<String>,
-        /// Dossier d'affichage (Production, Recette…).
+        /// Display folder (Production, Staging…).
         #[arg(long, default_value = "")]
         folder: String,
-        /// Mot de passe du compte, demandé à la saisie.
+        /// Account password, asked when typing.
         #[arg(long)]
         password: bool,
-        /// Clé privée du compte (fichier OpenSSH).
+        /// Account private key (OpenSSH file).
         #[arg(long)]
         key_file: Option<String>,
     },
+    /// Lists servers.
     List,
 }
 
 #[derive(Subcommand)]
 enum RuleCmd {
-    /// Ajoute une règle : un groupe, des cibles et des conditions.
+    /// Adds a rule: a group, servers and conditions.
     Add {
         name: String,
         #[arg(long)]
         group: String,
-        /// Cibles séparées par des virgules.
+        /// Comma-separated servers.
         #[arg(long, value_delimiter = ',')]
         targets: Vec<String>,
         #[arg(long)]
         sftp: bool,
         #[arg(long)]
         tunnels: bool,
-        /// Enregistre aussi la frappe (attention : capte les mots de passe tapés).
+        /// Also records keystrokes (careful: captures typed passwords).
         #[arg(long)]
         record_input: bool,
-        /// Jours : « lun-ven », « lun,mer,ven » ; vide = tous les jours.
+        /// Days: "mon-fri", "mon,wed,fri" (French "lun-ven" also accepted); empty = every day.
         #[arg(long)]
         days: Option<String>,
-        /// Heures : « 7-20 ».
+        /// Hours: "7-20".
         #[arg(long)]
         hours: Option<String>,
-        /// Date d'expiration : AAAA-MM-JJ.
+        /// Expiry date: YYYY-MM-DD.
         #[arg(long)]
         expires: Option<String>,
     },
@@ -231,16 +235,16 @@ fn prompt_line(label: &str) -> Result<String> {
 
 fn new_password() -> Result<String> {
     loop {
-        let first = prompt_secret("Mot de passe (10 caractères minimum) : ")?;
+        let first = prompt_secret(t!("Password (at least 10 characters): ", "Mot de passe (10 caractères minimum) : "))?;
         if first.chars().count() < 10 {
-            println!("Trop court.");
+            println!("{}", t!("Too short.", "Trop court."));
             if !std::io::stdin().is_terminal() {
-                bail!("mot de passe trop court");
+                bail!(t!("password too short", "mot de passe trop court"));
             }
             continue;
         }
-        if std::io::stdin().is_terminal() && prompt_secret("Confirmez : ")? != first {
-            println!("Les deux saisies diffèrent.");
+        if std::io::stdin().is_terminal() && prompt_secret(t!("Confirm: ", "Confirmez : "))? != first {
+            println!("{}", t!("The two entries differ.", "Les deux saisies diffèrent."));
             continue;
         }
         return Ok(first);
@@ -260,7 +264,7 @@ async fn connect_db(config: &Config) -> Result<PgPool> {
             .max_lifetime(std::time::Duration::from_secs(3600));
         match options.connect(&config.database_url).await {
             Ok(pool) => {
-                sqlx::migrate!().run(&pool).await.context("mise à jour du schéma de la base")?;
+                sqlx::migrate!().run(&pool).await.context(t!("database schema update", "mise à jour du schéma de la base"))?;
                 return Ok(pool);
             }
             Err(e) => {
@@ -269,10 +273,8 @@ async fn connect_db(config: &Config) -> Result<PgPool> {
             }
         }
     }
-    Err(anyhow!(
-        "base PostgreSQL injoignable : {}",
-        last.map(|e| e.to_string()).unwrap_or_default()
-    ))
+    let last = last.map(|e| e.to_string()).unwrap_or_default();
+    Err(anyhow!(t!(format!("PostgreSQL database unreachable: {last}"), format!("base PostgreSQL injoignable : {last}"))))
 }
 
 /// Enrôle le code TOTP : affiche le code QR et exige un premier code juste.
@@ -283,30 +285,34 @@ async fn enroll_totp(state: &State, user: &model::User) -> Result<()> {
         .and_then(|v| v.as_str().map(str::to_owned))
         .unwrap_or_else(|| "Heimdia".into());
     let uri = auth::otpauth_uri(&issuer, &user.login, &secret);
-    println!("\nScannez ce code dans votre application d'authentification :\n");
+    println!("{}", t!("\nScan this code with your authenticator app:\n", "\nScannez ce code dans votre application d'authentification :\n"));
     println!("{}", auth::qr_terminal(&uri)?);
-    println!("Ou saisissez la clé : {}\n", auth::base32(&secret));
+    println!("{} {}\n", t!("Or type the key:", "Ou saisissez la clé :"), auth::base32(&secret));
     for _ in 0..3 {
-        let code = prompt_line("Code affiché par l'application : ")?;
+        let code = prompt_line(t!("Code shown by the app: ", "Code affiché par l'application : "))?;
         if let Some(step) = auth::totp_check(&secret, &code, 0) {
             model::set_totp(&state.db, user.id, Some(state.keys.seal(&format!("totp:{}", user.id), &secret)?)).await?;
             model::consume_totp_step(&state.db, user.id, step).await?;
             audit::log(&state.db, "console", "compte.totp_enrole", json!({ "compte": user.login })).await?;
-            println!("Code enregistré.");
+            println!("{}", t!("Code saved.", "Code enregistré."));
             return Ok(());
         }
-        println!("Code incorrect (vérifiez l'heure du téléphone).");
+        println!("{}", t!("Wrong code (check the phone's clock).", "Code incorrect (vérifiez l'heure du téléphone)."));
     }
-    bail!("enrôlement abandonné : aucun code juste")
+    bail!(t!("enrolment abandoned: no correct code", "enrôlement abandonné : aucun code juste"))
 }
 
 fn parse_days(text: &str) -> Result<i16> {
+    // Noms français ou anglais, indifféremment.
     const NAMES: [&str; 7] = ["lun", "mar", "mer", "jeu", "ven", "sam", "dim"];
+    const EN: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
     let index = |d: &str| {
+        let d = d.trim().to_lowercase();
         NAMES
             .iter()
-            .position(|n| d.trim().to_lowercase().starts_with(n))
-            .ok_or_else(|| anyhow!("jour inconnu : {d}"))
+            .position(|n| d.starts_with(n))
+            .or_else(|| EN.iter().position(|n| d.starts_with(n)))
+            .ok_or_else(|| anyhow!(t!(format!("unknown day: {d}"), format!("jour inconnu : {d}"))))
     };
     let mut mask = 0i16;
     for part in text.split(',') {
@@ -335,6 +341,7 @@ async fn main() {
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
+    lang::set_process(lang::from_env());
     let cli = Cli::parse();
     // Le service trace son activité ; les commandes d'administration n'affichent que les avertissements.
     let default_filter = if matches!(cli.command, Command::Serve) {
@@ -351,7 +358,7 @@ async fn main() {
         .with_writer(std::io::stderr)
         .init();
     if let Err(e) = run(cli).await {
-        eprintln!("Erreur : {e:#}");
+        eprintln!("{} {e:#}", t!("Error:", "Erreur :"));
         std::process::exit(1);
     }
 }
@@ -369,6 +376,13 @@ async fn run(cli: Cli) -> Result<()> {
         return init(config, admin, *no_admin, *provisoire, nom.as_deref()).await;
     }
     let db = connect_db(&config).await?;
+    // Le service parle la langue choisie dans les réglages du bastion, sinon celle du système ;
+    // les commandes d'administration, celle de qui les tape.
+    if matches!(cli.command, Command::Serve) {
+        if let Some(l) = model::setting(&db, "langue").await?.and_then(|v| v.as_str().and_then(lang::Lang::from_tag)) {
+            lang::set_process(l);
+        }
+    }
     let keys = Keys::load(&config.data_dir)?;
     let state = Arc::new(State { db, keys, config, web: portal::Live::default() });
 
@@ -381,12 +395,16 @@ async fn run(cli: Cli) -> Result<()> {
                 .unwrap_or_else(|| "Heimdia".into());
             let users = model::users(&state.db).await?;
             println!("{nom} · Heimdia {}", env!("CARGO_PKG_VERSION"));
-            println!("Clé d'hôte SSH        {}", state.keys.host_fingerprint());
-            println!("Certificat de l'API   {}", tls::fingerprint(&state.config.data_dir)?);
+            let admins = users.iter().filter(|u| u.role == "admin").count();
+            // installer.sh lit l'empreinte sur la ligne « API certificate » / « Certificat de l'API ».
+            println!("{}{}", t!("SSH host key          ", "Clé d'hôte SSH        "), state.keys.host_fingerprint());
+            println!("{}{}", t!("API certificate       ", "Certificat de l'API   "), tls::fingerprint(&state.config.data_dir)?);
             println!(
-                "Comptes               {} dont {} administrateur(s)",
-                users.len(),
-                users.iter().filter(|u| u.role == "admin").count()
+                "{}",
+                t!(
+                    format!("Accounts              {} including {admins} administrator(s)", users.len()),
+                    format!("Comptes               {} dont {admins} administrateur(s)", users.len())
+                )
             );
             Ok(())
         }
@@ -412,8 +430,8 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Audit { verify, last } => {
             if verify {
                 match audit::verify(&state.db).await? {
-                    Ok(n) => println!("Journal intact : {n} événements chaînés."),
-                    Err(broken) => bail!("JOURNAL ALTÉRÉ : {broken}"),
+                    Ok(n) => println!("{}", t!(format!("Log intact: {n} chained events."), format!("Journal intact : {n} événements chaînés."))),
+                    Err(broken) => bail!(t!(format!("LOG TAMPERED WITH: {broken}"), format!("JOURNAL ALTÉRÉ : {broken}"))),
                 }
             }
             for e in audit::last(&state.db, last).await? {
@@ -433,7 +451,7 @@ async fn run(cli: Cli) -> Result<()> {
                 let end = s
                     .ended_at
                     .map(|e| e.with_timezone(&chrono::Local).format("%H:%M:%S").to_string())
-                    .unwrap_or_else(|| "en cours".into());
+                    .unwrap_or_else(|| t!("ongoing", "en cours").into());
                 println!(
                     "{}  {}  {:<12} {:<12} {:<7} {:<30} {:>9} o  {}",
                     &s.id.to_string()[..8],
@@ -449,8 +467,22 @@ async fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Command::Setting { key, value } => {
-            if !["auth_policy", "banniere", "nom"].contains(&key.as_str()) {
-                bail!("réglage inconnu : auth_policy, banniere ou nom");
+            // Noms anglais acceptés ; les réglages restent rangés sous leur nom français.
+            let key = match key.as_str() {
+                "banner" => "banniere".to_string(),
+                "name" => "nom".to_string(),
+                "language" => "langue".to_string(),
+                _ => key,
+            };
+            if !["auth_policy", "banniere", "nom", "langue"].contains(&key.as_str()) {
+                bail!(t!("unknown setting: auth_policy, banner, name or language", "réglage inconnu : auth_policy, banniere, nom ou langue"));
+            }
+            if key == "langue" {
+                if let Some(v) = &value {
+                    if !["en", "fr", ""].contains(&v.as_str()) {
+                        bail!(t!("language: en, fr, or empty for the system's language", "langue : en, fr, ou vide pour la langue du système"));
+                    }
+                }
             }
             match value {
                 None => println!(
@@ -458,7 +490,7 @@ async fn run(cli: Cli) -> Result<()> {
                     model::setting(&state.db, &key)
                         .await?
                         .map(|v| v.to_string())
-                        .unwrap_or_else(|| "(défaut)".into())
+                        .unwrap_or_else(|| t!("(default)", "(défaut)").into())
                 ),
                 Some(v) => {
                     if key == "auth_policy" {
@@ -466,7 +498,7 @@ async fn run(cli: Cli) -> Result<()> {
                     }
                     model::set_setting(&state.db, &key, json!(v)).await?;
                     audit::log(&state.db, "console", "reglage.modifie", json!({ "reglage": key, "valeur": v })).await?;
-                    println!("Réglage enregistré.");
+                    println!("{}", t!("Setting saved.", "Réglage enregistré."));
                 }
             }
             Ok(())
@@ -490,16 +522,16 @@ fn tls_names() -> Vec<String> {
 }
 
 async fn init(config: Config, admin: &str, no_admin: bool, provisional: bool, nom: Option<&str>) -> Result<()> {
-    println!("Heimdia {}, première installation\n", env!("CARGO_PKG_VERSION"));
+    println!("Heimdia {}, {}\n", env!("CARGO_PKG_VERSION"), t!("first install", "première installation"));
     for created in Keys::create_missing(&config.data_dir)? {
-        println!("✓ Créé : {created}");
+        println!("✓ {} {created}", t!("Created:", "Créé :"));
     }
     if tls::create_missing(&config.data_dir, &tls_names())? {
-        println!("✓ Créé : certificat de l'API");
+        println!("✓ {}", t!("Created: API certificate", "Créé : certificat de l'API"));
     }
     std::fs::create_dir_all(config.recordings_dir())?;
     let db = connect_db(&config).await?;
-    println!("✓ Base PostgreSQL prête");
+    println!("✓ {}", t!("PostgreSQL database ready", "Base PostgreSQL prête"));
     let keys = Keys::load(&config.data_dir)?;
     let state = State { db, keys, config, web: portal::Live::default() };
     if model::setting(&state.db, "site_id").await?.is_none() {
@@ -511,24 +543,28 @@ async fn init(config: Config, admin: &str, no_admin: bool, provisional: bool, no
     use base64::Engine;
     let sig = base64::engine::general_purpose::STANDARD.encode(state.keys.signature_public_key());
     model::set_setting(&state.db, "signature_publique", json!(sig)).await?;
-    println!("✓ Clé d'hôte SSH        {}", state.keys.host_fingerprint());
-    println!("✓ Certificat de l'API   {}", tls::fingerprint(&state.config.data_dir)?);
-    println!("✓ Signature des enregistrements : clé publique {sig}");
+    println!("✓ {}{}", t!("SSH host key          ", "Clé d'hôte SSH        "), state.keys.host_fingerprint());
+    println!("✓ {}{}", t!("API certificate       ", "Certificat de l'API   "), tls::fingerprint(&state.config.data_dir)?);
+    println!("✓ {} {sig}", t!("Recording signature: public key", "Signature des enregistrements : clé publique"));
     println!(
-        "  À SAUVEGARDER hors du serveur : {}",
+        "  {} {}",
+        t!("BACK UP outside the server:", "À SAUVEGARDER hors du serveur :"),
         state.config.data_dir.join("coffre.key").display()
     );
 
     let has_admin = model::users(&state.db).await?.iter().any(|u| u.role == "admin");
     if no_admin {
         println!(
-            "
-Aucun administrateur créé (--no-admin) : lancez « heimdia init » pour le créer."
+            "\n{}",
+            t!(
+                "No administrator created (--no-admin): run « heimdia init » to create one.",
+                "Aucun administrateur créé (--no-admin) : lancez « heimdia init » pour le créer."
+            )
         );
     } else if has_admin {
-        println!("\nUn administrateur existe déjà : rien d'autre à faire.");
+        println!("\n{}", t!("An administrator already exists: nothing else to do.", "Un administrateur existe déjà : rien d'autre à faire."));
     } else {
-        println!("\nCompte administrateur : {admin}");
+        println!("\n{} {admin}", t!("Administrator account:", "Compte administrateur :"));
         create_account(&state, admin, "admin", None, false, provisional).await?;
     }
     audit::log(
@@ -538,7 +574,7 @@ Aucun administrateur créé (--no-admin) : lancez « heimdia init » pour le cr�
         json!({ "version": env!("CARGO_PKG_VERSION") }),
     )
     .await?;
-    println!("\n✓ Prêt.");
+    println!("\n✓ {}", t!("Ready.", "Prêt."));
     Ok(())
 }
 
@@ -556,10 +592,10 @@ async fn create_account(
 ) -> Result<()> {
     let db = &state.db;
     if !["user", "auditor", "admin"].contains(&role) {
-        bail!("rôle : user, auditor ou admin");
+        bail!(t!("role: user, auditor or admin", "rôle : user, auditor ou admin"));
     }
     if model::user_by_login(db, login).await?.is_some() {
-        bail!("le compte {login} existe déjà");
+        bail!(t!(format!("account {login} already exists"), format!("le compte {login} existe déjà")));
     }
     let temp = provisional.then(auth::temp_password).transpose()?;
     let hash = match (&temp, no_password) {
@@ -574,21 +610,25 @@ async fn create_account(
             .execute(db)
             .await?;
     } else {
-        let user = model::user_by_id(db, id).await?.ok_or_else(|| anyhow!("compte introuvable"))?;
+        let user = model::user_by_id(db, id).await?.ok_or_else(|| anyhow!(t!("account not found", "compte introuvable")))?;
         if user.policy(db).await?.needs_totp() {
             if let Err(e) = enroll_totp(state, &user).await {
                 sqlx::query("DELETE FROM users WHERE id = $1").bind(id).execute(db).await?;
-                bail!("{e} ; compte non créé, relancez la commande");
+                bail!(t!(format!("{e}; account not created, run the command again"), format!("{e} ; compte non créé, relancez la commande")));
             }
         }
     }
     audit::log(db, "console", "compte.cree", json!({ "compte": login, "role": role })).await?;
     match temp {
+        // installer.sh lit le mot de passe après « Temporary password: » / « Mot de passe provisoire : ».
         Some(temp) => println!(
-            "Compte {login} créé. Mot de passe provisoire : {temp}\n\
-             À la première connexion dans Portunia, l'utilisateur choisit son mot de passe puis scanne son code QR."
+            "{}",
+            t!(
+                format!("Account {login} created. Temporary password: {temp}\nAt their first sign-in in Portunia, the user chooses their password then scans their QR code."),
+                format!("Compte {login} créé. Mot de passe provisoire : {temp}\nÀ la première connexion dans Portunia, l'utilisateur choisit son mot de passe puis scanne son code QR.")
+            )
         ),
-        None => println!("Compte {login} créé."),
+        None => println!("{}", t!(format!("Account {login} created."), format!("Compte {login} créé."))),
     }
     Ok(())
 }
@@ -598,7 +638,7 @@ async fn user_cmd(state: &State, cmd: UserCmd) -> Result<()> {
     let find = |login: String| async move {
         model::user_by_login(db, &login)
             .await?
-            .ok_or_else(|| anyhow!("Compte inconnu : {login}"))
+            .ok_or_else(|| anyhow!(t!(format!("Unknown account: {login}"), format!("Compte inconnu : {login}"))))
     };
     match cmd {
         UserCmd::Add {
@@ -615,15 +655,15 @@ async fn user_cmd(state: &State, cmd: UserCmd) -> Result<()> {
             let user = find(login).await?;
             let admins = model::users(db).await?.iter().filter(|u| u.role == "admin" && !u.disabled).count();
             if user.role == "admin" && admins <= 1 {
-                bail!("c'est le dernier administrateur : créez-en un autre avant de le supprimer");
+                bail!(t!("this is the last administrator: create another one before deleting it", "c'est le dernier administrateur : créez-en un autre avant de le supprimer"));
             }
             sqlx::query("DELETE FROM users WHERE id = $1").bind(user.id).execute(db).await?;
             audit::log(db, "console", "compte.supprime", json!({ "compte": user.login })).await?;
-            println!("Compte {} supprimé.", user.login);
+            println!("{}", t!(format!("Account {} deleted.", user.login), format!("Compte {} supprimé.", user.login)));
         }
         UserCmd::Role { login, role } => {
             if !["user", "auditor", "admin"].contains(&role.as_str()) {
-                bail!("rôle : user, auditor ou admin");
+                bail!(t!("role: user, auditor or admin", "rôle : user, auditor ou admin"));
             }
             let user = find(login).await?;
             sqlx::query("UPDATE users SET role = $2 WHERE id = $1")
@@ -632,7 +672,7 @@ async fn user_cmd(state: &State, cmd: UserCmd) -> Result<()> {
                 .execute(db)
                 .await?;
             audit::log(db, "console", "compte.modifie", json!({ "compte": user.login, "role": role })).await?;
-            println!("{} est maintenant {role}.", user.login);
+            println!("{}", t!(format!("{} is now {role}.", user.login), format!("{} est maintenant {role}.", user.login)));
         }
         UserCmd::List => {
             for u in model::users(db).await? {
@@ -640,9 +680,9 @@ async fn user_cmd(state: &State, cmd: UserCmd) -> Result<()> {
                     "{:<20} {:<8} code {:<9} {}{}",
                     u.login,
                     u.role,
-                    if u.totp_secret.is_some() { "enrôlé" } else { "absent" },
-                    u.auth_policy.unwrap_or_else(|| "(général)".into()),
-                    if u.disabled { "  DÉSACTIVÉ" } else { "" }
+                    if u.totp_secret.is_some() { t!("enrolled", "enrôlé") } else { t!("missing", "absent") },
+                    u.auth_policy.unwrap_or_else(|| t!("(global)", "(général)").into()),
+                    if u.disabled { t!("  DISABLED", "  DÉSACTIVÉ") } else { "" }
                 );
             }
         }
@@ -653,7 +693,7 @@ async fn user_cmd(state: &State, cmd: UserCmd) -> Result<()> {
             } else {
                 key
             };
-            let public = russh::keys::PublicKey::from_openssh(text.trim()).map_err(|e| anyhow!("clé publique illisible : {e}"))?;
+            let public = russh::keys::PublicKey::from_openssh(text.trim()).map_err(|e| anyhow!(t!(format!("unreadable public key: {e}"), format!("clé publique illisible : {e}"))))?;
             let fp = public.fingerprint(russh::keys::HashAlg::Sha256).to_string();
             model::add_user_key(db, user.id, text.trim(), &fp, &String::from_utf8_lossy(public.comment().as_bytes())).await?;
             audit::log(
@@ -663,7 +703,7 @@ async fn user_cmd(state: &State, cmd: UserCmd) -> Result<()> {
                 json!({ "compte": user.login, "empreinte": fp }),
             )
             .await?;
-            println!("Clé ajoutée : {fp}");
+            println!("{} {fp}", t!("Key added:", "Clé ajoutée :"));
         }
         UserCmd::Totp { login } => {
             let user = find(login).await?;
@@ -678,7 +718,7 @@ async fn user_cmd(state: &State, cmd: UserCmd) -> Result<()> {
                 .execute(db)
                 .await?;
             audit::log(db, "console", "compte.mot_de_passe", json!({ "compte": user.login })).await?;
-            println!("Mot de passe changé.");
+            println!("{}", t!("Password changed.", "Mot de passe changé."));
         }
         UserCmd::Disable { login, undo } => {
             let user = find(login).await?;
@@ -694,7 +734,7 @@ async fn user_cmd(state: &State, cmd: UserCmd) -> Result<()> {
                 json!({ "compte": user.login }),
             )
             .await?;
-            println!("{}", if undo { "Compte réactivé." } else { "Compte désactivé." });
+            println!("{}", if undo { t!("Account re-enabled.", "Compte réactivé.") } else { t!("Account disabled.", "Compte désactivé.") });
         }
     }
     Ok(())
@@ -706,18 +746,18 @@ async fn group_cmd(state: &State, cmd: GroupCmd) -> Result<()> {
         GroupCmd::Add { name } => {
             model::create_group(db, &name).await?;
             audit::log(db, "console", "groupe.cree", json!({ "groupe": name })).await?;
-            println!("Groupe créé.");
+            println!("{}", t!("Group created.", "Groupe créé."));
         }
         GroupCmd::Member { group, logins } => {
             let gid = model::group_id(db, &group).await?;
             for login in logins {
                 let user = model::user_by_login(db, &login)
                     .await?
-                    .ok_or_else(|| anyhow!("Compte inconnu : {login}"))?;
+                    .ok_or_else(|| anyhow!(t!(format!("Unknown account: {login}"), format!("Compte inconnu : {login}"))))?;
                 model::add_member(db, gid, user.id).await?;
                 audit::log(db, "console", "groupe.membre_ajoute", json!({ "groupe": group, "compte": login })).await?;
             }
-            println!("Membres ajoutés.");
+            println!("{}", t!("Members added.", "Membres ajoutés."));
         }
     }
     Ok(())
@@ -738,16 +778,17 @@ async fn target_cmd(state: &State, cmd: TargetCmd) -> Result<()> {
             key_file,
         } => {
             let port = port.unwrap_or(if protocol == "rdp" { 3389 } else { 22 });
+            let mode = model::mode_alias(&mode).to_string();
             let secret: Option<(String, Vec<u8>)> = match (password, key_file) {
-                (true, Some(_)) => bail!("Choisissez --password ou --key-file, pas les deux"),
+                (true, Some(_)) => bail!(t!("Choose --password or --key-file, not both", "Choisissez --password ou --key-file, pas les deux")),
                 (true, None) => Some((
                     "password".into(),
-                    prompt_secret("Mot de passe du compte sur la cible : ")?.into_bytes(),
+                    prompt_secret(t!("Password of the account on the target: ", "Mot de passe du compte sur la cible : "))?.into_bytes(),
                 )),
                 (false, Some(path)) => {
-                    let text = std::fs::read_to_string(&path).with_context(|| format!("lecture de {path}"))?;
+                    let text = std::fs::read_to_string(&path).with_context(|| t!(format!("reading {path}"), format!("lecture de {path}")))?;
                     russh::keys::decode_secret_key(&text, None)
-                        .map_err(|e| anyhow!("clé privée illisible (sans phrase de passe) : {e}"))?;
+                        .map_err(|e| anyhow!(t!(format!("unreadable private key (without passphrase): {e}"), format!("clé privée illisible (sans phrase de passe) : {e}"))))?;
                     Some(("key".into(), text.into_bytes()))
                 }
                 (false, None) => None,
@@ -775,7 +816,7 @@ async fn target_cmd(state: &State, cmd: TargetCmd) -> Result<()> {
                 json!({ "cible": name, "adresse": format!("{host}:{port}"), "mode": mode }),
             )
             .await?;
-            println!("Cible créée. L'empreinte de son serveur sera mémorisée à la première connexion.");
+            println!("{}", t!("Target created. Its server's fingerprint will be remembered at the first connection.", "Cible créée. L'empreinte de son serveur sera mémorisée à la première connexion."));
         }
         TargetCmd::List => {
             for t in model::targets(db).await? {
@@ -787,7 +828,7 @@ async fn target_cmd(state: &State, cmd: TargetCmd) -> Result<()> {
                     format!("{}:{}", t.host, t.port),
                     t.mode,
                     t.account.unwrap_or_default(),
-                    t.host_key.unwrap_or_else(|| "empreinte à mémoriser".into())
+                    t.host_key.unwrap_or_else(|| t!("fingerprint to remember", "empreinte à mémoriser").into())
                 );
             }
         }
@@ -815,29 +856,29 @@ async fn rule_cmd(state: &State, cmd: RuleCmd) -> Result<()> {
                 ids.push(
                     model::target_by_name(db, t)
                         .await?
-                        .ok_or_else(|| anyhow!("Cible inconnue : {t}"))?
+                        .ok_or_else(|| anyhow!(t!(format!("Unknown target: {t}"), format!("Cible inconnue : {t}"))))?
                         .id,
                 );
             }
             if ids.is_empty() {
-                bail!("Indiquez au moins une cible (--targets a,b)");
+                bail!(t!("Give at least one target (--targets a,b)", "Indiquez au moins une cible (--targets a,b)"));
             }
             let hours = match hours {
                 Some(h) => {
-                    let (a, b) = h.split_once('-').ok_or_else(|| anyhow!("Heures : « 7-20 »"))?;
+                    let (a, b) = h.split_once('-').ok_or_else(|| anyhow!(t!("Hours: « 7-20 »", "Heures : « 7-20 »")))?;
                     Some((a.trim().parse::<i16>()?, b.trim().parse::<i16>()?))
                 }
                 None => None,
             };
             let expires_at = match expires {
                 Some(d) => {
-                    let date = chrono::NaiveDate::parse_from_str(&d, "%Y-%m-%d").map_err(|_| anyhow!("Date : AAAA-MM-JJ"))?;
+                    let date = chrono::NaiveDate::parse_from_str(&d, "%Y-%m-%d").map_err(|_| anyhow!(t!("Date: YYYY-MM-DD", "Date : AAAA-MM-JJ")))?;
                     let end = date
                         .and_hms_opt(23, 59, 59)
                         .unwrap()
                         .and_local_timezone(chrono::Local)
                         .single()
-                        .ok_or_else(|| anyhow!("date ambiguë"))?;
+                        .ok_or_else(|| anyhow!(t!("ambiguous date", "date ambiguë")))?;
                     Some(end.with_timezone(&chrono::Utc))
                 }
                 None => None,
@@ -865,7 +906,7 @@ async fn rule_cmd(state: &State, cmd: RuleCmd) -> Result<()> {
                 json!({ "regle": name, "groupe": group, "cibles": targets, "sftp": sftp, "tunnels": tunnels, "frappe": record_input }),
             )
             .await?;
-            println!("Règle créée.");
+            println!("{}", t!("Rule created.", "Règle créée."));
         }
     }
     Ok(())
@@ -878,6 +919,7 @@ mod tests {
         assert_eq!(super::parse_days("lun-ven").unwrap(), 0b0011111);
         assert_eq!(super::parse_days("sam,dim").unwrap(), 0b1100000);
         assert_eq!(super::parse_days("ven-lun").unwrap(), 0b1110001);
+        assert_eq!(super::parse_days("mon-fri").unwrap(), 0b0011111);
         assert!(super::parse_days("xyz").is_err());
     }
 }

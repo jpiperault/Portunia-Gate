@@ -20,7 +20,7 @@ pub fn random<const N: usize>() -> Result<[u8; N]> {
     let mut out = [0u8; N];
     SystemRandom::new()
         .fill(&mut out)
-        .map_err(|_| anyhow!("générateur aléatoire indisponible"))?;
+        .map_err(|_| anyhow!(t!("random generator unavailable", "générateur aléatoire indisponible")))?;
     Ok(out)
 }
 
@@ -33,7 +33,7 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let mut file = options.open(path).with_context(|| format!("création de {}", path.display()))?;
+    let mut file = options.open(path).with_context(|| t!(format!("creating {}", path.display()), format!("création de {}", path.display())))?;
     file.write_all(bytes)?;
     file.sync_all()?;
     Ok(())
@@ -72,11 +72,11 @@ impl Keys {
     }
 
     pub fn load(dir: &Path) -> Result<Self> {
-        let raw = fs::read(dir.join("coffre.key")).context("clé du coffre illisible (lancez « heimdia init »)")?;
-        let vault = LessSafeKey::new(UnboundKey::new(&AES_256_GCM, &raw).map_err(|_| anyhow!("clé du coffre invalide"))?);
-        let host = russh::keys::load_secret_key(dir.join("ssh_host_ed25519_key"), None).context("clé d'hôte SSH illisible")?;
-        let signer = Ed25519KeyPair::from_pkcs8(&fs::read(dir.join("signature.key")).context("clé de signature illisible")?)
-            .map_err(|_| anyhow!("clé de signature invalide"))?;
+        let raw = fs::read(dir.join("coffre.key")).context(t!("vault key unreadable (run « heimdia init »)", "clé du coffre illisible (lancez « heimdia init »)"))?;
+        let vault = LessSafeKey::new(UnboundKey::new(&AES_256_GCM, &raw).map_err(|_| anyhow!(t!("invalid vault key", "clé du coffre invalide")))?);
+        let host = russh::keys::load_secret_key(dir.join("ssh_host_ed25519_key"), None).context(t!("SSH host key unreadable", "clé d'hôte SSH illisible"))?;
+        let signer = Ed25519KeyPair::from_pkcs8(&fs::read(dir.join("signature.key")).context(t!("signing key unreadable", "clé de signature illisible"))?)
+            .map_err(|_| anyhow!(t!("invalid signing key", "clé de signature invalide")))?;
         Ok(Self { vault, host, signer })
     }
 
@@ -90,7 +90,7 @@ impl Keys {
         let mut data = plain.to_vec();
         self.vault
             .seal_in_place_append_tag(Nonce::assume_unique_for_key(nonce), Aad::from(aad(purpose)), &mut data)
-            .map_err(|_| anyhow!("chiffrement impossible"))?;
+            .map_err(|_| anyhow!(t!("encryption failed", "chiffrement impossible")))?;
         let mut out = nonce.to_vec();
         out.extend(data);
         Ok(out)
@@ -98,15 +98,15 @@ impl Keys {
 
     pub fn open(&self, purpose: &str, sealed: &[u8]) -> Result<Vec<u8>> {
         if sealed.len() < NONCE_LEN {
-            return Err(anyhow!("secret abîmé"));
+            return Err(anyhow!(t!("damaged secret", "secret abîmé")));
         }
         let (nonce, data) = sealed.split_at(NONCE_LEN);
         let mut data = data.to_vec();
-        let nonce = Nonce::try_assume_unique_for_key(nonce).map_err(|_| anyhow!("secret abîmé"))?;
+        let nonce = Nonce::try_assume_unique_for_key(nonce).map_err(|_| anyhow!(t!("damaged secret", "secret abîmé")))?;
         let plain = self
             .vault
             .open_in_place(nonce, Aad::from(aad(purpose)), &mut data)
-            .map_err(|_| anyhow!("secret illisible (clé du coffre différente ?)"))?;
+            .map_err(|_| anyhow!(t!("unreadable secret (different vault key?)", "secret illisible (clé du coffre différente ?)")))?;
         Ok(plain.to_vec())
     }
 

@@ -44,7 +44,7 @@ pub fn create_missing(data_dir: &Path, names: &[String]) -> Result<bool> {
 
 /// Empreinte SHA-256 du certificat (DER), telle que Portunia l'affiche : « AB:CD:… ».
 pub fn fingerprint(data_dir: &Path) -> Result<String> {
-    let pem = std::fs::read(files(data_dir).cert).context("certificat de l'API illisible")?;
+    let pem = std::fs::read(files(data_dir).cert).context(t!("API certificate unreadable", "certificat de l'API illisible"))?;
     let der = rustls_pemfile_first(&pem)?;
     Ok(format_fingerprint(&der))
 }

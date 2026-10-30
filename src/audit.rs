@@ -27,7 +27,7 @@ pub async fn log(db: &PgPool, actor: &str, event: &str, detail: Value) -> Result
     let (db, actor, event) = (db.clone(), actor.to_string(), event.to_string());
     tokio::spawn(async move { write(&db, &actor, &event, detail).await })
         .await
-        .map_err(|e| anyhow::anyhow!("journal d'audit : {e}"))?
+        .map_err(|e| anyhow::anyhow!(t!(format!("audit log: {e}"), format!("journal d'audit : {e}"))))?
 }
 
 async fn write(db: &PgPool, actor: &str, event: &str, detail: Value) -> Result<()> {
@@ -95,10 +95,10 @@ pub async fn verify(db: &PgPool) -> Result<std::result::Result<i64, String>> {
     for (i, row) in rows.iter().enumerate() {
         let expected_seq = i as i64 + 1;
         if row.seq != expected_seq {
-            return Ok(Err(format!("événement n° {expected_seq} manquant")));
+            return Ok(Err(t!(format!("event #{expected_seq} missing"), format!("événement n° {expected_seq} manquant"))));
         }
         if row.prev_hash != prev || link(&prev, row.seq, &row.at, &row.actor, &row.event, &row.detail) != row.hash {
-            return Ok(Err(format!("événement n° {} modifié", row.seq)));
+            return Ok(Err(t!(format!("event #{} modified", row.seq), format!("événement n° {} modifié", row.seq))));
         }
         prev = row.hash.clone();
     }

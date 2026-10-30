@@ -37,8 +37,8 @@ Store these files off the server. The data archive contains the vault key: prote
 ## Updating
 
 ```bash
-sudo bash installer.sh mise-a-jour       # Debian package
-sudo ./installer.sh mise-a-jour          # Docker, from the repository folder
+sudo bash installer.sh update       # Debian package
+sudo ./installer.sh update          # Docker, from the repository folder
 ```
 
 With the package, the wizard downloads the latest version, checks its fingerprint and installs it. With Docker, it fetches the latest version (`git pull`) and rebuilds. Either way, the bastion restarts and updates the database schema. **Open sessions are cut**: warn users.
@@ -93,7 +93,7 @@ On the first connection, Heimdia remembers the server's key (SSH) or certificate
 | "Docker does not start" in an LXC container | Enable *nesting* and *keyctl* on the container (Proxmox › Options › Features), restart it, run `sudo ./installer.sh` again. |
 | The build stops (`killed`, `signal 9`, `out of memory`) | Not enough memory: 4 GB recommended. Add memory or swap, then run `sudo ./installer.sh` again: the install resumes where it stopped. |
 | "Port 2222 is already in use" | Another service uses it: pick another port when asked. |
-| "Download failed" | The server cannot reach github.com: download `heimdia_amd64.deb` from a computer, copy it to the server and run `sudo bash installer.sh --paquet heimdia_amd64.deb`. |
+| "Download failed" | The server cannot reach github.com: download `heimdia_amd64.deb` from a computer, copy it to the server and run `sudo bash installer.sh --package heimdia_amd64.deb`. |
 | "The downloaded package is altered" | Corrupted or intercepted download: retry; if the message persists, do not install and report it. |
 | The `heimdia` service does not start (package) | `sudo journalctl -u heimdia -n 50`. In an unprivileged LXC container without *nesting*, systemd hardening can fail: enable *nesting* (Proxmox › Options › Features) and restart the container. |
 | "Illegal instruction" during initialisation | Package 0.5.0 only: it required a CPU with AVX, missing from Proxmox's default virtual CPU (kvm64). Fixed in 0.5.1: run `sudo bash installer.sh` again, which resumes the install with the latest version. |

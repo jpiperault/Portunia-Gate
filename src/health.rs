@@ -31,8 +31,8 @@ fn now_secs() -> u64 {
 async fn check(state: &State) -> Result<(), String> {
     match tokio::time::timeout(Duration::from_secs(10), sqlx::query_scalar::<_, i32>("SELECT 1").fetch_one(&state.db)).await {
         Ok(Ok(_)) => {}
-        Ok(Err(e)) => return Err(format!("base de données : {e}")),
-        Err(_) => return Err("base de données : pas de réponse en 10 s".into()),
+        Ok(Err(e)) => return Err(t!(format!("database: {e}"), format!("base de données : {e}"))),
+        Err(_) => return Err(t!("database: no answer within 10 s", "base de données : pas de réponse en 10 s").into()),
     }
     let ssh = async {
         let mut tcp = tokio::net::TcpStream::connect(("127.0.0.1", state.config.ssh_local_port())).await?;
@@ -42,9 +42,9 @@ async fn check(state: &State) -> Result<(), String> {
     };
     match tokio::time::timeout(Duration::from_secs(10), ssh).await {
         Ok(Ok(true)) => Ok(()),
-        Ok(Ok(false)) => Err("serveur SSH : réponse inattendue".into()),
-        Ok(Err(e)) => Err(format!("serveur SSH : {e}")),
-        Err(_) => Err("serveur SSH : pas de bannière en 10 s".into()),
+        Ok(Ok(false)) => Err(t!("SSH server: unexpected answer", "serveur SSH : réponse inattendue").into()),
+        Ok(Err(e)) => Err(t!(format!("SSH server: {e}"), format!("serveur SSH : {e}"))),
+        Err(_) => Err(t!("SSH server: no banner within 10 s", "serveur SSH : pas de bannière en 10 s").into()),
     }
 }
 
@@ -55,7 +55,7 @@ pub async fn run(state: Arc<State>) -> anyhow::Result<()> {
         std::thread::sleep(Duration::from_secs(15));
         let quiet = now_secs().saturating_sub(watched.load(Ordering::Relaxed));
         if quiet > FROZEN_AFTER {
-            eprintln!("Heimdia figé depuis {quiet} s (tâches bloquées) : arrêt pour redémarrage automatique.");
+            eprintln!("{}", t!(format!("Heimdia frozen for {quiet} s (tasks blocked): stopping for automatic restart."), format!("Heimdia figé depuis {quiet} s (tâches bloquées) : arrêt pour redémarrage automatique.")));
             std::process::exit(70);
         }
     })?;
@@ -69,7 +69,7 @@ pub async fn run(state: Arc<State>) -> anyhow::Result<()> {
         match check(&state).await {
             Ok(()) => {
                 if failures > 0 {
-                    tracing::info!("surveillance : le bastion répond de nouveau");
+                    tracing::info!("{}", t!("watchdog: the bastion is answering again", "surveillance : le bastion répond de nouveau"));
                 }
                 failures = 0;
             }
@@ -78,16 +78,22 @@ pub async fn run(state: Arc<State>) -> anyhow::Result<()> {
                     since = Instant::now();
                 }
                 failures += 1;
+                let (size, idle, web) = (state.db.size(), state.db.num_idle(), state.web.active());
                 tracing::warn!(
-                    "surveillance : {why} (essai {failures}/{FAILURES_BEFORE_EXIT}, base : {} connexion(s) dont {} libre(s), terminaux web : {})",
-                    state.db.size(),
-                    state.db.num_idle(),
-                    state.web.active()
+                    "{}",
+                    t!(
+                        format!("watchdog: {why} (attempt {failures}/{FAILURES_BEFORE_EXIT}, database: {size} connection(s) of which {idle} idle, web terminals: {web})"),
+                        format!("surveillance : {why} (essai {failures}/{FAILURES_BEFORE_EXIT}, base : {size} connexion(s) dont {idle} libre(s), terminaux web : {web})")
+                    )
                 );
                 if failures >= FAILURES_BEFORE_EXIT {
+                    let secs = since.elapsed().as_secs();
                     tracing::error!(
-                        "surveillance : le bastion ne répond plus depuis {} s ({why}) ; arrêt pour redémarrage automatique",
-                        since.elapsed().as_secs()
+                        "{}",
+                        t!(
+                            format!("watchdog: the bastion has not answered for {secs} s ({why}); stopping for automatic restart"),
+                            format!("surveillance : le bastion ne répond plus depuis {secs} s ({why}) ; arrêt pour redémarrage automatique")
+                        )
                     );
                     std::process::exit(70);
                 }

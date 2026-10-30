@@ -33,17 +33,17 @@ pub fn vault_credentials(state: &State, target: &Target) -> Result<Credentials> 
     let user = target
         .account
         .clone()
-        .ok_or_else(|| anyhow!("compte du coffre manquant pour {}", target.name))?;
+        .ok_or_else(|| anyhow!(t!(format!("vault account missing for {}", target.name), format!("compte du coffre manquant pour {}", target.name))))?;
     let sealed = target
         .secret
         .as_deref()
-        .ok_or_else(|| anyhow!("secret du coffre manquant pour {}", target.name))?;
+        .ok_or_else(|| anyhow!(t!(format!("vault secret missing for {}", target.name), format!("secret du coffre manquant pour {}", target.name))))?;
     let plain = state.keys.open(&target.secret_purpose(), sealed)?;
-    let text = String::from_utf8(plain).map_err(|_| anyhow!("secret du coffre illisible"))?;
+    let text = String::from_utf8(plain).map_err(|_| anyhow!(t!("unreadable vault secret", "secret du coffre illisible")))?;
     Ok(match target.secret_kind.as_str() {
         "key" => Credentials::Key {
             user,
-            key: Box::new(decode_secret_key(&text, None).map_err(|e| anyhow!("clé du coffre illisible : {e}"))?),
+            key: Box::new(decode_secret_key(&text, None).map_err(|e| anyhow!(t!(format!("unreadable vault key: {e}"), format!("clé du coffre illisible : {e}"))))?),
         },
         _ => Credentials::Password { user, password: text },
     })
@@ -103,7 +103,7 @@ pub async fn connect(state: &State, target: &Target, creds: &Credentials, actor:
     let connected = tokio::time::timeout(std::time::Duration::from_secs(15), client::connect(config, address, client)).await;
     let seen = seen.lock().unwrap().clone();
     let mut handle = match connected {
-        Err(_) => return Err(anyhow!("{} ne répond pas ({}:{})", target.name, target.host, target.port).into()),
+        Err(_) => return Err(anyhow!(t!(format!("{} is not answering ({}:{})", target.name, target.host, target.port), format!("{} ne répond pas ({}:{})", target.name, target.host, target.port))).into()),
         Ok(Err(e)) => {
             if let (Some(pinned), Some(seen)) = (&target.host_key, &seen) {
                 if pinned != seen {
@@ -114,14 +114,15 @@ pub async fn connect(state: &State, target: &Target, creds: &Credentials, actor:
                         json!({ "cible": target.name, "attendue": pinned, "recue": seen }),
                     )
                     .await;
-                    return Err(anyhow!(
-                        "La clé du serveur {} a changé : connexion refusée. Un administrateur doit vérifier puis réinitialiser son empreinte.",
-                        target.name
-                    )
+                    let name = &target.name;
+                    return Err(anyhow!(t!(
+                        format!("The key of server {name} has changed: connection refused. An administrator must check it then reset its fingerprint."),
+                        format!("La clé du serveur {name} a changé : connexion refusée. Un administrateur doit vérifier puis réinitialiser son empreinte.")
+                    ))
                     .into());
                 }
             }
-            return Err(anyhow!("connexion à {} impossible : {e}", target.name).into());
+            return Err(anyhow!(t!(format!("cannot connect to {}: {e}", target.name), format!("connexion à {} impossible : {e}", target.name))).into());
         }
         Ok(Ok(handle)) => handle,
     };
@@ -171,7 +172,7 @@ pub async fn install_new_key(state: &State, target: &Target, account: &str, pass
     };
     let handle = match connect(state, target, &creds, actor).await {
         Ok(h) => h,
-        Err(ConnectError::Refused) => return Err(anyhow!("Mot de passe refusé par {} pour le compte {account}", target.name)),
+        Err(ConnectError::Refused) => return Err(anyhow!(t!(format!("Password refused by {} for account {account}", target.name), format!("Mot de passe refusé par {} pour le compte {account}", target.name)))),
         Err(ConnectError::Other(e)) => return Err(e),
     };
     let mut channel = handle.channel_open_session().await?;
@@ -185,7 +186,7 @@ pub async fn install_new_key(state: &State, target: &Target, account: &str, pass
     }
     let _ = handle.disconnect(russh::Disconnect::ByApplication, "", "fr").await;
     if status != Some(0) {
-        return Err(anyhow!("Installation de la clé impossible sur {} (code {status:?})", target.name));
+        return Err(anyhow!(t!(format!("Cannot install the key on {} (code {status:?})", target.name), format!("Installation de la clé impossible sur {} (code {status:?})", target.name))));
     }
     let check = Credentials::Key {
         user: account.to_string(),
@@ -196,10 +197,10 @@ pub async fn install_new_key(state: &State, target: &Target, account: &str, pass
             let _ = h.disconnect(russh::Disconnect::ByApplication, "", "fr").await;
         }
         Err(_) => {
-            return Err(anyhow!(
-                "La clé a été ajoutée mais {} la refuse (authentification par clé désactivée ?)",
-                target.name
-            ))
+            return Err(anyhow!(t!(
+                format!("The key was added but {} refuses it (key authentication disabled?)", target.name),
+                format!("La clé a été ajoutée mais {} la refuse (authentification par clé désactivée ?)", target.name)
+            )))
         }
     }
     Ok(key.to_openssh(LineEnding::LF).map_err(|e| anyhow!("clé : {e}"))?.to_string())

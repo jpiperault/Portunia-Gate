@@ -31,7 +31,7 @@ Two ways to install, with the same setup wizard:
 | Suggested server | 1 CPU, 2 GB RAM, 10 GB disk | 2 CPUs, 4 GB RAM, 20 GB disk |
 | LXC container | Nothing to enable | *nesting* and *keyctl* options required |
 | How it runs | Hardened systemd service, the distribution's PostgreSQL | Two containers (Heimdia and PostgreSQL) |
-| Updating | `sudo bash installer.sh mise-a-jour` (downloads the latest version) | `sudo ./installer.sh mise-a-jour` (`git pull`, then rebuild) |
+| Updating | `sudo bash installer.sh update` (downloads the latest version) | `sudo ./installer.sh update` (`git pull`, then rebuild) |
 | Processors | x86-64 (amd64) | x86-64 and ARM |
 
 Either way: a **Debian 12 or 13** or **Ubuntu 22.04 or later** server (virtual machine or LXC container) with root or sudo access, and ports **2222** (SSH) and **8443** (API for Portunia) reachable from users' computers.
@@ -57,7 +57,7 @@ Installed files:
 
 The service runs under a dedicated system account (`_heimdia`), writes only to `/var/lib/heimdia` and sees neither home folders nor the rest of the system. Useful commands: `sudo systemctl status heimdia`, `sudo journalctl -u heimdia -f`.
 
-Install a specific package (no Internet access, or an older version): `sudo bash installer.sh --paquet heimdia_0.4.0_amd64.deb`.
+Install a specific package (no Internet access, or an older version): `sudo bash installer.sh --package heimdia_0.4.0_amd64.deb`.
 
 ### Docker
 
@@ -101,9 +101,9 @@ rm ~/heimdia-coffre.key                                      # on the server
 | Choice | Direct command | |
 |---|---|---|
 | Information for Portunia | `sudo bash installer.sh info` | Address and fingerprint to give to users. |
-| Update | `sudo bash installer.sh mise-a-jour` | Installs the latest version and restarts. **Open sessions are cut.** |
+| Update | `sudo bash installer.sh update` | Installs the latest version and restarts. **Open sessions are cut.** |
 | Create an administrator | `sudo bash installer.sh admin julien` | Backup administrator with a temporary password, for example if the only administrator lost their phone. |
-| Web portal | `sudo bash installer.sh portail` | Installs Cloudflare Tunnel (see [Web portal](#web-portal)). |
+| Web portal | `sudo bash installer.sh portal` | Installs Cloudflare Tunnel (see [Web portal](#web-portal)). |
 
 With Docker, run the wizard from the repository folder (`sudo ./installer.sh`).
 
@@ -228,7 +228,7 @@ A web page to open your servers from any browser, without Portunia: sign-in, lis
 **Setup**
 
 1. **Create the tunnel** in Cloudflare Zero Trust › Networks › Tunnels › *Create a tunnel* (Cloudflared type) and copy its token (the long string after `--token`).
-2. **Install it on the bastion**: `sudo bash installer.sh portail` (package) or `sudo ./installer.sh portail` (Docker), then paste the token.
+2. **Install it on the bastion**: `sudo bash installer.sh portal` (package) or `sudo ./installer.sh portal` (Docker), then paste the token.
 3. **Publish the address**: in the tunnel's *Public Hostname* tab, add the address (e.g. `access.your-domain.com`), type **HTTP**, URL `localhost:8445` (package) or `heimdia:8445` (Docker).
 4. **Recommended: Cloudflare Access** on that address (company account required before the sign-in page is even shown), and **Turnstile** (keys entered in Portunia).
 5. **Turn it on** in Portunia: bastion **⋯** menu › **Administer** › **Web portal**: public address, allowed group, durations, copy and paste, then the switch. Create the group and add the relevant accounts.
@@ -257,7 +257,7 @@ Everything can also be done from Portunia. On the server, the wizard installs th
 sudo heimdia info                                            # version, fingerprints, accounts
 
 # Accounts
-sudo heimdia user add marc --provisoire                      # temporary password, code enrolled in Portunia
+sudo heimdia user add marc --temporary                       # temporary password, code enrolled in Portunia
 sudo heimdia user add marc                                   # password and code entered here
 sudo heimdia user add contractor --policy "key+totp"         # SSH key and code required
 sudo heimdia user key marc "ssh-ed25519 AAAA… marc@pc"
@@ -276,13 +276,14 @@ sudo heimdia target add srv-ad-01 --host 10.0.3.10 --protocol rdp --mode enregis
 sudo heimdia target list
 
 # Rules
-sudo heimdia rule add prod --group "Linux admins" --targets web-01,stg-app --sftp --days lun-ven --hours 7-20
+sudo heimdia rule add prod --group "Linux admins" --targets web-01,stg-app --sftp --days mon-fri --hours 7-20
 sudo heimdia rule add contractor-db --group Contractors --targets db-01 --expires 2026-12-31
 
 # Settings
 sudo heimdia setting auth_policy "password+totp,key+totp"    # global policy
-sudo heimdia setting banniere "Authorised access only. Sessions are recorded."
-sudo heimdia setting nom "ACME bastion"
+sudo heimdia setting banner "Authorised access only. Sessions are recorded."
+sudo heimdia setting name "ACME bastion"
+sudo heimdia setting language fr                           # en, fr, or "" for the system language
 
 # Checks
 sudo heimdia audit --verify --last 50

@@ -19,7 +19,7 @@ pub fn temp_password() -> Result<String> {
 
 pub fn hash_password(password: &str) -> Result<String> {
     if password.chars().count() < 10 {
-        bail!("Le mot de passe doit contenir au moins 10 caractères");
+        bail!(t!("The password must have at least 10 characters", "Le mot de passe doit contenir au moins 10 caractères"));
     }
     let salt = SaltString::encode_b64(&crate::keys::random::<16>()?).map_err(|e| anyhow!("sel : {e}"))?;
     Ok(Argon2::default()
@@ -121,16 +121,16 @@ impl Policy {
                     "password" | "motdepasse" => Factor::Password,
                     "key" | "cle" | "clé" => Factor::Key,
                     "totp" | "code" => Factor::Totp,
-                    other => bail!("facteur inconnu « {other} » (password, key, totp)"),
+                    other => bail!(t!(format!("unknown factor « {other} » (password, key, totp)"), format!("facteur inconnu « {other} » (password, key, totp)"))),
                 });
             }
             if set == BTreeSet::from([Factor::Totp]) {
-                bail!("le code TOTP seul ne suffit pas : associez-le à un mot de passe ou une clé");
+                bail!(t!("a TOTP code alone is not enough: combine it with a password or a key", "le code TOTP seul ne suffit pas : associez-le à un mot de passe ou une clé"));
             }
             alternatives.push(set);
         }
         if alternatives.is_empty() {
-            bail!("politique vide");
+            bail!(t!("empty policy", "politique vide"));
         }
         Ok(Self(alternatives))
     }

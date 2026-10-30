@@ -51,8 +51,8 @@ impl From<anyhow::Error> for ApiError {
 
 impl From<sqlx::Error> for ApiError {
     fn from(e: sqlx::Error) -> Self {
-        tracing::error!("base : {e}");
-        ApiError(StatusCode::INTERNAL_SERVER_ERROR, "Erreur de la base du bastion".into())
+        tracing::error!("{} {e}", t!("database:", "base :"));
+        ApiError(StatusCode::INTERNAL_SERVER_ERROR, t!("Bastion database error", "Erreur de la base du bastion").into())
     }
 }
 
@@ -77,12 +77,12 @@ pub async fn run(state: Arc<State>) -> anyhow::Result<()> {
     let files = crate::tls::files(&state.config.data_dir);
     let tls = axum_server::tls_rustls::RustlsConfig::from_pem_file(&files.cert, &files.key)
         .await
-        .map_err(|e| anyhow!("certificat de l'API : {e}"))?;
+        .map_err(|e| anyhow!(t!(format!("API certificate: {e}"), format!("certificat de l'API : {e}"))))?;
     let listen: SocketAddr = state
         .config
         .api_listen
         .parse()
-        .map_err(|_| anyhow!("HEIMDIA_API_LISTEN invalide"))?;
+        .map_err(|_| anyhow!(t!("invalid HEIMDIA_API_LISTEN", "HEIMDIA_API_LISTEN invalide")))?;
     let api = Arc::new(Api {
         state,
         failures: Mutex::new(HashMap::new()),
@@ -115,8 +115,10 @@ pub async fn run(state: Arc<State>) -> anyhow::Result<()> {
         .route("/api/v1/admin/portail/fermer-sessions", post(admin_portal_close))
         .route("/api/v1/audit/sessions", get(audit_sessions))
         .route("/api/v1/audit/sessions/{id}/enregistrement", get(audit_recording))
-        .with_state(api);
-    tracing::info!("API en écoute sur https://{listen}");
+        .with_state(api)
+        // Messages dans la langue demandée par Portunia (Accept-Language).
+        .layer(axum::middleware::from_fn(crate::lang::middleware));
+    tracing::info!("{} https://{listen}", t!("API listening on", "API en écoute sur"));
     axum_server::bind_rustls(listen, tls)
         .serve(app.into_make_service_with_connect_info::<SocketAddr>())
         .await?;
@@ -168,20 +170,20 @@ async fn caller(api: &Api, headers: &HeaderMap) -> Result<User, ApiError> {
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
-        .ok_or_else(|| err(StatusCode::UNAUTHORIZED, "Connexion au bastion requise"))?;
+        .ok_or_else(|| err(StatusCode::UNAUTHORIZED, t!("Sign-in to the bastion required", "Connexion au bastion requise")))?;
     let user_id: Option<Uuid> = sqlx::query_scalar("SELECT user_id FROM api_sessions WHERE token_hash = $1 AND expires_at > now()")
         .bind(sha256_hex(bearer.as_bytes()))
         .fetch_optional(&api.state.db)
         .await?;
-    let id = user_id.ok_or_else(|| err(StatusCode::UNAUTHORIZED, "Session du bastion expirée : reconnectez-vous"))?;
+    let id = user_id.ok_or_else(|| err(StatusCode::UNAUTHORIZED, t!("Bastion session expired: sign in again", "Session du bastion expirée : reconnectez-vous")))?;
     let user = model::user_by_id(&api.state.db, id).await?.filter(|u| !u.disabled);
-    user.ok_or_else(|| err(StatusCode::UNAUTHORIZED, "Compte désactivé"))
+    user.ok_or_else(|| err(StatusCode::UNAUTHORIZED, t!("Account disabled", "Compte désactivé")))
 }
 
 async fn admin(api: &Api, headers: &HeaderMap) -> Result<User, ApiError> {
     let user = caller(api, headers).await?;
     if user.role != "admin" {
-        return Err(err(StatusCode::FORBIDDEN, "Réservé aux administrateurs du bastion"));
+        return Err(err(StatusCode::FORBIDDEN, t!("Restricted to the bastion's administrators", "Réservé aux administrateurs du bastion")));
     }
     Ok(user)
 }
@@ -190,7 +192,7 @@ async fn admin(api: &Api, headers: &HeaderMap) -> Result<User, ApiError> {
 async fn auditor(api: &Api, headers: &HeaderMap) -> Result<User, ApiError> {
     let user = caller(api, headers).await?;
     if user.role != "admin" && user.role != "auditor" {
-        return Err(err(StatusCode::FORBIDDEN, "Réservé aux administrateurs et auditeurs du bastion"));
+        return Err(err(StatusCode::FORBIDDEN, t!("Restricted to the bastion's administrators and auditors", "Réservé aux administrateurs et auditeurs du bastion")));
     }
     Ok(user)
 }
@@ -221,7 +223,7 @@ async fn login(AxState(api): Ctx, ConnectInfo(addr): ConnectInfo<SocketAddr>, Js
         if failures.get(&body.login).is_some_and(|(n, _)| *n >= 5) {
             return Err(err(
                 StatusCode::TOO_MANY_REQUESTS,
-                "Trop d'essais : réessayez dans quelques minutes",
+                t!("Too many attempts: try again in a few minutes", "Trop d'essais : réessayez dans quelques minutes"),
             ));
         }
     }
@@ -242,7 +244,7 @@ async fn login(AxState(api): Ctx, ConnectInfo(addr): ConnectInfo<SocketAddr>, Js
                 json!({ "methode": "api", "raison": why, "adresse": ip }),
             )
             .await;
-            err(StatusCode::UNAUTHORIZED, "Identifiant, mot de passe ou code incorrect")
+            err(StatusCode::UNAUTHORIZED, t!("Wrong login, password or code", "Identifiant, mot de passe ou code incorrect"))
         }
     };
 
@@ -265,7 +267,7 @@ async fn login(AxState(api): Ctx, ConnectInfo(addr): ConnectInfo<SocketAddr>, Js
         if new == body.mot_de_passe {
             return Err(err(
                 StatusCode::BAD_REQUEST,
-                "Choisissez un mot de passe différent du mot de passe provisoire",
+                t!("Choose a password different from the temporary one", "Choisissez un mot de passe différent du mot de passe provisoire"),
             ));
         }
         let hash = auth::hash_password(new)?;
@@ -291,7 +293,7 @@ async fn login(AxState(api): Ctx, ConnectInfo(addr): ConnectInfo<SocketAddr>, Js
         if !policy.could_use(&password_only, Factor::Totp) {
             return Err(err(
                 StatusCode::FORBIDDEN,
-                "Ce compte se connecte par clé SSH : connexion depuis Portunia indisponible",
+                t!("This account signs in with an SSH key: sign-in from Portunia unavailable", "Ce compte se connecte par clé SSH : connexion depuis Portunia indisponible"),
             ));
         }
         let code = body.code.as_deref().unwrap_or("").trim().to_string();
@@ -446,7 +448,7 @@ async fn ticket(AxState(api): Ctx, headers: HeaderMap, Path(nom): Path<String>) 
     let db = &api.state.db;
     let target = model::target_by_name(db, &nom)
         .await?
-        .ok_or_else(|| err(StatusCode::NOT_FOUND, "Serveur inconnu"))?;
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, t!("Unknown server", "Serveur inconnu")))?;
     if model::access(db, user.id, target.id).await?.is_none() {
         audit::note(
             db,
@@ -457,7 +459,7 @@ async fn ticket(AxState(api): Ctx, headers: HeaderMap, Path(nom): Path<String>) 
         .await;
         return Err(err(
             StatusCode::FORBIDDEN,
-            format!("{} ne vous est pas autorisé en ce moment", target.name),
+            t!(format!("{} is not allowed for you at the moment", target.name), format!("{} ne vous est pas autorisé en ce moment", target.name)),
         ));
     }
     let ticket = issue_ticket(db, user.id, target.id, None).await?;
@@ -580,17 +582,17 @@ async fn admin_targets(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
 
 fn check_target(body: &TargetBody) -> Result<(), ApiError> {
     if body.nom.trim().is_empty() || body.hote.trim().is_empty() {
-        return Err(err(StatusCode::BAD_REQUEST, "Nom et adresse obligatoires"));
+        return Err(err(StatusCode::BAD_REQUEST, t!("Name and address required", "Nom et adresse obligatoires")));
     }
     if !(1..=65535).contains(&body.port) {
-        return Err(err(StatusCode::BAD_REQUEST, "Port : 1 à 65535"));
+        return Err(err(StatusCode::BAD_REQUEST, t!("Port: 1 to 65535", "Port : 1 à 65535")));
     }
     if body.nom.contains('%') || body.nom.contains(char::is_whitespace) {
-        return Err(err(StatusCode::BAD_REQUEST, "Le nom ne doit contenir ni espace ni « % »"));
+        return Err(err(StatusCode::BAD_REQUEST, t!("The name must contain neither spaces nor « % »", "Le nom ne doit contenir ni espace ni « % »")));
     }
     model::check_protocol(&body.protocole, &body.mode).map_err(|e| err(StatusCode::BAD_REQUEST, e.to_string()))?;
     if body.protocole == "rdp" && matches!(&body.secret, Some(SecretBody::Generer { .. }) | Some(SecretBody::Cle { .. })) {
-        return Err(err(StatusCode::BAD_REQUEST, "Bureau à distance : le coffre garde un mot de passe, pas une clé SSH"));
+        return Err(err(StatusCode::BAD_REQUEST, t!("Remote Desktop: the vault keeps a password, not an SSH key", "Bureau à distance : le coffre garde un mot de passe, pas une clé SSH")));
     }
     Ok(())
 }
@@ -603,7 +605,7 @@ async fn resolve_secret(api: &Api, actor: &str, probe: &model::Target, secret: S
             russh::keys::decode_secret_key(&valeur, None).map_err(|e| {
                 err(
                     StatusCode::BAD_REQUEST,
-                    format!("Clé privée illisible (sans phrase de passe) : {e}"),
+                    t!(format!("Unreadable private key (without passphrase): {e}"), format!("Clé privée illisible (sans phrase de passe) : {e}")),
                 )
             })?;
             ("key".into(), valeur.into_bytes())
@@ -612,7 +614,7 @@ async fn resolve_secret(api: &Api, actor: &str, probe: &model::Target, secret: S
             let account = probe
                 .account
                 .clone()
-                .ok_or_else(|| err(StatusCode::BAD_REQUEST, "Indiquez le compte sur le serveur"))?;
+                .ok_or_else(|| err(StatusCode::BAD_REQUEST, t!("Give the account on the server", "Indiquez le compte sur le serveur")))?;
             let key = crate::target::install_new_key(&api.state, probe, &account, &mot_de_passe, actor).await?;
             audit::note(
                 &api.state.db,
@@ -678,7 +680,7 @@ async fn admin_target_update(AxState(api): Ctx, headers: HeaderMap, Path(id): Pa
     let db = &api.state.db;
     let current = model::target_by_id(db, id)
         .await?
-        .ok_or_else(|| err(StatusCode::NOT_FOUND, "Serveur inconnu"))?;
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, t!("Unknown server", "Serveur inconnu")))?;
     let mut probe = current.clone();
     probe.host = body.hote.trim().into();
     probe.port = body.port;
@@ -695,10 +697,10 @@ async fn admin_target_update(AxState(api): Ctx, headers: HeaderMap, Path(id): Pa
         None => (current.secret_kind.clone(), current.secret.clone()),
     };
     if body.mode == "coffre" && (probe.account.is_none() || sealed.is_none()) {
-        return Err(err(StatusCode::BAD_REQUEST, "En mode coffre, indiquez le compte et son secret"));
+        return Err(err(StatusCode::BAD_REQUEST, t!("In vault mode, give the account and its secret", "En mode coffre, indiquez le compte et son secret")));
     }
     if !["rebond", "enregistre", "coffre"].contains(&body.mode.as_str()) {
-        return Err(err(StatusCode::BAD_REQUEST, "Mode : rebond, enregistre ou coffre"));
+        return Err(err(StatusCode::BAD_REQUEST, t!("Mode: jump (rebond), recorded (enregistre) or vault (coffre)", "Mode : rebond, enregistre ou coffre")));
     }
     sqlx::query(
         "UPDATE targets SET name = $2, folder = $3, host = $4, port = $5, mode = $6, account = $7, secret_kind = $8, secret = $9, host_key = $10,
@@ -719,7 +721,7 @@ async fn admin_target_update(AxState(api): Ctx, headers: HeaderMap, Path(id): Pa
     .execute(db)
     .await
     .map_err(|e| match &e {
-        sqlx::Error::Database(d) if d.code().as_deref() == Some("23505") => err(StatusCode::CONFLICT, "Ce nom est déjà pris"),
+        sqlx::Error::Database(d) if d.code().as_deref() == Some("23505") => err(StatusCode::CONFLICT, t!("This name is already taken", "Ce nom est déjà pris")),
         _ => e.into(),
     })?;
     audit::note(
@@ -737,7 +739,7 @@ async fn admin_target_delete(AxState(api): Ctx, headers: HeaderMap, Path(id): Pa
     let db = &api.state.db;
     let t = model::target_by_id(db, id)
         .await?
-        .ok_or_else(|| err(StatusCode::NOT_FOUND, "Serveur inconnu"))?;
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, t!("Unknown server", "Serveur inconnu")))?;
     sqlx::query("DELETE FROM targets WHERE id = $1").bind(id).execute(db).await?;
     audit::note(db, &actor.login, "cible.supprimee", json!({ "cible": t.name })).await;
     Ok(Json(json!({ "etat": "ok" })))
@@ -748,7 +750,7 @@ async fn admin_target_forget_key(AxState(api): Ctx, headers: HeaderMap, Path(id)
     let db = &api.state.db;
     let t = model::target_by_id(db, id)
         .await?
-        .ok_or_else(|| err(StatusCode::NOT_FOUND, "Serveur inconnu"))?;
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, t!("Unknown server", "Serveur inconnu")))?;
     sqlx::query("UPDATE targets SET host_key = NULL WHERE id = $1")
         .bind(id)
         .execute(db)
@@ -825,7 +827,7 @@ async fn set_groups(db: &sqlx::PgPool, user: Uuid, groups: &[String]) -> anyhow:
             .bind(name)
             .fetch_optional(&mut *tx)
             .await?
-            .ok_or_else(|| anyhow!("Groupe inconnu : {name}"))?;
+            .ok_or_else(|| anyhow!(t!(format!("Unknown group: {name}"), format!("Groupe inconnu : {name}"))))?;
         sqlx::query("INSERT INTO group_members (group_id, user_id) VALUES ($1, $2)")
             .bind(gid)
             .bind(user)
@@ -876,14 +878,14 @@ async fn admin_user_update(AxState(api): Ctx, headers: HeaderMap, Path(id): Path
     let db = &api.state.db;
     let user = model::user_by_id(db, id)
         .await?
-        .ok_or_else(|| err(StatusCode::NOT_FOUND, "Compte inconnu"))?;
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, t!("Unknown account", "Compte inconnu")))?;
     if !["user", "auditor", "admin"].contains(&body.role.as_str()) {
-        return Err(err(StatusCode::BAD_REQUEST, "Rôle : user, auditor ou admin"));
+        return Err(err(StatusCode::BAD_REQUEST, t!("Role: user, auditor or admin", "Rôle : user, auditor ou admin")));
     }
     if user.id == actor.id && (body.role != "admin" || body.desactive) {
         return Err(err(
             StatusCode::BAD_REQUEST,
-            "Vous ne pouvez pas retirer vos propres droits d'administrateur",
+            t!("You cannot remove your own administrator rights", "Vous ne pouvez pas retirer vos propres droits d'administrateur"),
         ));
     }
     sqlx::query("UPDATE users SET role = $2, auth_policy = $3, disabled = $4 WHERE id = $1")
@@ -914,11 +916,11 @@ async fn admin_user_delete(AxState(api): Ctx, headers: HeaderMap, Path(id): Path
     let actor = admin(&api, &headers).await?;
     let db = &api.state.db;
     if id == actor.id {
-        return Err(err(StatusCode::BAD_REQUEST, "Vous ne pouvez pas supprimer votre propre compte"));
+        return Err(err(StatusCode::BAD_REQUEST, t!("You cannot delete your own account", "Vous ne pouvez pas supprimer votre propre compte")));
     }
     let user = model::user_by_id(db, id)
         .await?
-        .ok_or_else(|| err(StatusCode::NOT_FOUND, "Compte inconnu"))?;
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, t!("Unknown account", "Compte inconnu")))?;
     sqlx::query("DELETE FROM users WHERE id = $1").bind(id).execute(db).await?;
     audit::note(db, &actor.login, "compte.supprime", json!({ "compte": user.login })).await;
     Ok(Json(json!({ "etat": "ok" })))
@@ -929,7 +931,7 @@ async fn admin_user_reset_totp(AxState(api): Ctx, headers: HeaderMap, Path(id): 
     let db = &api.state.db;
     let user = model::user_by_id(db, id)
         .await?
-        .ok_or_else(|| err(StatusCode::NOT_FOUND, "Compte inconnu"))?;
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, t!("Unknown account", "Compte inconnu")))?;
     sqlx::query("UPDATE users SET totp_secret = NULL, totp_pending = NULL, totp_last_step = 0 WHERE id = $1")
         .bind(id)
         .execute(db)
@@ -947,7 +949,7 @@ async fn admin_user_temp_password(AxState(api): Ctx, headers: HeaderMap, Path(id
     let db = &api.state.db;
     let user = model::user_by_id(db, id)
         .await?
-        .ok_or_else(|| err(StatusCode::NOT_FOUND, "Compte inconnu"))?;
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, t!("Unknown account", "Compte inconnu")))?;
     let password = auth::temp_password()?;
     sqlx::query("UPDATE users SET password_hash = $2, must_change_password = true WHERE id = $1")
         .bind(id)
@@ -972,9 +974,9 @@ async fn admin_user_add_key(AxState(api): Ctx, headers: HeaderMap, Path(id): Pat
     let db = &api.state.db;
     let user = model::user_by_id(db, id)
         .await?
-        .ok_or_else(|| err(StatusCode::NOT_FOUND, "Compte inconnu"))?;
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, t!("Unknown account", "Compte inconnu")))?;
     let public = russh::keys::PublicKey::from_openssh(body.cle.trim())
-        .map_err(|e| err(StatusCode::BAD_REQUEST, format!("Clé publique illisible : {e}")))?;
+        .map_err(|e| err(StatusCode::BAD_REQUEST, t!(format!("Unreadable public key: {e}"), format!("Clé publique illisible : {e}"))))?;
     let fp = public.fingerprint(russh::keys::HashAlg::Sha256).to_string();
     model::add_user_key(db, id, body.cle.trim(), &fp, &String::from_utf8_lossy(public.comment().as_bytes())).await?;
     audit::note(
@@ -1019,7 +1021,7 @@ async fn admin_group_create(AxState(api): Ctx, headers: HeaderMap, Json(body): J
     let actor = admin(&api, &headers).await?;
     let name = body.nom.trim();
     if name.is_empty() {
-        return Err(err(StatusCode::BAD_REQUEST, "Nom du groupe obligatoire"));
+        return Err(err(StatusCode::BAD_REQUEST, t!("Group name required", "Nom du groupe obligatoire")));
     }
     let id = model::create_group(&api.state.db, name).await?;
     audit::note(&api.state.db, &actor.login, "groupe.cree", json!({ "groupe": name })).await;
@@ -1033,7 +1035,7 @@ async fn admin_group_delete(AxState(api): Ctx, headers: HeaderMap, Path(id): Pat
         .bind(id)
         .fetch_optional(db)
         .await?;
-    let name = name.ok_or_else(|| err(StatusCode::NOT_FOUND, "Groupe inconnu"))?;
+    let name = name.ok_or_else(|| err(StatusCode::NOT_FOUND, t!("Unknown group", "Groupe inconnu")))?;
     audit::note(db, &actor.login, "groupe.supprime", json!({ "groupe": name })).await;
     Ok(Json(json!({ "etat": "ok" })))
 }
@@ -1105,7 +1107,7 @@ fn all_days() -> i16 {
 
 async fn rule_parts(db: &sqlx::PgPool, body: &RuleBody) -> Result<(Uuid, Vec<Uuid>, Option<(i16, i16)>, Option<DateTime<Utc>>), ApiError> {
     if body.nom.trim().is_empty() {
-        return Err(err(StatusCode::BAD_REQUEST, "Nom de la règle obligatoire"));
+        return Err(err(StatusCode::BAD_REQUEST, t!("Rule name required", "Nom de la règle obligatoire")));
     }
     let group = model::group_id(db, &body.groupe).await?;
     let mut targets = Vec::new();
@@ -1113,26 +1115,26 @@ async fn rule_parts(db: &sqlx::PgPool, body: &RuleBody) -> Result<(Uuid, Vec<Uui
         targets.push(
             model::target_by_name(db, name)
                 .await?
-                .ok_or_else(|| err(StatusCode::BAD_REQUEST, format!("Serveur inconnu : {name}")))?
+                .ok_or_else(|| err(StatusCode::BAD_REQUEST, t!(format!("Unknown server: {name}"), format!("Serveur inconnu : {name}"))))?
                 .id,
         );
     }
     if targets.is_empty() {
-        return Err(err(StatusCode::BAD_REQUEST, "Choisissez au moins un serveur"));
+        return Err(err(StatusCode::BAD_REQUEST, t!("Choose at least one server", "Choisissez au moins un serveur")));
     }
     if !(0..=127).contains(&body.jours) || body.jours == 0 {
-        return Err(err(StatusCode::BAD_REQUEST, "Choisissez au moins un jour"));
+        return Err(err(StatusCode::BAD_REQUEST, t!("Choose at least one day", "Choisissez au moins un jour")));
     }
     let hours = match (body.heure_debut, body.heure_fin) {
         (Some(a), Some(b)) if (0..=23).contains(&a) && (1..=24).contains(&b) && a != b => Some((a, b)),
         (None, None) => None,
-        _ => return Err(err(StatusCode::BAD_REQUEST, "Heures : début de 0 à 23, fin de 1 à 24, différentes")),
+        _ => return Err(err(StatusCode::BAD_REQUEST, t!("Hours: start from 0 to 23, end from 1 to 24, different", "Heures : début de 0 à 23, fin de 1 à 24, différentes"))),
     };
     let expires = match body.expire.as_deref().filter(|e| !e.is_empty()) {
         Some(d) => {
-            let date = chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").map_err(|_| err(StatusCode::BAD_REQUEST, "Date : AAAA-MM-JJ"))?;
+            let date = chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").map_err(|_| err(StatusCode::BAD_REQUEST, t!("Date: YYYY-MM-DD", "Date : AAAA-MM-JJ")))?;
             let end = date.and_hms_opt(23, 59, 59).unwrap().and_local_timezone(chrono::Local).single();
-            Some(end.ok_or_else(|| err(StatusCode::BAD_REQUEST, "Date ambiguë"))?.with_timezone(&Utc))
+            Some(end.ok_or_else(|| err(StatusCode::BAD_REQUEST, t!("Ambiguous date", "Date ambiguë")))?.with_timezone(&Utc))
         }
         None => None,
     };
@@ -1184,7 +1186,7 @@ async fn admin_rule_update(AxState(api): Ctx, headers: HeaderMap, Path(id): Path
     .execute(&mut *tx)
     .await?;
     if done.rows_affected() == 0 {
-        return Err(err(StatusCode::NOT_FOUND, "Règle inconnue"));
+        return Err(err(StatusCode::NOT_FOUND, t!("Unknown rule", "Règle inconnue")));
     }
     sqlx::query("DELETE FROM rule_targets WHERE rule_id = $1")
         .bind(id)
@@ -1209,7 +1211,7 @@ async fn admin_rule_delete(AxState(api): Ctx, headers: HeaderMap, Path(id): Path
         .bind(id)
         .fetch_optional(db)
         .await?;
-    let name = name.ok_or_else(|| err(StatusCode::NOT_FOUND, "Règle inconnue"))?;
+    let name = name.ok_or_else(|| err(StatusCode::NOT_FOUND, t!("Unknown rule", "Règle inconnue")))?;
     audit::note(db, &actor.login, "regle.supprimee", json!({ "regle": name })).await;
     Ok(Json(json!({ "etat": "ok" })))
 }
@@ -1313,12 +1315,14 @@ async fn admin_settings(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
     let state = &api.state;
     Ok(Json(json!({
         "nom": setting_str(state, "nom", "Heimdia").await?,
-        "banniere": setting_str(state, "banniere", crate::sshd::DEFAULT_BANNER).await?,
+        "banniere": setting_str(state, "banniere", crate::sshd::default_banner()).await?,
         "politique": model::default_policy(&state.db).await?.to_string(),
         "duree_session_h": session_hours(state).await?,
         "memo_mot_de_passe": remember_allowed(state).await?,
         "relecture_propres": own_sessions_allowed(state).await?,
         "commandes_sensibles": sensitive_commands(state).await?,
+        // « en », « fr », ou vide : langue du système du bastion.
+        "langue": setting_str(state, "langue", "").await?,
     })))
 }
 
@@ -1331,6 +1335,7 @@ struct SettingsBody {
     memo_mot_de_passe: Option<bool>,
     relecture_propres: Option<bool>,
     commandes_sensibles: Option<Vec<String>>,
+    langue: Option<String>,
 }
 
 async fn admin_settings_update(AxState(api): Ctx, headers: HeaderMap, Json(body): Json<SettingsBody>) -> ApiResult {
@@ -1352,7 +1357,7 @@ async fn admin_settings_update(AxState(api): Ctx, headers: HeaderMap, Json(body)
     }
     if let Some(v) = body.duree_session_h {
         if !(1..=168).contains(&v) {
-            return Err(err(StatusCode::BAD_REQUEST, "Durée de session : 1 à 168 heures"));
+            return Err(err(StatusCode::BAD_REQUEST, t!("Session duration: 1 to 168 hours", "Durée de session : 1 à 168 heures")));
         }
         model::set_setting(db, "duree_session_h", json!(v)).await?;
         changed.insert("duree_session_h".into(), json!(v));
@@ -1369,6 +1374,16 @@ async fn admin_settings_update(AxState(api): Ctx, headers: HeaderMap, Json(body)
         let list: Vec<String> = list.into_iter().map(|c| c.trim().to_string()).filter(|c| !c.is_empty()).collect();
         model::set_setting(db, "commandes_sensibles", json!(list)).await?;
         changed.insert("commandes_sensibles".into(), json!(list));
+    }
+    if let Some(v) = body.langue {
+        let v = v.trim().to_lowercase();
+        if !["", "en", "fr"].contains(&v.as_str()) {
+            return Err(err(StatusCode::BAD_REQUEST, t!("Language: en, fr, or empty for the system's language", "Langue : en, fr, ou vide pour la langue du système")));
+        }
+        model::set_setting(db, "langue", json!(v)).await?;
+        // Le serveur SSH et les journaux changent de langue tout de suite.
+        crate::lang::set_process(crate::lang::Lang::from_tag(&v).unwrap_or_else(crate::lang::from_env));
+        changed.insert("langue".into(), json!(v));
     }
     audit::note(db, &actor.login, "reglage.modifie", Value::Object(changed)).await;
     Ok(Json(json!({ "etat": "ok" })))
@@ -1403,7 +1418,7 @@ async fn reader(api: &Api, headers: &HeaderMap) -> Result<(User, Option<String>)
         let own = user.login.clone();
         return Ok((user, Some(own)));
     }
-    Err(err(StatusCode::FORBIDDEN, "Relecture réservée aux administrateurs et auditeurs du bastion"))
+    Err(err(StatusCode::FORBIDDEN, t!("Replay restricted to the bastion's administrators and auditors", "Relecture réservée aux administrateurs et auditeurs du bastion")))
 }
 
 /// Date « AAAA-MM-JJ » (minuit, heure du bastion) ou RFC 3339.
@@ -1411,12 +1426,12 @@ fn parse_day(text: &str, end: bool) -> Result<DateTime<Utc>, ApiError> {
     if let Ok(d) = DateTime::parse_from_rfc3339(text) {
         return Ok(d.with_timezone(&Utc));
     }
-    let day = chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d").map_err(|_| err(StatusCode::BAD_REQUEST, "Date attendue : AAAA-MM-JJ"))?;
+    let day = chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d").map_err(|_| err(StatusCode::BAD_REQUEST, t!("Expected date: YYYY-MM-DD", "Date attendue : AAAA-MM-JJ")))?;
     let day = if end { day.succ_opt().unwrap_or(day) } else { day };
     let local = day
         .and_hms_opt(0, 0, 0)
         .and_then(|d| d.and_local_timezone(chrono::Local).earliest())
-        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "Date invalide"))?;
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, t!("Invalid date", "Date invalide")))?;
     Ok(local.with_timezone(&Utc))
 }
 
@@ -1461,7 +1476,7 @@ async fn audit_sessions(AxState(api): Ctx, headers: HeaderMap, Query(q): Query<A
                     .collect()
             })
             .await
-            .map_err(|e| anyhow!("recherche : {e}"))?
+            .map_err(|e| anyhow!(t!(format!("search: {e}"), format!("recherche : {e}"))))?
         }
         None => vec![None; rows.len()],
     };
@@ -1493,19 +1508,19 @@ async fn audit_recording(AxState(api): Ctx, headers: HeaderMap, Path(id): Path<U
     let s = model::audit_session(&state.db, id)
         .await?
         .filter(|s| own.as_ref().is_none_or(|o| *o == s.login))
-        .ok_or_else(|| err(StatusCode::NOT_FOUND, "Session introuvable"))?;
-    let path = s.recording.clone().ok_or_else(|| err(StatusCode::NOT_FOUND, "Cette session n'a pas été enregistrée"))?;
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, t!("Session not found", "Session introuvable")))?;
+    let path = s.recording.clone().ok_or_else(|| err(StatusCode::NOT_FOUND, t!("This session was not recorded", "Cette session n'a pas été enregistrée")))?;
     if s.kind == "rdp" {
-        return Err(err(StatusCode::CONFLICT, "Session Bureau à distance enregistrée et signée : sa relecture arrive dans une prochaine version"));
+        return Err(err(StatusCode::CONFLICT, t!("Remote Desktop session recorded and signed: its replay is coming in a later version", "Session Bureau à distance enregistrée et signée : sa relecture arrive dans une prochaine version")));
     }
     let reveal = q.reveler.unwrap_or(false);
     if reveal && user.role != "admin" {
-        return Err(err(StatusCode::FORBIDDEN, "Seul un administrateur peut révéler les saisies masquées"));
+        return Err(err(StatusCode::FORBIDDEN, t!("Only an administrator can reveal masked input", "Seul un administrateur peut révéler les saisies masquées")));
     }
     let raw = tokio::task::spawn_blocking(move || std::fs::read(path))
         .await
-        .map_err(|e| anyhow!("lecture : {e}"))?
-        .map_err(|e| err(StatusCode::NOT_FOUND, format!("Fichier d'enregistrement illisible : {e}")))?;
+        .map_err(|e| anyhow!(t!(format!("reading: {e}"), format!("lecture : {e}"))))?
+        .map_err(|e| err(StatusCode::NOT_FOUND, t!(format!("Unreadable recording file: {e}"), format!("Fichier d'enregistrement illisible : {e}"))))?;
     let sha = sha256_hex(&raw);
     let signature = match (&s.recording_sha256, &s.signature) {
         (Some(expected), Some(sig)) => {
@@ -1564,7 +1579,8 @@ async fn rdp_passage(
 ) -> Response {
     let state = api.state.clone();
     let addr = addr.ip().to_string();
-    ws.on_upgrade(move |socket| crate::rdp::relay(state, socket, crate::rdp::Origin::Portunia { addr }))
+    let lang = crate::lang::get();
+    ws.on_upgrade(move |socket| crate::lang::scope(lang, crate::rdp::relay(state, socket, crate::rdp::Origin::Portunia { addr })))
 }
 
 // ---------- Administration : portail web ----------
@@ -1619,7 +1635,7 @@ async fn admin_portal_update(AxState(api): Ctx, headers: HeaderMap, Json(body): 
     if let Some(url) = body.url {
         let url = url.trim().trim_end_matches('/').to_string();
         if !url.is_empty() && !url.starts_with("https://") {
-            return Err(err(StatusCode::BAD_REQUEST, "Adresse publique : https://… (Cloudflare fournit le certificat)"));
+            return Err(err(StatusCode::BAD_REQUEST, t!("Public address: https://… (Cloudflare provides the certificate)", "Adresse publique : https://… (Cloudflare fournit le certificat)")));
         }
         model::set_setting(db, "portail_url", json!(url)).await?;
         changed.insert("url".into(), json!(url));
@@ -1630,14 +1646,14 @@ async fn admin_portal_update(AxState(api): Ctx, headers: HeaderMap, Json(body): 
     }
     if let Some(h) = body.duree_h {
         if !(1..=12).contains(&h) {
-            return Err(err(StatusCode::BAD_REQUEST, "Durée d'une session web : 1 à 12 heures"));
+            return Err(err(StatusCode::BAD_REQUEST, t!("Web session duration: 1 to 12 hours", "Durée d'une session web : 1 à 12 heures")));
         }
         model::set_setting(db, "portail_duree_h", json!(h)).await?;
         changed.insert("duree_h".into(), json!(h));
     }
     if let Some(m) = body.inactivite_min {
         if !(5..=240).contains(&m) {
-            return Err(err(StatusCode::BAD_REQUEST, "Inactivité : 5 à 240 minutes"));
+            return Err(err(StatusCode::BAD_REQUEST, t!("Inactivity: 5 to 240 minutes", "Inactivité : 5 à 240 minutes")));
         }
         model::set_setting(db, "portail_inactivite_min", json!(m)).await?;
         changed.insert("inactivite_min".into(), json!(m));

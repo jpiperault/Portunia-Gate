@@ -87,7 +87,7 @@ pub async fn users(db: &PgPool) -> Result<Vec<User>> {
 
 pub fn check_login(login: &str) -> Result<()> {
     if login.is_empty() || login.len() > 64 || !login.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)) {
-        bail!("Identifiant invalide : lettres, chiffres, point, tiret et souligné uniquement");
+        bail!(t!("Invalid login: letters, digits, dot, hyphen and underscore only", "Identifiant invalide : lettres, chiffres, point, tiret et souligné uniquement"));
     }
     Ok(())
 }
@@ -95,7 +95,7 @@ pub fn check_login(login: &str) -> Result<()> {
 pub async fn create_user(db: &PgPool, login: &str, role: &str, password_hash: Option<String>, policy: Option<String>) -> Result<Uuid> {
     check_login(login)?;
     if !["user", "auditor", "admin"].contains(&role) {
-        bail!("Rôle inconnu : user, auditor ou admin");
+        bail!(t!("Unknown role: user, auditor or admin", "Rôle inconnu : user, auditor ou admin"));
     }
     if let Some(p) = &policy {
         Policy::parse(p)?;
@@ -111,7 +111,7 @@ pub async fn create_user(db: &PgPool, login: &str, role: &str, password_hash: Op
         .await
         .map_err(|e| {
             if is_unique(&e) {
-                anyhow!("Le compte « {login} » existe déjà")
+                anyhow!(t!(format!("Account « {login} » already exists"), format!("Le compte « {login} » existe déjà")))
             } else {
                 e.into()
             }
@@ -157,7 +157,7 @@ pub async fn add_user_key(db: &PgPool, user: Uuid, public_key: &str, fingerprint
         .await
         .map_err(|e| {
             if is_unique(&e) {
-                anyhow!("Cette clé est déjà enregistrée")
+                anyhow!(t!("This key is already registered", "Cette clé est déjà enregistrée"))
             } else {
                 e.into()
             }
@@ -176,7 +176,7 @@ pub async fn create_group(db: &PgPool, name: &str) -> Result<Uuid> {
         .await
         .map_err(|e| {
             if is_unique(&e) {
-                anyhow!("Le groupe « {name} » existe déjà")
+                anyhow!(t!(format!("Group « {name} » already exists"), format!("Le groupe « {name} » existe déjà")))
             } else {
                 e.into()
             }
@@ -189,7 +189,7 @@ pub async fn group_id(db: &PgPool, name: &str) -> Result<Uuid> {
         .bind(name)
         .fetch_optional(db)
         .await?
-        .ok_or_else(|| anyhow!("Groupe inconnu : {name}"))
+        .ok_or_else(|| anyhow!(t!(format!("Unknown group: {name}"), format!("Groupe inconnu : {name}"))))
 }
 
 pub async fn add_member(db: &PgPool, group: Uuid, user: Uuid) -> Result<()> {
@@ -226,8 +226,18 @@ pub fn check_protocol(protocole: &str, mode: &str) -> Result<()> {
     match protocole {
         "ssh" => Ok(()),
         "rdp" if mode == "rebond" || mode == "enregistre" => Ok(()),
-        "rdp" => bail!("Bureau à distance : modes rebond et enregistré pour l'instant (le coffre arrive)"),
-        _ => bail!("Protocole inconnu : ssh ou rdp"),
+        "rdp" => bail!(t!("Remote Desktop: jump and recorded modes for now (vault is coming)", "Bureau à distance : modes rebond et enregistré pour l'instant (le coffre arrive)")),
+        _ => bail!(t!("Unknown protocol: ssh or rdp", "Protocole inconnu : ssh ou rdp")),
+    }
+}
+
+/// Noms anglais des modes (vault, recorded, jump) : rangés sous leur nom français.
+pub fn mode_alias(mode: &str) -> &str {
+    match mode {
+        "vault" => "coffre",
+        "recorded" => "enregistre",
+        "jump" => "rebond",
+        other => other,
     }
 }
 
@@ -298,11 +308,11 @@ pub struct NewTarget {
 
 pub async fn create_target(db: &PgPool, t: NewTarget, seal: impl FnOnce(Uuid) -> Result<Option<Vec<u8>>>) -> Result<Uuid> {
     if !["rebond", "enregistre", "coffre"].contains(&t.mode.as_str()) {
-        bail!("Mode inconnu : rebond, enregistre ou coffre");
+        bail!(t!("Unknown mode: jump (rebond), recorded (enregistre) or vault (coffre)", "Mode inconnu : rebond, enregistre ou coffre"));
     }
     check_protocol(&t.protocole, &t.mode)?;
     if t.mode == "coffre" && (t.account.is_none() || t.secret_kind == "none") {
-        bail!("En mode coffre, indiquez le compte de la cible et son secret");
+        bail!(t!("In vault mode, give the target's account and its secret", "En mode coffre, indiquez le compte de la cible et son secret"));
     }
     let id = Uuid::new_v4();
     let secret = seal(id)?;
@@ -322,7 +332,7 @@ pub async fn create_target(db: &PgPool, t: NewTarget, seal: impl FnOnce(Uuid) ->
     .bind(&t.protocole)
     .execute(db)
     .await
-    .map_err(|e| if is_unique(&e) { anyhow!("La cible « {} » existe déjà", t.name) } else { e.into() })?;
+    .map_err(|e| if is_unique(&e) { anyhow!(t!(format!("Target « {} » already exists", t.name), format!("La cible « {} » existe déjà", t.name))) } else { e.into() })?;
     Ok(id)
 }
 
@@ -454,7 +464,7 @@ pub async fn create_rule(db: &PgPool, r: NewRule) -> Result<Uuid> {
     .await
     .map_err(|e| {
         if is_unique(&e) {
-            anyhow!("La règle « {} » existe déjà", r.name)
+            anyhow!(t!(format!("Rule « {} » already exists", r.name), format!("La règle « {} » existe déjà", r.name)))
         } else {
             e.into()
         }

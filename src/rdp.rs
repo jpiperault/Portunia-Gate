@@ -87,12 +87,12 @@ async fn read_request(socket: &mut WebSocket) -> Result<RDCleanPathPdu> {
             _ => {}
         }
         if buf.len() > 64 * 1024 {
-            bail!("demande RDCleanPath trop longue");
+            bail!(t!("RDCleanPath request too long", "demande RDCleanPath trop longue"));
         }
         match tokio::time::timeout(Duration::from_secs(15), socket.recv()).await {
             Ok(Some(Ok(Message::Binary(b)))) => buf.extend_from_slice(&b),
             Ok(Some(Ok(_))) => {}
-            _ => bail!("pas de demande RDCleanPath"),
+            _ => bail!(t!("no RDCleanPath request", "pas de demande RDCleanPath")),
         }
     }
 }
@@ -102,11 +102,11 @@ async fn read_tpkt(tcp: &mut tokio::net::TcpStream) -> Result<Vec<u8>> {
     let mut head = [0u8; 4];
     tcp.read_exact(&mut head).await?;
     if head[0] != 3 {
-        bail!("réponse du serveur inattendue (pas de RDP)");
+        bail!(t!("unexpected server answer (not RDP)", "réponse du serveur inattendue (pas de RDP)"));
     }
     let len = u16::from_be_bytes([head[2], head[3]]) as usize;
     if !(4..=4096).contains(&len) {
-        bail!("réponse X.224 de longueur invalide");
+        bail!(t!("X.224 answer with invalid length", "réponse X.224 de longueur invalide"));
     }
     let mut pdu = head.to_vec();
     pdu.resize(len, 0);
@@ -159,7 +159,7 @@ pub async fn relay(state: Arc<State>, mut socket: WebSocket, origin: Origin) {
         state.web.active_inc();
     }
     if let Err(e) = run(&state, &mut socket, origin).await {
-        tracing::warn!("bureau à distance : {e:#}");
+        tracing::warn!("{} {e:#}", t!("remote desktop:", "bureau à distance :"));
     }
     if web {
         state.web.active_dec();
@@ -183,7 +183,7 @@ async fn run(state: &Arc<State>, socket: &mut WebSocket, origin: Origin) -> Resu
     // Jeton à usage unique : il dit qui et vers quel serveur.
     let Some((user_id, target_id, real_addr)) = crate::api::take_ticket(db, &proxy_auth).await? else {
         refuse(socket, RDCleanPathPdu::new_http_error(401)).await;
-        bail!("jeton invalide, expiré ou déjà utilisé");
+        bail!(t!("invalid, expired or already used token", "jeton invalide, expiré ou déjà utilisé"));
     };
     let addr = real_addr.unwrap_or_else(|| match &origin {
         Origin::Portunia { addr } => addr.clone(),
@@ -193,12 +193,12 @@ async fn run(state: &Arc<State>, socket: &mut WebSocket, origin: Origin) -> Resu
     let target = model::target_by_id(db, target_id).await?;
     let (Some(user), Some(target)) = (user, target) else {
         refuse(socket, RDCleanPathPdu::new_http_error(403)).await;
-        bail!("compte ou serveur supprimé");
+        bail!(t!("account or server deleted", "compte ou serveur supprimé"));
     };
     if !target.is_rdp() || target.mode != "enregistre" || model::access(db, user.id, target.id).await?.is_none() {
         audit::note(db, &user.login, "acces.refuse", json!({ "cible": target.name, "type": "rdp", "adresse": addr })).await;
         refuse(socket, RDCleanPathPdu::new_http_error(403)).await;
-        bail!("{} : accès refusé", target.name);
+        bail!(t!(format!("{}: access denied", target.name), format!("{} : accès refusé", target.name)));
     }
 
     // Connexion au serveur Windows, début de la négociation RDP.
@@ -212,7 +212,7 @@ async fn run(state: &Arc<State>, socket: &mut WebSocket, origin: Origin) -> Resu
     };
     let _ = tcp.set_nodelay(true);
     tcp.write_all(x224_connection_request.as_bytes()).await?;
-    let x224_response = read_tpkt(&mut tcp).await.context("négociation X.224")?;
+    let x224_response = read_tpkt(&mut tcp).await.context(t!("X.224 negotiation", "négociation X.224"))?;
 
     // Négociation chiffrée avec le serveur, certificat vérifié par son empreinte.
     let provider = Arc::new(rustls::crypto::ring::default_provider());
@@ -221,18 +221,18 @@ async fn run(state: &Arc<State>, socket: &mut WebSocket, origin: Origin) -> Resu
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(Capture(provider)))
         .with_no_client_auth();
-    let name = ServerName::try_from(target.host.clone()).map_err(|_| anyhow!("adresse du serveur invalide"))?;
+    let name = ServerName::try_from(target.host.clone()).map_err(|_| anyhow!(t!("invalid server address", "adresse du serveur invalide")))?;
     let tls = match tokio_rustls::TlsConnector::from(Arc::new(config)).connect(name, tcp).await {
         Ok(t) => t,
         Err(e) => {
             refuse(socket, RDCleanPathPdu::new_tls_error(40)).await;
-            bail!("négociation TLS avec {server} : {e}");
+            bail!(t!(format!("TLS negotiation with {server}: {e}"), format!("négociation TLS avec {server} : {e}")));
         }
     };
     let chain: Vec<Vec<u8>> = tls.get_ref().1.peer_certificates().unwrap_or_default().iter().map(|c| c.to_vec()).collect();
     let Some(leaf) = chain.first() else {
         refuse(socket, RDCleanPathPdu::new_general_error()).await;
-        bail!("{server} n'a pas présenté de certificat");
+        bail!(t!(format!("{server} presented no certificate"), format!("{server} n'a pas présenté de certificat")));
     };
     let fingerprint = cert_fingerprint(leaf);
     match &target.host_key {
@@ -244,7 +244,10 @@ async fn run(state: &Arc<State>, socket: &mut WebSocket, origin: Origin) -> Resu
         Some(known) if *known != fingerprint => {
             audit::note(db, &user.login, "cible.empreinte_differente", json!({ "cible": target.name, "attendue": known, "recue": fingerprint })).await;
             refuse(socket, RDCleanPathPdu::new_general_error()).await;
-            bail!("{} : le certificat du serveur a changé (attendu {known}, reçu {fingerprint})", target.name);
+            bail!(t!(
+                format!("{}: the server's certificate has changed (expected {known}, received {fingerprint})", target.name),
+                format!("{} : le certificat du serveur a changé (attendu {known}, reçu {fingerprint})", target.name)
+            ));
         }
         _ => {}
     }
@@ -265,7 +268,7 @@ async fn run(state: &Arc<State>, socket: &mut WebSocket, origin: Origin) -> Resu
     let mut capture = match Capturer::create(&state.config.recordings_dir(), id, &format!("{} → {}", user.login, target.name)) {
         Ok(c) => Some(c),
         Err(e) => {
-            tracing::error!("enregistrement RDP {id} : {e:#}");
+            tracing::error!("{} {id}: {e:#}", t!("RDP recording", "enregistrement RDP"));
             None
         }
     };
@@ -303,7 +306,7 @@ async fn run(state: &Arc<State>, socket: &mut WebSocket, origin: Origin) -> Resu
     if let Some(c) = capture {
         match c.finish(state, id) {
             Ok((path, sha, sig, bytes)) => done = model::Finished { recording: Some(path), sha256: Some(sha), signature: Some(sig), bytes: bytes as i64 },
-            Err(e) => tracing::error!("enregistrement RDP {id} : {e:#}"),
+            Err(e) => tracing::error!("{} {id}: {e:#}", t!("RDP recording", "enregistrement RDP")),
         }
     }
     let bytes = done.bytes;

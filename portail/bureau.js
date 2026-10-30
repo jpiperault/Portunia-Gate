@@ -3,9 +3,12 @@
 import '/static/iron-remote-desktop.js?v=__V__';
 import { Backend, init, displayControl } from '/static/iron-remote-desktop-rdp.js?v=__V__';
 
+const FR = document.documentElement.lang === 'fr';
+const T = (en, fr) => (FR ? fr : en);
+
 const nom = decodeURIComponent(location.pathname.split('/').pop() || '');
 document.getElementById('nom').textContent = nom;
-document.title = `${nom} · Bureau à distance`;
+document.title = `${nom} · ${T('Remote Desktop', 'Bureau à distance')}`;
 
 const screen = document.getElementById('ecran');
 const form = document.getElementById('identifiants');
@@ -35,12 +38,12 @@ function explain(err) {
   const kind = typeof err?.kind === 'function' ? err.kind() : undefined;
   const http = typeof err?.rdcleanpathDetails === 'function' ? err.rdcleanpathDetails()?.httpStatusCode : undefined;
   switch (kind) {
-    case 1: case 2: return 'Identifiant ou mot de passe Windows refusé.';
-    case 3: return 'Le serveur Windows refuse l\'accès à ce compte.';
-    case 4: return http === 401 ? 'Autorisation expirée : rouvrez le serveur depuis la liste.' : http === 403 ? 'Accès refusé par le bastion (règle ou serveur).' : 'Le bastion n\'a pas pu joindre le serveur Windows.';
-    case 5: return 'Bastion injoignable.';
-    case 6: return 'Le serveur Windows refuse la négociation (NLA désactivé ou version trop ancienne ?).';
-    default: return (typeof err?.backtrace === 'function' ? err.backtrace() : String(err?.message || err || '')).split('\n')[0] || 'Connexion impossible.';
+    case 1: case 2: return T('Windows login or password refused.', 'Identifiant ou mot de passe Windows refusé.');
+    case 3: return T('The Windows server denies access to this account.', 'Le serveur Windows refuse l\'accès à ce compte.');
+    case 4: return http === 401 ? T('Authorisation expired: reopen the server from the list.', 'Autorisation expirée : rouvrez le serveur depuis la liste.') : http === 403 ? T('Access denied by the bastion (rule or server).', 'Accès refusé par le bastion (règle ou serveur).') : T('The bastion could not reach the Windows server.', 'Le bastion n\'a pas pu joindre le serveur Windows.');
+    case 5: return T('Bastion unreachable.', 'Bastion injoignable.');
+    case 6: return T('The Windows server refuses the negotiation (NLA disabled or version too old?).', 'Le serveur Windows refuse la négociation (NLA désactivé ou version trop ancienne ?).');
+    default: return (typeof err?.backtrace === 'function' ? err.backtrace() : String(err?.message || err || '')).split('\n')[0] || T('Cannot connect.', 'Connexion impossible.');
   }
 }
 
@@ -51,7 +54,7 @@ async function open(user, password, domain) {
   const res = await fetch(`/api/rdp/${encodeURIComponent(nom)}`, { method: 'POST', credentials: 'same-origin', headers: { 'X-Heimdia': 'portail' } });
   const data = await res.json().catch(() => ({}));
   if (res.status === 401) { location.href = '/'; return; }
-  if (!res.ok) throw new Error(data.erreur || 'Serveur indisponible');
+  if (!res.ok) throw new Error(data.erreur || T('Server unavailable', 'Serveur indisponible'));
   await ready;
 
   element = document.createElement('iron-remote-desktop');
@@ -84,7 +87,7 @@ async function open(user, password, domain) {
   followSize();
   const end = await session.run();
   sizeWatch?.disconnect();
-  showNotice('Session fermée', end?.reason?.() || 'La session Bureau à distance est terminée.', [['Rouvrir', () => location.reload(), true], ['Mes serveurs', () => { location.href = '/'; }]]);
+  showNotice(T('Session closed', 'Session fermée'), end?.reason?.() || T('The Remote Desktop session has ended.', 'La session Bureau à distance est terminée.'), [[T('Reopen', 'Rouvrir'), () => location.reload(), true], [T('My servers', 'Mes serveurs'), () => { location.href = '/'; }]]);
 }
 
 // La résolution du bureau Windows suit la place disponible : plein écran, fenêtre agrandie
@@ -116,7 +119,7 @@ form.addEventListener('submit', async (e) => {
   const user = document.getElementById('utilisateur').value.trim();
   const password = document.getElementById('mdp').value;
   let domain = document.getElementById('domaine').value.trim();
-  if (!user || !password) { error.textContent = 'Indiquez l\'utilisateur et le mot de passe Windows.'; return; }
+  if (!user || !password) { error.textContent = T('Give the Windows user and password.', 'Indiquez l\'utilisateur et le mot de passe Windows.'); return; }
   // DOMAINE\utilisateur ou utilisateur@domaine : le domaine se déduit.
   let account = user;
   if (!domain && user.includes('\\')) [domain, account] = user.split('\\', 2);
@@ -138,7 +141,7 @@ document.getElementById('plein').addEventListener('click', () => element?.reques
 document.getElementById('fermer').addEventListener('click', () => {
   ui?.shutdown();
   window.close();
-  showNotice('Session fermée', 'Vous pouvez fermer cet onglet.', [['Mes serveurs', () => { location.href = '/'; }, true]]);
+  showNotice(T('Session closed', 'Session fermée'), T('You can close this tab.', 'Vous pouvez fermer cet onglet.'), [[T('My servers', 'Mes serveurs'), () => { location.href = '/'; }, true]]);
 });
 
 // Compte proposé par le serveur (s'il est déclaré), et vérification de la session du portail.
