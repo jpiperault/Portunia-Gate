@@ -294,8 +294,12 @@ impl Tap {
                         out.push(Record::Event(t, json!({ "k": "souris", "x": x, "y": y })));
                     }
                 }
-                // Synchronisation des voyants du clavier.
-                3 => {}
+                // Synchronisation des voyants du clavier (2 : verr. num., 4 : majuscules).
+                3 => {
+                    if self.record_input {
+                        out.push(Record::Event(t, json!({ "k": "voyants", "f": flags })));
+                    }
+                }
                 // Caractère Unicode.
                 4 => {
                     let Some(u) = u16le(p, at) else { return };
@@ -579,6 +583,9 @@ mod tests {
         // Même saisie avec la frappe enregistrée : la touche apparaît.
         tap.record_input = true;
         assert_eq!(tap.client(2.1, &input).len(), 2);
+        // Voyants : majuscules et verrouillage numérique, tenus dans l'en-tête de l'événement.
+        let r = tap.client(2.2, &[1 << 2, 3, (3 << 5) | 6]);
+        assert!(matches!(&r[..], [Record::Event(_, v)] if v["k"] == "voyants" && v["f"] == 6));
         // Image fast-path coupée en deux lectures.
         let fp = [0x00, 0x05, 1, 2, 3];
         assert!(tap.server(3.0, &fp[..2]).is_empty());
