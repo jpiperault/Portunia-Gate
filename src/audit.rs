@@ -19,8 +19,21 @@ fn link(prev: &str, seq: i64, at: &DateTime<Utc>, actor: &str, event: &str, deta
 }
 
 /// Ajoute un événement. Un verrou de transaction sérialise les écritures.
+///
+/// L'écriture se fait dans sa propre tâche : si l'appelant est interrompu (client qui se
+/// déconnecte), la transaction va quand même jusqu'au bout et libère le verrou. Sans cela,
+/// un verrou resté pris bloquait toutes les écritures suivantes, puis tout le bastion.
 pub async fn log(db: &PgPool, actor: &str, event: &str, detail: Value) -> Result<()> {
+    let (db, actor, event) = (db.clone(), actor.to_string(), event.to_string());
+    tokio::spawn(async move { write(&db, &actor, &event, detail).await })
+        .await
+        .map_err(|e| anyhow::anyhow!("journal d'audit : {e}"))?
+}
+
+async fn write(db: &PgPool, actor: &str, event: &str, detail: Value) -> Result<()> {
     let mut tx = db.begin().await?;
+    // Jamais d'attente sans fin sur le verrou du journal.
+    sqlx::query("SET LOCAL lock_timeout = '10s'").execute(&mut *tx).await?;
     sqlx::query("SELECT pg_advisory_xact_lock(7340301)").execute(&mut *tx).await?;
     let last: Option<(i64, String)> = sqlx::query_as("SELECT seq, hash FROM audit ORDER BY seq DESC LIMIT 1")
         .fetch_optional(&mut *tx)

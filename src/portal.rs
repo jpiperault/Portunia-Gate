@@ -751,7 +751,9 @@ async fn bridge(state: &State, mut socket: WebSocket, user: &str, ticket: &str, 
         ..Default::default()
     });
     let handler = Local { expected: state.keys.host_fingerprint() };
-    let mut handle = client::connect(config, ("127.0.0.1", state.config.ssh_local_port()), handler).await?;
+    let mut handle = tokio::time::timeout(Duration::from_secs(15), client::connect(config, ("127.0.0.1", state.config.ssh_local_port()), handler))
+        .await
+        .map_err(|_| anyhow!("le serveur SSH du bastion ne répond pas"))??;
     if !handle.authenticate_password(user, ticket).await?.success() {
         send_json(&mut socket, json!({ "t": "ferme", "raison": "Accès refusé par le bastion" })).await;
         return Ok(());

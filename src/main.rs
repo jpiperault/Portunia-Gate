@@ -7,6 +7,7 @@ mod api;
 mod audit;
 mod auth;
 mod config;
+mod health;
 mod keys;
 mod model;
 mod portal;
@@ -250,7 +251,14 @@ async fn connect_db(config: &Config) -> Result<PgPool> {
     let mut last = None;
     // Au démarrage de Docker Compose, PostgreSQL peut mettre quelques secondes à répondre.
     for _ in 0..30 {
-        match PgPoolOptions::new().max_connections(20).connect(&config.database_url).await {
+        // Délai pour obtenir une connexion, et connexions renouvelées : une requête bloquée
+        // donne une erreur au lieu d'attendre indéfiniment.
+        let options = PgPoolOptions::new()
+            .max_connections(20)
+            .acquire_timeout(std::time::Duration::from_secs(15))
+            .idle_timeout(std::time::Duration::from_secs(600))
+            .max_lifetime(std::time::Duration::from_secs(3600));
+        match options.connect(&config.database_url).await {
             Ok(pool) => {
                 sqlx::migrate!().run(&pool).await.context("mise à jour du schéma de la base")?;
                 return Ok(pool);
@@ -394,7 +402,7 @@ async fn run(cli: Cli) -> Result<()> {
             if tls::create_missing(&state.config.data_dir, &tls_names())? {
                 tracing::info!("certificat de l'API créé, empreinte {}", tls::fingerprint(&state.config.data_dir)?);
             }
-            tokio::try_join!(sshd::run(state.clone()), api::run(state.clone()), portal::run(state.clone()))?;
+            tokio::try_join!(sshd::run(state.clone()), api::run(state.clone()), portal::run(state.clone()), health::run(state.clone()))?;
             Ok(())
         }
         Command::User(cmd) => user_cmd(&state, cmd).await,

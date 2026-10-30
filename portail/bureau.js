@@ -81,8 +81,33 @@ async function open(user, password, domain) {
   ui.setVisibility(true);
   document.getElementById('cad').disabled = false;
   document.getElementById('plein').disabled = false;
+  followSize();
   const end = await session.run();
+  sizeWatch?.disconnect();
   showNotice('Session fermée', end?.reason?.() || 'La session Bureau à distance est terminée.', [['Rouvrir', () => location.reload(), true], ['Mes serveurs', () => { location.href = '/'; }]]);
+}
+
+// La résolution du bureau Windows suit la place disponible : plein écran, fenêtre agrandie
+// ou réduite (canal d'affichage dynamique). Le serveur accepte des largeurs paires, 200 à 8192.
+let sizeWatch = null;
+let sizeTimer = 0;
+let lastSize = '';
+function applySize() {
+  if (!ui || !element) return;
+  const full = document.fullscreenElement === element;
+  const box = full ? { width: window.screen.width, height: window.screen.height } : screen.getBoundingClientRect();
+  const width = Math.min(8192, Math.max(200, Math.round(box.width) & ~1));
+  const height = Math.min(8192, Math.max(200, Math.round(box.height)));
+  const key = `${width}x${height}`;
+  if (key === lastSize) return;
+  lastSize = key;
+  ui.resize(width, height);
+}
+function followSize() {
+  const later = () => { clearTimeout(sizeTimer); sizeTimer = setTimeout(applySize, 250); };
+  sizeWatch = new ResizeObserver(later);
+  sizeWatch.observe(screen);
+  document.addEventListener('fullscreenchange', later);
 }
 
 form.addEventListener('submit', async (e) => {

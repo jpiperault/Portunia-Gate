@@ -1017,7 +1017,9 @@ where
 async fn relay_tcp(ctx: Arc<Ctx>, target: Target, channel: Channel<Msg>) -> Result<()> {
     let id = Uuid::new_v4();
     let db = &ctx.state.db;
-    let tcp = tokio::net::TcpStream::connect((target.host.as_str(), target.port as u16)).await?;
+    let tcp = tokio::time::timeout(Duration::from_secs(10), tokio::net::TcpStream::connect((target.host.as_str(), target.port as u16)))
+        .await
+        .map_err(|_| anyhow::anyhow!("{} injoignable (délai dépassé)", target.name))??;
     let detail = if target.is_rdp() { "rdp" } else { "ssh -J" };
     model::session_start(db, id, ctx.user.id, target.id, "rebond", detail, &ctx.addr).await?;
     audit::note(
