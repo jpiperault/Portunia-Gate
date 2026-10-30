@@ -52,7 +52,7 @@ impl From<anyhow::Error> for ApiError {
 impl From<sqlx::Error> for ApiError {
     fn from(e: sqlx::Error) -> Self {
         tracing::error!("{} {e}", t!("database:", "base :"));
-        ApiError(StatusCode::INTERNAL_SERVER_ERROR, t!("Bastion database error", "Erreur de la base du bastion").into())
+        ApiError(StatusCode::INTERNAL_SERVER_ERROR, t!("Gate database error", "Erreur de la base de la Gate").into())
     }
 }
 
@@ -157,7 +157,7 @@ async fn remember_allowed(state: &State) -> anyhow::Result<bool> {
 
 async fn bastion_info(state: &State) -> anyhow::Result<Value> {
     Ok(json!({
-        "nom": setting_str(state, "nom", "Heimdia").await?,
+        "nom": setting_str(state, "nom", "Portunia Gate").await?,
         "version": env!("CARGO_PKG_VERSION"),
         "site": model::setting(&state.db, "site_id").await?,
         "port_ssh": state.config.ssh_public_port,
@@ -174,12 +174,12 @@ async fn caller(api: &Api, headers: &HeaderMap) -> Result<User, ApiError> {
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
-        .ok_or_else(|| err(StatusCode::UNAUTHORIZED, t!("Sign-in to the bastion required", "Connexion au bastion requise")))?;
+        .ok_or_else(|| err(StatusCode::UNAUTHORIZED, t!("Sign-in to the Gate required", "Connexion à la Gate requise")))?;
     let user_id: Option<Uuid> = sqlx::query_scalar("SELECT user_id FROM api_sessions WHERE token_hash = $1 AND expires_at > now()")
         .bind(sha256_hex(bearer.as_bytes()))
         .fetch_optional(&api.state.db)
         .await?;
-    let id = user_id.ok_or_else(|| err(StatusCode::UNAUTHORIZED, t!("Bastion session expired: sign in again", "Session du bastion expirée : reconnectez-vous")))?;
+    let id = user_id.ok_or_else(|| err(StatusCode::UNAUTHORIZED, t!("Gate session expired: sign in again", "Session de la Gate expirée : reconnectez-vous")))?;
     let user = model::user_by_id(&api.state.db, id).await?.filter(|u| !u.disabled);
     user.ok_or_else(|| err(StatusCode::UNAUTHORIZED, t!("Account disabled", "Compte désactivé")))
 }
@@ -187,7 +187,7 @@ async fn caller(api: &Api, headers: &HeaderMap) -> Result<User, ApiError> {
 async fn admin(api: &Api, headers: &HeaderMap) -> Result<User, ApiError> {
     let user = caller(api, headers).await?;
     if user.role != "admin" {
-        return Err(err(StatusCode::FORBIDDEN, t!("Restricted to the bastion's administrators", "Réservé aux administrateurs du bastion")));
+        return Err(err(StatusCode::FORBIDDEN, t!("Restricted to the Gate's administrators", "Réservé aux administrateurs de la Gate")));
     }
     Ok(user)
 }
@@ -196,7 +196,7 @@ async fn admin(api: &Api, headers: &HeaderMap) -> Result<User, ApiError> {
 async fn auditor(api: &Api, headers: &HeaderMap) -> Result<User, ApiError> {
     let user = caller(api, headers).await?;
     if user.role != "admin" && user.role != "auditor" {
-        return Err(err(StatusCode::FORBIDDEN, t!("Restricted to the bastion's administrators and auditors", "Réservé aux administrateurs et auditeurs du bastion")));
+        return Err(err(StatusCode::FORBIDDEN, t!("Restricted to the Gate's administrators and auditors", "Réservé aux administrateurs et auditeurs de la Gate")));
     }
     Ok(user)
 }
@@ -326,7 +326,7 @@ async fn login(AxState(api): Ctx, ConnectInfo(addr): ConnectInfo<SocketAddr>, Js
                     if !code.is_empty() {
                         return Err(fail("code d'enrôlement incorrect").await);
                     }
-                    let issuer = setting_str(state, "nom", "Heimdia").await?;
+                    let issuer = setting_str(state, "nom", "Portunia Gate").await?;
                     return Ok(Json(json!({
                         "etat": "enrolement",
                         "secret": auth::base32(&secret),
@@ -1318,7 +1318,7 @@ async fn admin_settings(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
     admin(&api, &headers).await?;
     let state = &api.state;
     Ok(Json(json!({
-        "nom": setting_str(state, "nom", "Heimdia").await?,
+        "nom": setting_str(state, "nom", "Portunia Gate").await?,
         "banniere": setting_str(state, "banniere", crate::sshd::default_banner()).await?,
         "politique": model::default_policy(&state.db).await?.to_string(),
         "duree_session_h": session_hours(state).await?,
@@ -1422,7 +1422,7 @@ async fn reader(api: &Api, headers: &HeaderMap) -> Result<(User, Option<String>)
         let own = user.login.clone();
         return Ok((user, Some(own)));
     }
-    Err(err(StatusCode::FORBIDDEN, t!("Replay restricted to the bastion's administrators and auditors", "Relecture réservée aux administrateurs et auditeurs du bastion")))
+    Err(err(StatusCode::FORBIDDEN, t!("Replay restricted to the Gate's administrators and auditors", "Relecture réservée aux administrateurs et auditeurs de la Gate")))
 }
 
 /// Date « AAAA-MM-JJ » (minuit, heure du bastion) ou RFC 3339.
@@ -1685,7 +1685,7 @@ async fn assist_join(AxState(api): Ctx, headers: HeaderMap, Path(place): Path<St
     if place.len() != 3 || !place.chars().all(|c| c.is_ascii_digit()) {
         return Err(err(StatusCode::BAD_REQUEST, t!("Invalid code", "Code invalide")));
     }
-    let name = setting_str(&state, "nom", "Heimdia").await?;
+    let name = setting_str(&state, "nom", "Portunia Gate").await?;
     let who = format!("{} ({name})", user.login);
     Ok(ws.on_upgrade(move |socket| crate::assist::helper(state, socket, user.login, who, place)))
 }
@@ -1746,7 +1746,7 @@ async fn admin_assist_update(AxState(api): Ctx, headers: HeaderMap, Json(body): 
             let state = api.state.clone();
             tokio::spawn(async move {
                 if let Err(e) = crate::assist::fetch_agent(state).await {
-                    tracing::warn!("{} {e:#}", t!("Portunia Assist download:", "téléchargement de Portunia Assist :"));
+                    tracing::warn!("{} {e:#}", t!("Portunia Assistance download:", "téléchargement de Portunia Assistance :"));
                 }
             });
         } else {

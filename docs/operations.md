@@ -1,4 +1,4 @@
-# Running Heimdia
+# Running Portunia Gate
 
 **English** · [Français](exploitation.fr.md)
 
@@ -41,7 +41,7 @@ sudo bash installer.sh update       # Debian package
 sudo ./installer.sh update          # Docker, from the repository folder
 ```
 
-With the package, the wizard downloads the latest version, checks its fingerprint and installs it. With Docker, it fetches the latest version (`git pull`) and rebuilds. Either way, the bastion restarts and updates the database schema. **Open sessions are cut**: warn users.
+With the package, the wizard downloads the latest version, checks its fingerprint and installs it. With Docker, it fetches the latest version (`git pull`) and rebuilds. Either way, the Gate restarts and updates the database schema. **Open sessions are cut**: warn users.
 
 After an update, the web portal loads its new pages by itself (their files carry the version number).
 
@@ -58,13 +58,13 @@ sudo bash installer.sh info    # the same, with the address and ports to enter i
 - Audit log: `sudo heimdia audit --last 100`
 - Log integrity: `sudo heimdia audit --verify` (shows the first missing or altered event)
 
-The audit log can also be read in Portunia (bastion menu › Audit › Log), with CSV export.
+The audit log can also be read in Portunia (Gate menu › Audit › Log), with CSV export.
 
 Main events: `auth.reussie` (the `via` field is `portunia` for an API sign-in; the factors `jeton Portunia` or `portail web` for a session opened by Portunia or the web portal), `auth.echec` (with the reason), `session.ouverte`, `session.fermee`, `rebond.ouvert`, `sftp.ouvert`, `tunnel.ouvert`, `acces.refuse`, `cible.empreinte_memorisee`, `cible.empreinte_differente`, `cible.identifiants_refuses`, `compte.*`, `groupe.*`, `cible.creee`, `regle.creee`, `reglage.modifie`, `portail.*`, `enregistrement.consulte`, `enregistrement.revele`, `installation`, `service.demarre`.
 
 ## Built-in monitoring
 
-Every 20 seconds the bastion checks that its database answers and that its SSH server greets new connections; an independent thread also checks that its internal task scheduler keeps running. If the bastion stays stuck for about a minute, it writes the cause to the service log (`surveillance : …`, with the state of its database connections) and stops, so that systemd (`Restart=on-failure`) or Docker (`restart: unless-stopped`) restarts it. If this happens, send the lines before the restart: `sudo journalctl -u heimdia -n 100` or `sudo docker compose logs --tail 100 heimdia`.
+Every 20 seconds the Gate checks that its database answers and that its SSH server greets new connections; an independent thread also checks that its internal task scheduler keeps running. If the Gate stays stuck for about a minute, it writes the cause to the service log (`surveillance : …`, with the state of its database connections) and stops, so that systemd (`Restart=on-failure`) or Docker (`restart: unless-stopped`) restarts it. If this happens, send the lines before the restart: `sudo journalctl -u heimdia -n 100` or `sudo docker compose logs --tail 100 heimdia`.
 
 ## Checking a recording
 
@@ -78,11 +78,11 @@ heimdia-enregistrement-v1
 
 The public signing key is kept in the database (`signature_publique` setting) and shown by `sudo heimdia init`, which can safely be run again.
 
-Portunia's player (bastion menu › Audit) runs this check on every opening and flags an altered file. At the end of each SSH session, the bastion also stores the session text in the database (screen and keystrokes, without masked input) for search: roughly the size of the displayed text.
+Portunia's player (Gate menu › Audit) runs this check on every opening and flags an altered file. At the end of each SSH session, the Gate also stores the session text in the database (screen and keystrokes, without masked input) for search: roughly the size of the displayed text.
 
 ## Server fingerprint
 
-On the first connection, Heimdia remembers the server's key (SSH) or certificate (Remote Desktop) fingerprint. If it changes later, the connection is refused and the `cible.empreinte_differente` event is logged. Check that the server was really reinstalled, then clear the stored fingerprint in Portunia (Administer › Servers › Forget fingerprint). The next one is remembered on the next connection.
+On the first connection, Portunia Gate remembers the server's key (SSH) or certificate (Remote Desktop) fingerprint. If it changes later, the connection is refused and the `cible.empreinte_differente` event is logged. Check that the server was really reinstalled, then clear the stored fingerprint in Portunia (Administer › Servers › Forget fingerprint). The next one is remembered on the next connection.
 
 ## Troubleshooting
 
@@ -104,22 +104,22 @@ On the first connection, Heimdia remembers the server's key (SSH) or certificate
 
 | Symptom | Likely cause |
 |---|---|
-| Portunia cannot reach the bastion | API port (8443) blocked by a firewall, or wrong address: `sudo bash installer.sh info`. |
-| The fingerprint shown by Portunia differs from `heimdia info` | Do not sign in: you may not be on the right bastion. Check the address. |
+| Portunia cannot reach the Gate | API port (8443) blocked by a firewall, or wrong address: `sudo bash installer.sh info`. |
+| The fingerprint shown by Portunia differs from `heimdia info` | Do not sign in: you may not be on the right Gate. Check the address. |
 | "Wrong login, password or code" | The exact reason is in the log: `sudo heimdia audit --last 10` (unknown account, wrong password, wrong code…). |
-| The code is refused on the first sign-in | Delete the old Heimdia entry from the authenticator app, empty the Code field and sign in again to get a new QR code. |
+| The code is refused on the first sign-in | Delete the old Portunia Gate entry from the authenticator app, empty the Code field and sign in again to get a new QR code. |
 | `Wrong code` although it is right | Phone or server clock out of sync (synchronise them, NTP), or code already used: wait for the next one (30 s). |
 | "Too many attempts" | 5 failures in 10 minutes: wait a few minutes. |
 | Lost code (new phone) | An administrator resets the code (Administer › Accounts, or `sudo heimdia user totp <account>`). |
 | No administrator can sign in any more | On the server: `sudo bash installer.sh admin rescue` creates an administrator with a temporary password. |
-| "Bastion session expired" | Sign in again from the Bastions section. |
+| "Gate session expired" | Sign in again from the Gates section. |
 | "No server is allowed to you right now" or empty list | No rule for your groups, or outside the rule's days, hours or dates. Hours follow the `TZ` time zone. |
 | "The vault account was refused" | The account's password or key changed on the server: replace its secret (Portunia › Administer › Servers). |
-| The bastion restarted on its own | Built-in monitoring found it stuck: see [Built-in monitoring](#built-in-monitoring) and send the log lines. |
+| The Gate restarted on its own | Built-in monitoring found it stuck: see [Built-in monitoring](#built-in-monitoring) and send the log lines. |
 
 ## Known limitations
 
-- Single command (`ssh login%server@bastion "command"`), SFTP and tunnels: Vault-mode servers only, since the bastion must connect without asking anything.
+- Single command (`ssh login%server@Gate "command"`), SFTP and tunnels: Vault-mode servers only, since the Gate must connect without asking anything.
 - Remote forwarding (`ssh -R`) is refused.
 - Sign-in from Portunia: accounts using a password (with or without a code). An "SSH key only" account connects with a standard SSH client.
 - One install per server for the `heimdia` command (it points to the last installed folder).

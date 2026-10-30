@@ -72,7 +72,7 @@ function connect() {
   ws.addEventListener('close', (e) => {
     if (closedByServer) return;
     clearInterval(warnTimer);
-    const text = e.code === 1006 ? T('Connection lost, or web session expired.', 'Connexion perdue, ou session web expirée.') : T('The connection to the bastion is closed.', 'La connexion au bastion est fermée.');
+    const text = e.code === 1006 ? T('Connection lost, or web session expired.', 'Connexion perdue, ou session web expirée.') : T('The connection to the Gate is closed.', 'La connexion à la Gate est fermée.');
     showNotice(T('Session closed', 'Session fermée'), text, [[T('Reopen', 'Rouvrir'), connect, true], [T('My servers', 'Mes serveurs'), () => { location.href = '/'; }]]);
   });
   term.focus();

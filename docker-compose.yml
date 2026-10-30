@@ -1,4 +1,4 @@
-# Heimdia, taille « petite » : le bastion et sa base sur un même serveur.
+# Portunia Gate, taille « petite » : la Gate et sa base sur un même serveur.
 # Installation : ./installer.sh (crée .env, construit, démarre). Voir README.md.
 # Portail web par Cloudflare Tunnel : ./installer.sh portail (ajoute COMPOSE_PROFILES=portail).
 

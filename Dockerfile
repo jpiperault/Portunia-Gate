@@ -1,4 +1,4 @@
-# Image de Heimdia : compilation dans une image Rust, exécution dans une Debian minimale.
+# Image de Portunia Gate : compilation dans une image Rust, exécution dans une Debian minimale.
 
 FROM rust:1-trixie AS build
 WORKDIR /src

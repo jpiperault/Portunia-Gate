@@ -38,7 +38,7 @@ async function api(method, path, body) {
     body: body ? JSON.stringify(body) : undefined,
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw Object.assign(new Error(data.erreur || T('Bastion error', 'Erreur du bastion')), { status: res.status });
+  if (!res.ok) throw Object.assign(new Error(data.erreur || T('Gate error', 'Erreur de la Gate')), { status: res.status });
   return data;
 }
 
@@ -183,7 +183,7 @@ async function start() {
   try {
     state = await api('GET', '/api/etat');
   } catch (err) {
-    app.replaceChildren(h('p', { class: 'loading' }, T(`Bastion unreachable: ${err.message}`, `Bastion injoignable : ${err.message}`)));
+    app.replaceChildren(h('p', { class: 'loading' }, T(`Gate unreachable: ${err.message}`, `Gate injoignable : ${err.message}`)));
     return;
   }
   if (!state.actif) return closed(state.nom);

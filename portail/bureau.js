@@ -40,8 +40,8 @@ function explain(err) {
   switch (kind) {
     case 1: case 2: return T('Windows login or password refused.', 'Identifiant ou mot de passe Windows refusé.');
     case 3: return T('The Windows server denies access to this account.', 'Le serveur Windows refuse l\'accès à ce compte.');
-    case 4: return http === 401 ? T('Authorisation expired: reopen the server from the list.', 'Autorisation expirée : rouvrez le serveur depuis la liste.') : http === 403 ? T('Access denied by the bastion (rule or server).', 'Accès refusé par le bastion (règle ou serveur).') : T('The bastion could not reach the Windows server.', 'Le bastion n\'a pas pu joindre le serveur Windows.');
-    case 5: return T('Bastion unreachable.', 'Bastion injoignable.');
+    case 4: return http === 401 ? T('Authorisation expired: reopen the server from the list.', 'Autorisation expirée : rouvrez le serveur depuis la liste.') : http === 403 ? T('Access denied by the Gate (rule or server).', 'Accès refusé par la Gate (règle ou serveur).') : T('The Gate could not reach the Windows server.', 'La Gate n\'a pas pu joindre le serveur Windows.');
+    case 5: return T('Gate unreachable.', 'Gate injoignable.');
     case 6: return T('The Windows server refuses the negotiation (NLA disabled or version too old?).', 'Le serveur Windows refuse la négociation (NLA désactivé ou version trop ancienne ?).');
     default: return (typeof err?.backtrace === 'function' ? err.backtrace() : String(err?.message || err || '')).split('\n')[0] || T('Cannot connect.', 'Connexion impossible.');
   }

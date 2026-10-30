@@ -3,7 +3,7 @@
 'use strict';
 
 const dl = document.getElementById('dl');
-dl.setAttribute('download', `Portunia Assist (${location.host}).exe`);
+dl.setAttribute('download', `Portunia Assistance (${location.host}).exe`);
 
 // Programme absent du serveur : on le dit plutôt que de télécharger une page d'erreur.
 fetch('/assistance/portunia-assist.exe', { method: 'HEAD' }).then((r) => {

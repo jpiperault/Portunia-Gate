@@ -9,12 +9,12 @@ if [ "$1" = configure ]; then
   getent group _heimdia >/dev/null || groupadd --system _heimdia
   getent passwd _heimdia >/dev/null ||
     useradd --system --gid _heimdia --home-dir /var/lib/heimdia --no-create-home \
-      --shell /usr/sbin/nologin --comment "Bastion Heimdia" _heimdia
+      --shell /usr/sbin/nologin --comment "Gate" _heimdia
   install -d -o _heimdia -g _heimdia -m 700 /var/lib/heimdia
   install -d -o root -g _heimdia -m 750 /etc/heimdia
   if [ -d /run/systemd/system ]; then
     systemctl daemon-reload
-    # Mise à jour : redémarre le bastion s'il tournait ; le schéma de la base suit au démarrage.
+    # Mise à jour : redémarre la Gate s'il tournait ; le schéma de la base suit au démarrage.
     if [ -n "$2" ]; then systemctl try-restart heimdia.service || true; fi
   fi
 fi

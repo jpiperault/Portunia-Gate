@@ -32,7 +32,7 @@ pub fn create_missing(data_dir: &Path, names: &[String]) -> Result<bool> {
         return Ok(false);
     }
     let mut params = rcgen::CertificateParams::new(names.to_vec()).map_err(|e| anyhow!("certificat : {e}"))?;
-    params.distinguished_name.push(rcgen::DnType::CommonName, "Heimdia");
+    params.distinguished_name.push(rcgen::DnType::CommonName, "Portunia Gate");
     params.not_before = rcgen::date_time_ymd(2025, 1, 1);
     params.not_after = rcgen::date_time_ymd(2045, 1, 1);
     let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).map_err(|e| anyhow!("clé du certificat : {e}"))?;

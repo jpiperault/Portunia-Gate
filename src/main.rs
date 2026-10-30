@@ -1,4 +1,4 @@
-//! Heimdia, the SSH and Remote Desktop bastion of Portunia.
+//! Portunia Gate, the SSH and Remote Desktop gateway of Portunia.
 //!
 //! `heimdia serve` runs the service; the other commands administer the bastion from the
 //! server (`sudo heimdia …`). Messages follow the system's language (English or French).
@@ -42,7 +42,7 @@ pub struct State {
 }
 
 #[derive(Parser)]
-#[command(name = "heimdia", version, about = "SSH and Remote Desktop bastion of Portunia (messages in English or French, following the system's language or HEIMDIA_LANG)")]
+#[command(name = "heimdia", version, about = "SSH and Remote Desktop gateway of Portunia (messages in English or French, following the system's language or HEIMDIA_LANG)")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -287,7 +287,7 @@ async fn enroll_totp(state: &State, user: &model::User) -> Result<()> {
     let issuer = model::setting(&state.db, "nom")
         .await?
         .and_then(|v| v.as_str().map(str::to_owned))
-        .unwrap_or_else(|| "Heimdia".into());
+        .unwrap_or_else(|| "Portunia Gate".into());
     let uri = auth::otpauth_uri(&issuer, &user.login, &secret);
     println!("{}", t!("\nScan this code with your authenticator app:\n", "\nScannez ce code dans votre application d'authentification :\n"));
     println!("{}", auth::qr_terminal(&uri)?);
@@ -396,9 +396,9 @@ async fn run(cli: Cli) -> Result<()> {
             let nom = model::setting(&state.db, "nom")
                 .await?
                 .and_then(|v| v.as_str().map(str::to_owned))
-                .unwrap_or_else(|| "Heimdia".into());
+                .unwrap_or_else(|| "Portunia Gate".into());
             let users = model::users(&state.db).await?;
-            println!("{nom} · Heimdia {}", env!("CARGO_PKG_VERSION"));
+            println!("{nom} · Portunia Gate {}", env!("CARGO_PKG_VERSION"));
             let admins = users.iter().filter(|u| u.role == "admin").count();
             // installer.sh lit l'empreinte sur la ligne « API certificate » / « Certificat de l'API ».
             println!("{}{}", t!("SSH host key          ", "Clé d'hôte SSH        "), state.keys.host_fingerprint());
@@ -430,7 +430,7 @@ async fn run(cli: Cli) -> Result<()> {
                 loop {
                     if assist::settings(&s).await.map(|x| x.enabled).unwrap_or(false) {
                         if let Err(e) = assist::fetch_agent(s.clone()).await {
-                            tracing::warn!("{} {e:#}", t!("Portunia Assist download:", "téléchargement de Portunia Assist :"));
+                            tracing::warn!("{} {e:#}", t!("Portunia Assistance download:", "téléchargement de Portunia Assistance :"));
                         }
                     }
                     tokio::time::sleep(std::time::Duration::from_secs(24 * 3600)).await;
@@ -538,7 +538,7 @@ fn tls_names() -> Vec<String> {
 }
 
 async fn init(config: Config, admin: &str, no_admin: bool, provisional: bool, nom: Option<&str>) -> Result<()> {
-    println!("Heimdia {}, {}\n", env!("CARGO_PKG_VERSION"), t!("first install", "première installation"));
+    println!("Portunia Gate {}, {}\n", env!("CARGO_PKG_VERSION"), t!("first install", "première installation"));
     for created in Keys::create_missing(&config.data_dir)? {
         println!("✓ {} {created}", t!("Created:", "Créé :"));
     }

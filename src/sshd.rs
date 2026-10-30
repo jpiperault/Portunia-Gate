@@ -119,7 +119,7 @@ fn split_login(requested: &str) -> (&str, Option<&str>) {
 
 fn ki_prompt(text: &str, echo: bool) -> Auth {
     Auth::Partial {
-        name: Cow::Borrowed("Heimdia"),
+        name: Cow::Borrowed("Portunia Gate"),
         instructions: Cow::Borrowed(""),
         prompts: Cow::Owned(vec![(Cow::Owned(text.to_string()), echo)]),
     }
@@ -599,7 +599,7 @@ async fn choose_target(ctx: &Ctx, channel: &mut Channel<Msg>, pty: &mut Option<P
     let name = model::setting(&ctx.state.db, "nom")
         .await?
         .and_then(|v| v.as_str().map(str::to_owned))
-        .unwrap_or_else(|| "Heimdia".into());
+        .unwrap_or_else(|| "Portunia Gate".into());
     if targets.is_empty() {
         say(
             channel,
@@ -719,7 +719,7 @@ async fn shell(ctx: Arc<Ctx>, mut channel: Channel<Msg>, mut pty: Option<PtyInfo
     )
     .await;
     let mut recorder = if target.records() {
-        say(&channel, t!("Heimdia: session recorded.\n", "Heimdia : session enregistrée.\n")).await;
+        say(&channel, t!("Portunia Gate: session recorded.\n", "Portunia Gate : session enregistrée.\n")).await;
         Some(Recorder::create(
             &ctx.state.config.recordings_dir(),
             id,

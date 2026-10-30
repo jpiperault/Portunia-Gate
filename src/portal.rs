@@ -303,7 +303,7 @@ fn err(status: StatusCode, text: &str) -> Response {
 
 fn internal(e: impl std::fmt::Display) -> Response {
     tracing::error!("{} {e}", t!("portal:", "portail :"));
-    err(StatusCode::INTERNAL_SERVER_ERROR, t!("Bastion error", "Erreur du bastion"))
+    err(StatusCode::INTERNAL_SERVER_ERROR, t!("Gate error", "Erreur de la Gate"))
 }
 
 // ---------- Pages et fichiers ----------
@@ -479,7 +479,7 @@ async fn status(AxState(portal): Ctx, headers: HeaderMap) -> Response {
         let session = web_session(&portal, &headers, &s).await?;
         Ok::<_, anyhow::Error>(json!({
             "actif": s.enabled,
-            "nom": text_setting(state, "nom", "Heimdia").await?,
+            "nom": text_setting(state, "nom", "Portunia Gate").await?,
             "banniere": text_setting(state, "banniere", crate::sshd::default_banner()).await?,
             "turnstile": (!s.turnstile_site.is_empty() && s.turnstile_secret.is_some()).then_some(s.turnstile_site.clone()),
             "presse_papiers": s.clipboard,
@@ -822,9 +822,9 @@ async fn bridge(state: &State, mut socket: WebSocket, user: &str, ticket: &str, 
     let handler = Local { expected: state.keys.host_fingerprint() };
     let mut handle = tokio::time::timeout(Duration::from_secs(15), client::connect(config, ("127.0.0.1", state.config.ssh_local_port()), handler))
         .await
-        .map_err(|_| anyhow!(t!("the bastion's SSH server is not answering", "le serveur SSH du bastion ne répond pas")))??;
+        .map_err(|_| anyhow!(t!("the Gate's SSH server is not answering", "le serveur SSH de la Gate ne répond pas")))??;
     if !handle.authenticate_password(user, ticket).await?.success() {
-        send_json(&mut socket, json!({ "t": "ferme", "raison": t!("Access denied by the bastion", "Accès refusé par le bastion") })).await;
+        send_json(&mut socket, json!({ "t": "ferme", "raison": t!("Access denied by the Gate", "Accès refusé par la Gate") })).await;
         return Ok(());
     }
     let channel = handle.channel_open_session().await?;

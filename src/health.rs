@@ -55,7 +55,7 @@ pub async fn run(state: Arc<State>) -> anyhow::Result<()> {
         std::thread::sleep(Duration::from_secs(15));
         let quiet = now_secs().saturating_sub(watched.load(Ordering::Relaxed));
         if quiet > FROZEN_AFTER {
-            eprintln!("{}", t!(format!("Heimdia frozen for {quiet} s (tasks blocked): stopping for automatic restart."), format!("Heimdia figé depuis {quiet} s (tâches bloquées) : arrêt pour redémarrage automatique.")));
+            eprintln!("{}", t!(format!("Portunia Gate frozen for {quiet} s (tasks blocked): stopping for automatic restart."), format!("Portunia Gate figé depuis {quiet} s (tâches bloquées) : arrêt pour redémarrage automatique.")));
             std::process::exit(70);
         }
     })?;
@@ -69,7 +69,7 @@ pub async fn run(state: Arc<State>) -> anyhow::Result<()> {
         match check(&state).await {
             Ok(()) => {
                 if failures > 0 {
-                    tracing::info!("{}", t!("watchdog: the bastion is answering again", "surveillance : le bastion répond de nouveau"));
+                    tracing::info!("{}", t!("watchdog: the Gate is answering again", "surveillance : la Gate répond de nouveau"));
                 }
                 failures = 0;
             }
@@ -91,8 +91,8 @@ pub async fn run(state: Arc<State>) -> anyhow::Result<()> {
                     tracing::error!(
                         "{}",
                         t!(
-                            format!("watchdog: the bastion has not answered for {secs} s ({why}); stopping for automatic restart"),
-                            format!("surveillance : le bastion ne répond plus depuis {secs} s ({why}) ; arrêt pour redémarrage automatique")
+                            format!("watchdog: the Gate has not answered for {secs} s ({why}); stopping for automatic restart"),
+                            format!("surveillance : la Gate ne répond plus depuis {secs} s ({why}) ; arrêt pour redémarrage automatique")
                         )
                     );
                     std::process::exit(70);

@@ -1,23 +1,23 @@
-# Heimdia
+# Portunia Gate
 
 [English](README.md) · **Français**
 
-Bastion SSH de [Portunia](https://github.com/jpiperault/Portunia) : les utilisateurs passent par Heimdia pour atteindre les serveurs ; Heimdia vérifie qui ils sont, décide où ils peuvent aller, fournit si besoin le compte du serveur sans le leur montrer, enregistre les sessions et trace tout dans un journal infalsifiable.
+Passerelle SSH et Bureau à distance de [Portunia](https://github.com/jpiperault/Portunia) (anciennement Heimdia, nom gardé pour la commande `heimdia`, les dossiers, le service et le dépôt) : les utilisateurs passent par Portunia Gate pour atteindre les serveurs ; Portunia Gate vérifie qui ils sont, décide où ils peuvent aller, fournit si besoin le compte du serveur sans le leur montrer, enregistre les sessions et trace tout dans un journal infalsifiable.
 
 > État : **version 0.8, Bureau à distance enregistré**, aussi dans le navigateur (portail web) ; portail web SSH (0.7), Bureau à distance en rebond (0.6), relecture des sessions SSH (0.5). Voir la [Feuille de route](#feuille-de-route).
 
-## Ce que fait Heimdia
+## Ce que fait Portunia Gate
 
 | | |
 |---|---|
-| **Trois modes par serveur** | **Rebond** : relais de bout en bout (`ssh -J`), le bastion ne voit pas le contenu, il journalise la connexion. **Enregistré** : le bastion relaie et enregistre la session ; l'utilisateur tape ses propres identifiants. **Coffre** : comme Enregistré, et le bastion fournit le compte du serveur, que l'utilisateur ne connaît jamais. |
-| **Connexion au bastion** | Mot de passe, clé SSH et code TOTP (Google Authenticator, Microsoft Authenticator…), combinables au choix : politique générale et politique par compte. Un code ne sert qu'une fois. |
+| **Trois modes par serveur** | **Rebond** : relais de bout en bout (`ssh -J`), la Gate ne voit pas le contenu, elle journalise la connexion. **Enregistré** : la Gate relaie et enregistre la session ; l'utilisateur tape ses propres identifiants. **Coffre** : comme Enregistré, et la Gate fournit le compte du serveur, que l'utilisateur ne connaît jamais. |
+| **Connexion à la Gate** | Mot de passe, clé SSH et code TOTP (Google Authenticator, Microsoft Authenticator…), combinables au choix : politique générale et politique par compte. Un code ne sert qu'une fois. |
 | **Droits** | Des règles relient un groupe à des serveurs, avec jours, heures, date d'expiration, SFTP et tunnels autorisés ou non. Tout ce qui n'est pas permis est refusé. |
-| **Enregistrement** | Format asciicast (lisible par Portunia et asciinema), affichage seul ou aussi la frappe selon la règle. Chaque fichier est signé par le bastion. |
+| **Enregistrement** | Format asciicast (lisible par Portunia et asciinema), affichage seul ou aussi la frappe selon la règle. Chaque fichier est signé par la Gate. |
 | **Relecture** | Dans Portunia, comme une vidéo : la frappe en sous-titres, les pauses sautées, les commandes sensibles repérées, la recherche dans toutes les sessions. Les mots de passe tapés sont masqués ; chaque relecture est inscrite au journal. |
 | **Journal d'audit** | Connexions, échecs, sessions, changements d'administration. Chaque événement contient l'empreinte du précédent : une ligne supprimée ou modifiée se voit (`heimdia audit --verify`). |
-| **Portunia** | Extension Heimdia : le bastion s'ajoute dans la barre latérale, ses serveurs s'ouvrent avec un jeton à usage unique, les administrateurs gèrent tout depuis Portunia (serveurs et coffre, comptes, groupes, règles, réglages) et les auditeurs relisent les sessions et le journal. |
-| **Bureau à distance** | Serveurs Windows (RDP) derrière le bastion, ouverts depuis Portunia ou le portail web. Modes rebond et enregistré (voir [Bureau à distance](#bureau-à-distance-rdp)). |
+| **Portunia** | Extension Portunia Gate : la Gate s'ajoute dans la barre latérale, ses serveurs s'ouvrent avec un jeton à usage unique, les administrateurs gèrent tout depuis Portunia (serveurs et coffre, comptes, groupes, règles, réglages) et les auditeurs relisent les sessions et le journal. |
+| **Bureau à distance** | Serveurs Windows (RDP) derrière la Gate, ouverts depuis Portunia ou le portail web. Modes rebond et enregistré (voir [Bureau à distance](#bureau-à-distance-rdp)). |
 | **Portail web** | Pour qui n'a pas Portunia sous la main : une page de connexion et un terminal dans le navigateur, derrière Cloudflare, sans port ouvert. Activé ou coupé d'un clic dans Portunia (voir [Portail web](#portail-web)). |
 | **Autres clients** | N'importe quel client SSH : OpenSSH, PuTTY, MobaXterm, WinSCP (SFTP). |
 
@@ -30,7 +30,7 @@ Deux façons d'installer, avec le même assistant :
 | Installation | 1 à 2 minutes : paquet déjà compilé | 10 à 30 minutes : compilation sur le serveur |
 | Serveur conseillé | 1 processeur, 2 Go de mémoire, 10 Go de disque | 2 processeurs, 4 Go de mémoire, 20 Go de disque |
 | Container LXC | Rien à activer | Options *nesting* et *keyctl* obligatoires |
-| Fonctionnement | Service systemd durci, PostgreSQL de la distribution | Deux conteneurs (Heimdia et PostgreSQL) |
+| Fonctionnement | Service systemd durci, PostgreSQL de la distribution | Deux conteneurs (Portunia Gate et PostgreSQL) |
 | Mise à jour | `sudo bash installer.sh mise-a-jour` (télécharge la dernière version) | `sudo ./installer.sh mise-a-jour` (`git pull` puis recompilation) |
 | Processeurs | x86-64 (amd64) | x86-64 et ARM |
 
@@ -43,7 +43,7 @@ curl -fsSLO https://github.com/jpiperault/Heimdia-releases/releases/latest/downl
 sudo bash installer.sh
 ```
 
-L'assistant télécharge la dernière version de Heimdia, vérifie son empreinte SHA-256, installe le paquet et PostgreSQL, crée la base (accès local par socket, sans mot de passe) et le service `heimdia`.
+L'assistant télécharge la dernière version de Portunia Gate, vérifie son empreinte SHA-256, installe le paquet et PostgreSQL, crée la base (accès local par socket, sans mot de passe) et le service `heimdia`.
 
 Fichiers installés :
 
@@ -63,7 +63,7 @@ Installer un paquet précis (sans accès à Internet, ou une version antérieure
 
 ```bash
 git clone https://github.com/jpiperault/Heimdia.git
-cd Heimdia
+cd Portunia Gate
 sudo ./installer.sh --docker
 ```
 
@@ -75,17 +75,17 @@ L'assistant pose cinq questions ; la touche Entrée garde la valeur proposée :
 
 | Question | Valeur proposée | |
 |---|---|---|
-| Nom du bastion | Heimdia | Affiché dans Portunia et dans l'application d'authentification. |
-| Identifiant de l'administrateur | admin | Votre compte pour administrer le bastion depuis Portunia. |
+| Nom de la Gate | Portunia Gate | Affiché dans Portunia et dans l'application d'authentification. |
+| Identifiant de l'administrateur | admin | Votre compte pour administrer la Gate depuis Portunia. |
 | Port SSH | 2222 | |
 | Port de l'API | 8443 | |
 | Fuseau horaire | celui du serveur | Sert aux plages horaires des règles d'accès. |
 
-Il crée ensuite les clés, le certificat, la base et le compte administrateur, démarre le bastion et affiche ce qu'il faut saisir dans Portunia :
+Il crée ensuite les clés, le certificat, la base et le compte administrateur, démarre la Gate et affiche ce qu'il faut saisir dans Portunia :
 
 ```
   ┌──────────────────────────────────────────────────────────────────────────
-  │ Dans Portunia : Extensions › activer Heimdia, puis Bastions › Ajouter un bastion
+  │ Dans Portunia : Extensions › activer Portunia Gate, puis Gates › Ajouter une Gate
   │
   │   Adresse      192.168.1.20
   │   Empreinte    38:D8:AF:22:01:C1:9E:8B:…:61:07:27:C9
@@ -97,7 +97,7 @@ Il crée ensuite les clés, le certificat, la base et le compte administrateur, 
   └──────────────────────────────────────────────────────────────────────────
 ```
 
-Le bastion redémarre seul avec le serveur.
+La Gate redémarre seul avec le serveur.
 
 ### Sauvegarder la clé du coffre, tout de suite
 
@@ -110,7 +110,7 @@ rm ~/heimdia-coffre.key                                      # sur le serveur
 
 ### Relancer l'assistant
 
-`sudo bash installer.sh` sur un bastion déjà installé ouvre un menu :
+`sudo bash installer.sh` sur une Gate déjà installé ouvre un menu :
 
 | Choix | Commande directe | |
 |---|---|---|
@@ -127,7 +127,7 @@ Une installation interrompue (coupure, erreur) se reprend en relançant l'assist
 Hors terminal, l'assistant prend les valeurs proposées, ou celles des variables `HEIMDIA_NOM`, `HEIMDIA_ADMIN`, `HEIMDIA_SSH_PORT`, `HEIMDIA_API_PORT` et `TZ` :
 
 ```bash
-sudo HEIMDIA_ADMIN=julien HEIMDIA_NOM="Bastion ACME" bash installer.sh </dev/null
+sudo HEIMDIA_ADMIN=julien HEIMDIA_NOM="Gate ACME" bash installer.sh </dev/null
 ```
 
 ### Certificat de l'entreprise
@@ -156,27 +156,27 @@ sudo docker compose up -d
 
 L'empreinte change : les utilisateurs devront valider la nouvelle (`sudo heimdia info`).
 
-## Ajouter le bastion dans Portunia
+## Ajouter la Gate dans Portunia
 
-1. **Activer l'extension** : Portunia › Extensions › Heimdia › Activer. La section **Bastions** apparaît dans la barre latérale.
-2. **Ajouter le bastion** : Bastions › **+** › tapez l'adresse donnée par l'assistant (`192.168.1.20`, ou `192.168.1.20:9443` si vous avez changé le port de l'API).
-3. **Vérifier l'empreinte** : Portunia affiche l'empreinte du certificat du bastion. Comparez-la à celle donnée par l'assistant (ou `sudo heimdia info` sur le serveur, ligne « Certificat de l'API »). Si elle diffère, n'allez pas plus loin : quelqu'un se fait peut-être passer pour le bastion.
+1. **Activer l'extension** : Portunia › Extensions › Portunia Gate › Activer. La section **Gates** apparaît dans la barre latérale.
+2. **Ajouter la Gate** : Gates › **+** › tapez l'adresse donnée par l'assistant (`192.168.1.20`, ou `192.168.1.20:9443` si vous avez changé le port de l'API).
+3. **Vérifier l'empreinte** : Portunia affiche l'empreinte du certificat de la Gate. Comparez-la à celle donnée par l'assistant (ou `sudo heimdia info` sur le serveur, ligne « Certificat de l'API »). Si elle diffère, n'allez pas plus loin : quelqu'un se fait peut-être passer pour la Gate.
 4. **Se connecter** : identifiant et mot de passe ; **laissez le champ Code vide** lors de la première connexion.
 5. **Première connexion** : Portunia demande de choisir un nouveau mot de passe (10 caractères au moins), puis affiche un code QR. Scannez-le avec votre application d'authentification et tapez le code à 6 chiffres qu'elle affiche.
-6. **Ouvrir un serveur** : les serveurs autorisés apparaissent sous le bastion, rangés par dossier. Un clic ouvre la session, sans retaper le code (jeton à usage unique) :
-   - **coffre** : connexion directe, le bastion fournit le compte ;
+6. **Ouvrir un serveur** : les serveurs autorisés apparaissent sous la Gate, rangés par dossier. Un clic ouvre la session, sans retaper le code (jeton à usage unique) :
+   - **coffre** : connexion directe, la Gate fournit le compte ;
    - **enregistré** : le serveur demande vos identifiants dans le terminal ;
    - **rebond** : Portunia demande vos identifiants du serveur, la connexion est chiffrée de bout en bout.
-7. **Administrer** (Portunia Équipes, compte administrateur) : menu **⋯** du bastion › **Administrer**. Un onglet s'ouvre avec les serveurs et le coffre, les comptes, les groupes, les règles et les réglages.
-8. **Auditer** (Portunia Équipes, compte administrateur ou auditeur) : menu **⋯** du bastion › **Audit**. Un onglet s'ouvre avec les sessions et le journal (voir [Relire les sessions](#relire-les-sessions)).
+7. **Administrer** (Portunia Équipes, compte administrateur) : menu **⋯** de la Gate › **Administrer**. Un onglet s'ouvre avec les serveurs et le coffre, les comptes, les groupes, les règles et les réglages.
+8. **Auditer** (Portunia Équipes, compte administrateur ou auditeur) : menu **⋯** de la Gate › **Audit**. Un onglet s'ouvre avec les sessions et le journal (voir [Relire les sessions](#relire-les-sessions)).
 
 Les comptes suivants se créent depuis l'onglet d'administration : Portunia affiche un mot de passe provisoire à transmettre à l'utilisateur, qui suivra les étapes 2 à 5.
 
-Rien ne s'affiche sous le bastion ? Aucune règle ne donne encore accès à un serveur : créez un serveur, un groupe contenant le compte, puis une règle qui les relie.
+Rien ne s'affiche sous la Gate ? Aucune règle ne donne encore accès à un serveur : créez un serveur, un groupe contenant le compte, puis une règle qui les relie.
 
 ## Relire les sessions
 
-Menu **⋯** du bastion › **Audit** › **Sessions** (rôles administrateur et auditeur).
+Menu **⋯** de la Gate › **Audit** › **Sessions** (rôles administrateur et auditeur).
 
 **Trouver une session** : filtres par compte, serveur et période, case « Avec frappe ». La recherche porte sur la frappe et sur le texte affiché de toutes les sessions enregistrées : la colonne « Trouvé » donne le moment et l'extrait, un clic ouvre la relecture à cet endroit.
 
@@ -198,7 +198,7 @@ Menu **⋯** du bastion › **Audit** › **Sessions** (rôles administrateur et
 
 **Chaque relecture est inscrite au journal** (`enregistrement.consulte`), et le lecteur affiche en filigrane le compte qui regarde.
 
-**Relire ses propres sessions** : Administrer › Réglages › « Chaque compte peut relire ses propres sessions ». Les comptes « utilisateur » voient alors **Mes sessions** dans le menu du bastion, sans pouvoir révéler les saisies masquées.
+**Relire ses propres sessions** : Administrer › Réglages › « Chaque compte peut relire ses propres sessions ». Les comptes « utilisateur » voient alors **Mes sessions** dans le menu de la Gate, sans pouvoir révéler les saisies masquées.
 
 **Commandes sensibles** : Administrer › Réglages, une par ligne (par défaut `rm -rf`, `mkfs`, `dd if=`, `shutdown`, `reboot`, `DROP TABLE`…).
 
@@ -206,25 +206,25 @@ Les sessions enregistrées avant la version 0.5 se relisent, mais n'entrent pas 
 
 ## Bureau à distance (RDP)
 
-Les serveurs Windows se déclarent comme les autres : Administrer › Serveurs et coffre › **Ajouter un serveur**, protocole **Bureau à distance (RDP)**, port 3389. Ils apparaissent sous le bastion dans Portunia avec un badge **RDP** et s'ouvrent dans un onglet Bureau à distance.
+Les serveurs Windows se déclarent comme les autres : Administrer › Serveurs et coffre › **Ajouter un serveur**, protocole **Bureau à distance (RDP)**, port 3389. Ils apparaissent sous la Gate dans Portunia avec un badge **RDP** et s'ouvrent dans un onglet Bureau à distance.
 
-Dans les deux modes, l'utilisateur tape ses identifiants Windows à chaque ouverture ; ni Portunia ni le bastion ne les gardent.
+Dans les deux modes, l'utilisateur tape ses identifiants Windows à chaque ouverture ; ni Portunia ni la Gate ne les gardent.
 
 | | **Rebond** (0.6) | **Enregistré** (0.8) |
 |---|---|---|
-| Chemin | Tunnel par le port SSH du bastion (2222), avec un jeton à usage unique ; la connexion RDP est chiffrée de bout en bout. | Passage du bastion (RDCleanPath, sur le port de l'API ou du portail) avec un jeton à usage unique : le bastion ouvre la connexion chiffrée avec le serveur Windows et relaie la session. |
-| Ce que voit le bastion | Rien du contenu ; il vérifie la règle et journalise (`rebond.ouvert`, durée, octets). | La session (pour l'enregistrer), mais pas le mot de passe : l'authentification Windows (NLA) se fait entre le client et le serveur. |
+| Chemin | Tunnel par le port SSH de la Gate (2222), avec un jeton à usage unique ; la connexion RDP est chiffrée de bout en bout. | Passage de la Gate (RDCleanPath, sur le port de l'API ou du portail) avec un jeton à usage unique : la Gate ouvre la connexion chiffrée avec le serveur Windows et relaie la session. |
+| Ce que voit la Gate | Rien du contenu ; elle vérifie la règle et journalise (`rebond.ouvert`, durée, octets). | La session (pour l'enregistrer), mais pas le mot de passe : l'authentification Windows (NLA) se fait entre le client et le serveur. |
 | Enregistrement | Non. | Oui, fichier signé (`.rdpcap`) : l'image envoyée par le serveur, les clics, les copier-coller (texte masqué tant qu'un administrateur ne le révèle pas) et la frappe si la règle l'enregistre. Relecture dans Portunia (0.47 ou suivant), comme une session SSH. |
 | Clients | Portunia. | Portunia et le **portail web** (Bureau à distance dans le navigateur). |
-| Certificat du serveur | Vérifié par le client. | Vérifié par le bastion : empreinte gardée à la première connexion, connexion refusée si elle change (`cible.empreinte_differente`). |
+| Certificat du serveur | Vérifié par le client. | Vérifié par la Gate : empreinte gardée à la première connexion, connexion refusée si elle change (`cible.empreinte_differente`). |
 
-Le bastion doit joindre le port 3389 des serveurs Windows. Dans Portunia, l'extension Bureau à distance doit être activée ; sinon les serveurs RDP restent visibles, grisés. Un serveur RDP n'apparaît pas dans le menu `ssh` du bastion et ne s'ouvre pas en terminal.
+La Gate doit joindre le port 3389 des serveurs Windows. Dans Portunia, l'extension Bureau à distance doit être activée ; sinon les serveurs RDP restent visibles, grisés. Un serveur RDP n'apparaît pas dans le menu `ssh` de la Gate et ne s'ouvre pas en terminal.
 
-Le mode **coffre** (compte Windows fourni par le bastion, sans rien taper) et la relecture des sessions RDP arrivent dans les versions suivantes.
-Le mode **coffre** (compte Windows fourni par le bastion, sans rien taper) arrive dans une prochaine version.
+Le mode **coffre** (compte Windows fourni par la Gate, sans rien taper) et la relecture des sessions RDP arrivent dans les versions suivantes.
+Le mode **coffre** (compte Windows fourni par la Gate, sans rien taper) arrive dans une prochaine version.
 ## Portail web
 
-Une page web pour ouvrir ses serveurs depuis n'importe quel navigateur, sans Portunia : connexion, liste des serveurs autorisés, terminal SSH ou Bureau à distance dans un onglet. Elle ne sert pas à l'administration. Le Bureau à distance passe par le passage RDCleanPath du bastion (serveurs en mode enregistré, voir [Bureau à distance](#bureau-à-distance-rdp)). Le portail passe par le serveur SSH du bastion, avec un jeton à usage unique : mêmes règles, même coffre, même enregistrement, même journal. Une session web se relit dans l'audit comme une autre ; son adresse est suivie de « (web) ».
+Une page web pour ouvrir ses serveurs depuis n'importe quel navigateur, sans Portunia : connexion, liste des serveurs autorisés, terminal SSH ou Bureau à distance dans un onglet. Elle ne sert pas à l'administration. Le Bureau à distance passe par le passage RDCleanPath de la Gate (serveurs en mode enregistré, voir [Bureau à distance](#bureau-à-distance-rdp)). Le portail passe par le serveur SSH de la Gate, avec un jeton à usage unique : mêmes règles, même coffre, même enregistrement, même journal. Une session web se relit dans l'audit comme une autre ; son adresse est suivie de « (web) ».
 
 **Sécurité**
 
@@ -235,16 +235,16 @@ Une page web pour ouvrir ses serveurs depuis n'importe quel navigateur, sans Por
 | Comptes | Seuls les membres du **groupe choisi** (« Accès web » par défaut). Première connexion et code perdu : pas sur le portail, mais avec Portunia ou l'administrateur. |
 | Session | Cookie « HttpOnly, Secure, SameSite=Strict », 1 heure par défaut ; fermeture après 15 minutes sans frappe (avertissement 90 s avant). |
 | Page | Rien de chargé depuis l'extérieur (sauf Turnstile), politique de contenu stricte, pas d'affichage dans un cadre d'un autre site, adresse publique vérifiée à chaque connexion. |
-| Serveurs | SSH en mode coffre ou enregistré ; Bureau à distance en mode enregistré (client RDP d'IronRDP dans la page, identifiants Windows tapés dans la page et envoyés au serveur, jamais au bastion). Les serveurs en rebond (de bout en bout) restent avec Portunia. |
+| Serveurs | SSH en mode coffre ou enregistré ; Bureau à distance en mode enregistré (client RDP d'IronRDP dans la page, identifiants Windows tapés dans la page et envoyés au serveur, jamais à la Gate). Les serveurs en rebond (de bout en bout) restent avec Portunia. |
 | Journal | `portail.connexion`, `portail.echec`, `portail.active`, `portail.desactive`, `portail.modifie`, `portail.sessions_fermees`. |
 
 **Mise en place**
 
 1. **Créer le tunnel** dans Cloudflare Zero Trust › Networks › Tunnels › *Create a tunnel* (type Cloudflared), et copier son jeton (la longue suite après `--token`).
-2. **L'installer sur le bastion** : `sudo bash installer.sh portail` (paquet) ou `sudo ./installer.sh portail` (Docker), puis coller le jeton.
+2. **L'installer sur la Gate** : `sudo bash installer.sh portail` (paquet) ou `sudo ./installer.sh portail` (Docker), puis coller le jeton.
 3. **Publier l'adresse** : dans l'onglet *Public Hostname* du tunnel, ajouter l'adresse (ex. `acces.votre-domaine.fr`), type **HTTP**, URL `localhost:8445` (paquet) ou `heimdia:8445` (Docker).
 4. **Conseillé : Cloudflare Access** sur cette adresse (compte de l'entreprise exigé avant même la page de connexion), et **Turnstile** (clés à saisir dans Portunia).
-5. **Activer** dans Portunia : menu **⋯** du bastion › **Administrer** › **Portail web** : adresse publique, groupe autorisé, durées, copier-coller, puis l'interrupteur. Créer le groupe et y ajouter les comptes concernés.
+5. **Activer** dans Portunia : menu **⋯** de la Gate › **Administrer** › **Portail web** : adresse publique, groupe autorisé, durées, copier-coller, puis l'interrupteur. Créer le groupe et y ajouter les comptes concernés.
 
 Couper le portail (interrupteur) affiche « Portail fermé » et ferme aussitôt les sessions web en cours ; **Fermer toutes les sessions web** les ferme sans couper le portail.
 
@@ -252,26 +252,26 @@ Proxy Cloudflare au lieu du tunnel : dans `/etc/heimdia/heimdia.env`, `HEIMDIA_P
 
 ## Assistance à distance
 
-Prendre la main sur le PC d'un proche ou d'un client avec **Portunia Assist** (Heimdia 0.11 et suivants, Portunia 0.48 et suivants). La personne va sur `https://adresse-du-portail/assistance`, télécharge Portunia Assist (un seul programme, sans installation ni compte) et vous lit un code à 9 chiffres ; vous le tapez dans Portunia (**Assistance à distance** dans la barre latérale). Elle voit votre nom et choisit : voir seulement, ou voir et contrôler. Son écran s'ouvre dans un onglet Bureau à distance.
+Prendre la main sur le PC d'un proche ou d'un client avec **Portunia Assistance** (Portunia Gate 0.11 et suivants, Portunia 0.48 et suivants). La personne va sur `https://adresse-du-portail/assistance`, télécharge Portunia Assistance (un seul programme, sans installation ni compte) et vous lit un code à 9 chiffres ; vous le tapez dans Portunia (**Assistance à distance** dans la barre latérale). Elle voit votre nom et choisit : voir seulement, ou voir et contrôler. Son écran s'ouvre dans un onglet Bureau à distance.
 
 | | |
 |---|---|
-| Relais | Le bastion ne fait que mettre en relation et transmettre : la liaison est chiffrée de bout en bout à partir du code (échange de clés SPAKE2, ChaCha20-Poly1305). Le bastion ne voit ni l'écran ni la frappe, et ne les enregistre pas. |
-| Code | À usage unique, donné par le bastion à l'ouverture de Portunia Assist ; un code faux met fin à la tentative et la personne en reçoit un nouveau. |
-| Qui | Les membres du **groupe des dépanneurs** seulement (« Dépanneurs » par défaut), connectés au bastion depuis Portunia. |
+| Relais | La Gate ne fait que mettre en relation et transmettre : la liaison est chiffrée de bout en bout à partir du code (échange de clés SPAKE2, ChaCha20-Poly1305). La Gate ne voit ni l'écran ni la frappe, et ne les enregistre pas. |
+| Code | À usage unique, donné par la Gate à l'ouverture de Portunia Assistance ; un code faux met fin à la tentative et la personne en reçoit un nouveau. |
+| Qui | Les membres du **groupe des dépanneurs** seulement (« Dépanneurs » par défaut), connectés à la Gate depuis Portunia. |
 | Personne aidée | Un cadre et une barre **Arrêter** restent sur son écran (invisibles dans l'image partagée) ; Échap trois fois arrête aussi. L'assistance s'arrête au bout de la durée maximale (4 heures par défaut). |
-| Programme | Le bastion télécharge `portunia-assist.exe` depuis les versions de Portunia à l'activation de l'assistance, puis une fois par jour, et vérifie son empreinte SHA-256. Il n'est pas encore signé : Windows SmartScreen avertit à la première ouverture (« Informations complémentaires » › « Exécuter quand même »). |
+| Programme | La Gate télécharge `portunia-assist.exe` depuis les versions de Portunia à l'activation de l'assistance, puis une fois par jour, et vérifie son empreinte SHA-256. Il n'est pas encore signé : Windows SmartScreen avertit à la première ouverture (« Informations complémentaires » › « Exécuter quand même »). |
 | Journal | `assistance.ouverte`, `assistance.fermee`, `assistance.reglage`, `assistance.place_inconnue`, `assistance.programme`. |
 
-**Mise en place** : la page et le relais utilisent l'adresse du portail web (voir [Portail web](#portail-web), étapes 1 à 3 ; le portail lui-même peut rester coupé). Dans Portunia, activer l'extension **Assistance à distance**, puis menu **⋯** du bastion › **Administrer** › **Assistance** : groupe des dépanneurs, durée maximale, puis l'interrupteur. Créer le groupe et y ajouter les comptes des dépanneurs.
+**Mise en place** : la page et le relais utilisent l'adresse du portail web (voir [Portail web](#portail-web), étapes 1 à 3 ; le portail lui-même peut rester coupé). Dans Portunia, activer l'extension **Assistance à distance**, puis menu **⋯** de la Gate › **Administrer** › **Assistance** : groupe des dépanneurs, durée maximale, puis l'interrupteur. Créer le groupe et y ajouter les comptes des dépanneurs.
 
 ## Se connecter sans Portunia
 
 ```bash
-ssh -p 2222 julien@bastion              # menu des serveurs autorisés
-ssh -p 2222 julien%web-01@bastion       # directement sur web-01
-ssh -J julien@bastion:2222 admin@fw-01  # rebond de bout en bout (serveurs en mode rebond)
-sftp -P 2222 julien%web-01@bastion      # fichiers (mode coffre, si la règle autorise SFTP)
+ssh -p 2222 julien@gate              # menu des serveurs autorisés
+ssh -p 2222 julien%web-01@gate       # directement sur web-01
+ssh -J julien@gate:2222 admin@fw-01  # rebond de bout en bout (serveurs en mode rebond)
+sftp -P 2222 julien%web-01@gate      # fichiers (mode coffre, si la règle autorise SFTP)
 ```
 
 Le code TOTP doit avoir été enrôlé avant, dans Portunia ou avec `sudo heimdia user totp julien`.
@@ -310,7 +310,7 @@ sudo heimdia rule add presta-db --group Prestataires --targets db-01 --expires 2
 # Réglages
 sudo heimdia setting auth_policy "password+totp,key+totp"    # politique générale
 sudo heimdia setting banniere "Accès réservé. Les sessions sont enregistrées."
-sudo heimdia setting nom "Bastion ACME"
+sudo heimdia setting nom "Gate ACME"
 sudo heimdia setting langue fr                             # en, fr, ou "" pour la langue du système
 
 # Contrôle
@@ -325,10 +325,10 @@ Voir aussi [docs/exploitation.fr.md](docs/exploitation.fr.md) : sauvegardes, mis
 ## Feuille de route
 
 1. **Socle** : proxy SSH, trois modes, coffre, comptes et TOTP, droits, enregistrement signé, journal chaîné, Docker Compose.
-2. **Intégration Portunia** : API, ajout du bastion dans Portunia, serveurs dans la barre latérale, jetons à usage unique, première connexion, administration complète, clé générée et installée sur les serveurs du coffre. Assistant d'installation (0.3), paquet Debian (0.4).
+2. **Intégration Portunia** : API, ajout de la Gate dans Portunia, serveurs dans la barre latérale, jetons à usage unique, première connexion, administration complète, clé générée et installée sur les serveurs du coffre. Assistant d'installation (0.3), paquet Debian (0.4).
 3. **Audit** : relecture et recherche (0.5), vue en direct et coupure, vidéo MP4 à la demande, lecteur détachable, conservation réglable avec estimation du disque, syslog et CSV.
-4. **Bureau à distance** : rebond (0.6), enregistré avec enregistrement signé (0.8), relecture (0.10), puis coffre (le bastion ouvre la session Windows avec le compte du coffre), règles (presse-papiers, son).
+4. **Bureau à distance** : rebond (0.6), enregistré avec enregistrement signé (0.8), relecture (0.10), puis coffre (la Gate ouvre la session Windows avec le compte du coffre), règles (presse-papiers, son).
 5. **Portail web** : SSH (0.7) et Bureau à distance (0.8) dans le navigateur derrière Cloudflare, puis clés d'accès (passkeys), personnalisation.
-6. **Assistance à distance** : relais Portunia Assist avec un code (0.11), puis lien d'invitation, accès sans surveillance à ses propres PC, transfert de fichiers, discussion.
+6. **Assistance à distance** : relais Portunia Assistance avec un code (0.11), puis lien d'invitation, accès sans surveillance à ses propres PC, transfert de fichiers, discussion.
 7. **Exploitation** : sauvegarde intégrée, dépôt apt pour les mises à jour, paquet ARM, imports (Portunia, CSV), console web activable.
-8. **Console maître** : un Heimdia central pour les prestataires, des relais chez les clients.
+8. **Console maître** : un Portunia Gate central pour les prestataires, des relais chez les clients.

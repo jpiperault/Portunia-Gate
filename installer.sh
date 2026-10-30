@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Heimdia setup assistant (Debian 12/13, Ubuntu 22.04 and later).
-# Assistant d'installation de Heimdia (Debian 12/13, Ubuntu 22.04 et suivantes).
+# Portunia Gate setup assistant (Debian 12/13, Ubuntu 22.04 and later).
+# Assistant d'installation de Portunia Gate (Debian 12/13, Ubuntu 22.04 et suivantes).
 #
 #   ./installer.sh                     first install (Debian package), or menu if already installed
 #   ./installer.sh --docker            first install with Docker (from a copy of the repository)
 #   ./installer.sh --package FILE      installs this .deb file instead of downloading the latest version
 #   ./installer.sh info                details to type in Portunia
-#   ./installer.sh update              installs the latest version and restarts the bastion
+#   ./installer.sh update              installs the latest version and restarts the Gate
 #   ./installer.sh admin LOGIN         creates a backup administrator (temporary password)
 #   ./installer.sh portal              installs Cloudflare Tunnel for the web portal (token asked)
 #
@@ -100,7 +100,7 @@ use_mode() {
   if [ "$MODE" = docker ]; then ENV_FILE=$DIR/.env; else ENV_FILE=$ENV_NATIVE; fi
 }
 env_value() { [ ! -f "$ENV_FILE" ] || sed -n "s/^$1=//p" "$ENV_FILE" | tail -n1; }
-# Commande d'administration du bastion, quel que soit le mode, dans la langue de l'assistant.
+# Commande d'administration de la Gate, quel que soit le mode, dans la langue de l'assistant.
 hcmd() {
   if [ "$MODE" = docker ]; then compose exec -T -e HEIMDIA_LANG="$L" heimdia heimdia "$@"; else /usr/bin/heimdia "$@"; fi
 }
@@ -120,7 +120,7 @@ check_system() {
   os=$(. /etc/os-release && echo "$PRETTY_NAME")
   ok "$(t "$os, $cpus CPU(s), $((mem / 1024)) GB of memory, $disk GB of free disk" "$os, $cpus processeur(s), $((mem / 1024)) Go de mémoire, $disk Go de disque libre")"
   [ "$disk" -ge 5 ] || warn "$(t "Less than 5 GB free: little room for session recordings." "Moins de 5 Go libres : peu de place pour les enregistrements des sessions.")"
-  [ "$mem" -ge 900 ] || warn "$(t "Less than 1 GB of memory: Heimdia and PostgreSQL will be cramped." "Moins de 1 Go de mémoire : Heimdia et PostgreSQL seront à l'étroit.")"
+  [ "$mem" -ge 900 ] || warn "$(t "Less than 1 GB of memory: Portunia Gate and PostgreSQL will be cramped." "Moins de 1 Go de mémoire : Portunia Gate et PostgreSQL seront à l'étroit.")"
 }
 
 install_docker() {
@@ -206,7 +206,7 @@ install_package() {
   local v pgv
   v=$(dpkg-query -W -f '${Version}' heimdia)
   pgv=$(pg_lsclusters -h 2>/dev/null | awk 'NR==1{print $1}')
-  ok "$(t "Heimdia $v and PostgreSQL $pgv installed" "Heimdia $v et PostgreSQL $pgv installés")"
+  ok "$(t "Portunia Gate $v and PostgreSQL $pgv installed" "Portunia Gate $v et PostgreSQL $pgv installés")"
 }
 
 # Base PostgreSQL locale, sans mot de passe : le compte de service _heimdia s'y connecte par socket.
@@ -222,7 +222,7 @@ prepare_database() {
 # ---------- Étapes communes ----------
 
 build_image() {
-  step "$(t "Building Heimdia" "Compilation de Heimdia") ${D}$(t "(10 to 30 minutes the first time)" "(10 à 30 minutes la première fois)")${N}"
+  step "$(t "Building Portunia Gate" "Compilation de Portunia Gate") ${D}$(t "(10 to 30 minutes the first time)" "(10 à 30 minutes la première fois)")${N}"
   compose build || die "$(t "The build failed. Out of memory? See docs/operations.md, Troubleshooting section." "La compilation a échoué. Manque de mémoire ? Voir docs/exploitation.fr.md, section Dépannage.")"
   remove_swap
   ok "$(t "Image built" "Image construite")"
@@ -231,7 +231,7 @@ build_image() {
 install_docker_wrapper() {
   cat >"$DOCKER_WRAPPER" <<EOF
 #!/bin/sh
-# Commande heimdia du serveur : relaie vers le bastion dans son conteneur ($DIR).
+# Commande heimdia du serveur : relaie vers la Gate dans son conteneur ($DIR).
 # Installée par installer.sh. .env (mot de passe de la base) n'est lisible que par root.
 if [ "\$(id -u)" -ne 0 ]; then exec sudo -- "\$0" "\$@"; fi
 cd "$DIR" || exit 1
@@ -239,9 +239,9 @@ cd "$DIR" || exit 1
 case "\${HEIMDIA_LANG:-\${LC_ALL:-\${LC_MESSAGES:-\${LANG:-}}}}" in fr*) lang=fr ;; *) lang=en ;; esac
 if ! docker compose ps --status running --format '{{.Service}}' | grep -qx heimdia; then
   if [ "\$lang" = fr ]; then
-    echo "Le bastion est arrêté. Démarrez-le : cd $DIR && docker compose up -d" >&2
+    echo "La Gate est arrêté. Démarrez-le : cd $DIR && docker compose up -d" >&2
   else
-    echo "The bastion is stopped. Start it: cd $DIR && docker compose up -d" >&2
+    echo "The Gate is stopped. Start it: cd $DIR && docker compose up -d" >&2
   fi
   exit 1
 fi
@@ -274,10 +274,10 @@ wait_api() {
     sleep 1
   done
   if [ "$MODE" = docker ]; then
-    die "$(t "The bastion is not answering on port ${port:-8443}: docker compose logs heimdia" "Le bastion ne répond pas sur le port ${port:-8443} : docker compose logs heimdia")"
+    die "$(t "The Gate is not answering on port ${port:-8443}: docker compose logs heimdia" "La Gate ne répond pas sur le port ${port:-8443} : docker compose logs heimdia")"
   fi
   journalctl -u heimdia -n 15 --no-pager >&2 || true
-  die "$(t "The bastion is not answering on port ${port:-8443}: journalctl -u heimdia" "Le bastion ne répond pas sur le port ${port:-8443} : journalctl -u heimdia")"
+  die "$(t "The Gate is not answering on port ${port:-8443}: journalctl -u heimdia" "La Gate ne répond pas sur le port ${port:-8443} : journalctl -u heimdia")"
 }
 
 open_firewall() {
@@ -300,7 +300,7 @@ summary() {
   echo
   echo "  ┌──────────────────────────────────────────────────────────────────────────"
   if [ "$L" = fr ]; then
-    echo "  │ ${B}Dans Portunia${N} : Extensions › activer Heimdia, puis Bastions › Ajouter un bastion"
+    echo "  │ ${B}Dans Portunia${N} : Extensions › activer Portunia Gate, puis Gates › Ajouter une Gate"
     echo "  │"
     echo "  │   Adresse      ${B}$addr${N}"
     echo "  │   Empreinte    ${B}$fingerprint${N}"
@@ -314,7 +314,7 @@ summary() {
     echo "  │"
     echo "  │ Accès SSH direct : ssh -p ${ssh_port:-2222} <identifiant>@$(address)"
   else
-    echo "  │ ${B}In Portunia${N}: Extensions › enable Heimdia, then Bastions › Add a bastion"
+    echo "  │ ${B}In Portunia${N}: Extensions › enable Portunia Gate, then Gates › Add a Gate"
     echo "  │"
     echo "  │   Address      ${B}$addr${N}"
     echo "  │   Fingerprint  ${B}$fingerprint${N}"
@@ -339,7 +339,7 @@ questions() {
   HEIMDIA_SSH_PORT=${HEIMDIA_SSH_PORT:-$(env_value HEIMDIA_SSH_PORT)}
   HEIMDIA_API_PORT=${HEIMDIA_API_PORT:-$(env_value HEIMDIA_API_PORT)}
   TZ=${TZ:-$(env_value TZ)}
-  NOM=$(ask "$(t "Bastion name, shown in Portunia" "Nom du bastion, affiché dans Portunia")" "${HEIMDIA_NOM:-Heimdia}")
+  NOM=$(ask "$(t "Gate name, shown in Portunia" "Nom de la Gate, affiché dans Portunia")" "${HEIMDIA_NOM:-Portunia Gate}")
   while :; do
     ADMIN=$(ask "$(t "Administrator login" "Identifiant de l'administrateur")" "${HEIMDIA_ADMIN:-admin}")
     [[ "$ADMIN" =~ ^[a-z0-9][a-z0-9._-]{0,31}$ ]] && break
@@ -347,7 +347,7 @@ questions() {
     interactive || die "$(t "Invalid login: $ADMIN" "Identifiant invalide : $ADMIN")"
   done
   while :; do
-    SSH_PORT=$(ask "$(t "Bastion SSH port" "Port SSH du bastion")" "${HEIMDIA_SSH_PORT:-2222}")
+    SSH_PORT=$(ask "$(t "Gate SSH port" "Port SSH de la Gate")" "${HEIMDIA_SSH_PORT:-2222}")
     port_busy "$SSH_PORT" || break
     warn "$(t "Port $SSH_PORT is already used on this server." "Le port $SSH_PORT est déjà utilisé sur ce serveur.")"
     interactive || die "$(t "Port $SSH_PORT in use" "Port $SSH_PORT occupé")"
@@ -407,7 +407,7 @@ finish() {
 
 install_native() {
   use_mode paquet
-  echo "${B}$(t "Heimdia — installation" "Heimdia — installation")${N} ${D}$(t "(Debian package)" "(paquet Debian)")${N}"
+  echo "${B}$(t "Portunia Gate — installation" "Portunia Gate — installation")${N} ${D}$(t "(Debian package)" "(paquet Debian)")${N}"
   step "$(t "Checks" "Vérifications")"
   check_system
   questions
@@ -418,8 +418,8 @@ install_native() {
   (
     umask 027
     cat >"$ENV_NATIVE" <<EOF
-# Réglages de Heimdia, créés par installer.sh. Après modification : sudo systemctl restart heimdia
-# Heimdia settings, created by installer.sh. After a change: sudo systemctl restart heimdia
+# Réglages de Portunia Gate, créés par installer.sh. Après modification : sudo systemctl restart heimdia
+# Portunia Gate settings, created by installer.sh. After a change: sudo systemctl restart heimdia
 HEIMDIA_DATABASE_URL=postgres://_heimdia@localhost/heimdia?host=/var/run/postgresql
 HEIMDIA_SSH_PORT=$SSH_PORT
 HEIMDIA_API_PORT=$API_PORT
@@ -432,11 +432,11 @@ EOF
   set_language
   systemctl enable --now heimdia >/dev/null 2>&1 || true
   wait_api
-  ok "$(t "Bastion started (heimdia service, restarts with the server)" "Bastion démarré (service heimdia, redémarre seul avec le serveur)")"
+  ok "$(t "Gate started (heimdia service, restarts with the server)" "Gate démarré (service heimdia, redémarre seul avec le serveur)")"
   finish
 }
 
-# Le bastion parle la langue de l'assistant (modifiable ensuite dans Portunia, Administrer › Réglages).
+# La Gate parle la langue de l'assistant (modifiable ensuite dans Portunia, Administrer › Réglages).
 set_language() {
   if [ "$MODE" = docker ]; then
     compose run --rm -T -e HEIMDIA_LANG="$L" heimdia setting language "$L" >/dev/null
@@ -448,7 +448,7 @@ set_language() {
 install_with_docker() {
   use_mode docker
   [ -f "$DIR/Dockerfile" ] || die "$(t "Docker mode runs from a copy of the repository: git clone https://github.com/jpiperault/Heimdia.git" "Le mode Docker s'utilise depuis une copie du dépôt : git clone https://github.com/jpiperault/Heimdia.git")"
-  echo "${B}$(t "Heimdia — installation" "Heimdia — installation")${N} ${D}(Docker, $DIR)${N}"
+  echo "${B}$(t "Portunia Gate — installation" "Portunia Gate — installation")${N} ${D}(Docker, $DIR)${N}"
   step "$(t "Checks" "Vérifications")"
   check_system
   check_docker
@@ -469,23 +469,23 @@ EOF
   )
   ok "$(t "Settings saved in .env (database password generated)" "Réglages enregistrés dans .env (mot de passe de la base généré)")"
   build_image
-  step "$(t "Preparing the bastion" "Préparation du bastion")"
+  step "$(t "Preparing the Gate" "Préparation de la Gate")"
   initialize
   set_language
   local out
-  out=$(compose up -d 2>&1) || { echo "$out"; die "$(t "The bastion does not start." "Le bastion ne démarre pas.")"; }
+  out=$(compose up -d 2>&1) || { echo "$out"; die "$(t "The Gate does not start." "La Gate ne démarre pas.")"; }
   wait_api
-  ok "$(t "Bastion started (restarts with the server)" "Bastion démarré (redémarre seul avec le serveur)")"
+  ok "$(t "Gate started (restarts with the server)" "Gate démarré (redémarre seul avec le serveur)")"
   install_docker_wrapper
   ok "$(t "Command ${B}heimdia${N} installed (e.g. sudo heimdia user list)" "Commande ${B}heimdia${N} installée (ex. sudo heimdia user list)")"
   finish
 }
 
-# ---------- Bastion déjà installé ----------
+# ---------- Gate déjà installé ----------
 
 update() {
-  echo "${B}$(t "Heimdia — update" "Heimdia — mise à jour")${N}"
-  warn "$(t "The bastion restarts at the end: open sessions will be cut." "Le bastion redémarre à la fin : les sessions ouvertes seront coupées.")"
+  echo "${B}$(t "Portunia Gate — update" "Portunia Gate — mise à jour")${N}"
+  warn "$(t "The Gate restarts at the end: open sessions will be cut." "La Gate redémarre à la fin : les sessions ouvertes seront coupées.")"
   confirm "$(t "Continue?" "Continuer ?")" || exit 0
   local before
   before=$(hcmd info | sed -n 1p)
@@ -497,7 +497,7 @@ update() {
     check_build_memory
     build_image
     local out
-    out=$(compose up -d 2>&1) || { echo "$out"; die "$(t "The bastion does not restart." "Le bastion ne redémarre pas.")"; }
+    out=$(compose up -d 2>&1) || { echo "$out"; die "$(t "The Gate does not restart." "La Gate ne redémarre pas.")"; }
     install_docker_wrapper
   else
     install_package   # le paquet redémarre le service
@@ -542,7 +542,7 @@ install_cloudflared() {
 
 # Tunnel sortant vers Cloudflare pour le portail web : aucun port entrant à ouvrir.
 setup_portal() {
-  echo "${B}$(t "Heimdia — web portal through Cloudflare Tunnel" "Heimdia — portail web par Cloudflare Tunnel")${N}"
+  echo "${B}$(t "Portunia Gate — web portal through Cloudflare Tunnel" "Portunia Gate — portail web par Cloudflare Tunnel")${N}"
   if [ "$L" = fr ]; then
     echo "  Dans Cloudflare Zero Trust › Networks › Tunnels, créez un tunnel « Cloudflared »,"
     echo "  puis copiez le jeton de sa commande d'installation (la longue suite après --token)."
@@ -583,7 +583,7 @@ setup_portal() {
 menu() {
   local where
   if [ "$MODE" = docker ]; then where="Docker, $DIR"; else where=$(t "Debian package" "paquet Debian"); fi
-  echo "${B}$(t "Heimdia is already installed" "Heimdia est déjà installé")${N} ${D}($where)${N}"
+  echo "${B}$(t "Portunia Gate is already installed" "Portunia Gate est déjà installé")${N} ${D}($where)${N}"
   echo
   echo "  1) $(t "Show the details for Portunia" "Afficher les informations pour Portunia")"
   echo "  2) $(t "Update" "Mettre à jour")"
@@ -601,7 +601,7 @@ menu() {
 }
 
 if installed_native; then
-  [ "$MODE" != docker ] || die "$(t "Heimdia is already installed as a Debian package on this server." "Heimdia est déjà installé en paquet Debian sur ce serveur.")"
+  [ "$MODE" != docker ] || die "$(t "Portunia Gate is already installed as a Debian package on this server." "Portunia Gate est déjà installé en paquet Debian sur ce serveur.")"
   use_mode paquet
 elif installed_docker; then
   use_mode docker
@@ -609,7 +609,7 @@ elif installed_docker; then
 else
   case $ACTION in
     '') if [ "$MODE" = docker ]; then install_with_docker; else install_native; fi; exit 0 ;;
-    *) die "$(t "Heimdia is not installed on this server: first run sudo $0" "Heimdia n'est pas installé sur ce serveur : lancez d'abord sudo $0")" ;;
+    *) die "$(t "Portunia Gate is not installed on this server: first run sudo $0" "Portunia Gate n'est pas installé sur ce serveur : lancez d'abord sudo $0")" ;;
   esac
 fi
 

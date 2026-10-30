@@ -103,7 +103,7 @@ pub async fn agent(state: Arc<State>, mut socket: WebSocket, addr: String) {
     let s = match settings(&state).await {
         Ok(s) if s.enabled => s,
         _ => {
-            send_json(&mut socket, json!({ "type": "erreur", "message": t!("Assistance is disabled on this bastion", "L'assistance est désactivée sur ce bastion") })).await;
+            send_json(&mut socket, json!({ "type": "erreur", "message": t!("Assistance is disabled on this Gate", "L'assistance est désactivée sur cette Gate") })).await;
             return;
         }
     };

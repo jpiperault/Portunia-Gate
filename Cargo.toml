@@ -1,7 +1,7 @@
 [package]
 name = "heimdia"
-version = "0.11.1"
-description = "Bastion SSH de Portunia : accès contrôlés, coffre, enregistrement et journal d'audit"
+version = "0.12.0"
+description = "Passerelle SSH et Bureau à distance de Portunia : accès contrôlés, coffre, enregistrement et journal d'audit"
 edition = "2021"
 publish = false
 
@@ -40,7 +40,7 @@ libc = "0.2"
 maintainer = "Julien Piperault <jpiperault@users.noreply.github.com>"
 copyright = "Julien Piperault"
 extended-description = """\
-Les utilisateurs passent par Heimdia pour atteindre les serveurs : contrôle des accès, \
+Les utilisateurs passent par Portunia Gate pour atteindre les serveurs : contrôle des accès, \
 compte fourni par le coffre, sessions enregistrées et signées, journal d'audit chaîné. \
 S'administre depuis Portunia."""
 section = "net"

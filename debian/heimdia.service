@@ -1,6 +1,6 @@
-# Bastion Heimdia (paquet Debian). Réglages : /etc/heimdia/heimdia.env
+# Gate (paquet Debian). Réglages : /etc/heimdia/heimdia.env
 [Unit]
-Description=Heimdia, bastion SSH de Portunia
+Description=Portunia Gate, passerelle SSH et Bureau à distance de Portunia
 Documentation=https://github.com/jpiperault/Heimdia
 After=network-online.target postgresql.service
 Wants=network-online.target
@@ -15,7 +15,7 @@ RestartSec=5
 UMask=0077
 LimitNOFILE=65536
 
-# Durcissement : le bastion n'écrit que dans /var/lib/heimdia et ne voit pas le reste du système.
+# Durcissement : la Gate n'écrit que dans /var/lib/heimdia et ne voit pas le reste du système.
 NoNewPrivileges=yes
 ProtectSystem=strict
 ReadWritePaths=/var/lib/heimdia
