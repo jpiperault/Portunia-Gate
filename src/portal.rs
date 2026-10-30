@@ -204,7 +204,6 @@ fn router(state: Arc<State>, cloudflare_only: bool) -> Router {
         .route("/ws-rdp", get(desktop))
         // Assistance à distance : téléchargement de Portunia Assist et relais (sans compte).
         .route("/assistance", get(page_assist))
-        .route("/assistance/j/{place}", get(page_assist_link))
         .route("/assistance/portunia-assist.exe", get(assist_agent_file))
         .route("/assistance/relais", get(assist_agent))
         .layer(middleware::from_fn_with_state(portal.clone(), guard))
@@ -359,10 +358,6 @@ async fn page_session(Path(_nom): Path<String>) -> Response {
 }
 
 async fn page_assist() -> Response {
-    page(ASSIST)
-}
-
-async fn page_assist_link(Path(_place): Path<String>) -> Response {
     page(ASSIST)
 }
 

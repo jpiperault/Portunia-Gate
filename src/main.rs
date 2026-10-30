@@ -424,6 +424,18 @@ async fn run(cli: Cli) -> Result<()> {
             if tls::create_missing(&state.config.data_dir, &tls_names())? {
                 tracing::info!("certificat de l'API créé, empreinte {}", tls::fingerprint(&state.config.data_dir)?);
             }
+            // Assistance active : Portunia Assist tenu à jour (au démarrage, puis chaque jour).
+            let s = state.clone();
+            tokio::spawn(async move {
+                loop {
+                    if assist::settings(&s).await.map(|x| x.enabled).unwrap_or(false) {
+                        if let Err(e) = assist::fetch_agent(s.clone()).await {
+                            tracing::warn!("{} {e:#}", t!("Portunia Assist download:", "téléchargement de Portunia Assist :"));
+                        }
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(24 * 3600)).await;
+                }
+            });
             tokio::try_join!(sshd::run(state.clone()), api::run(state.clone()), portal::run(state.clone()), health::run(state.clone()))?;
             Ok(())
         }

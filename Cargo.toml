@@ -1,6 +1,6 @@
 [package]
 name = "heimdia"
-version = "0.10.0"
+version = "0.11.0"
 description = "Bastion SSH de Portunia : accès contrôlés, coffre, enregistrement et journal d'audit"
 edition = "2021"
 publish = false

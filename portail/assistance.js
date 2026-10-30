@@ -1,12 +1,9 @@
-// Page de téléchargement de Portunia Assist. Avec un lien d'invitation (/assistance/j/123#456789),
-// le code est mis dans le nom du fichier téléchargé : le programme le lit et se relie tout seul.
-// Le secret (après #) ne quitte jamais le navigateur.
+// Page de téléchargement de Portunia Assist. Le nom du fichier porte l'adresse de ce bastion :
+// le programme y lit où se connecter (« Portunia Assist (acces.exemple.fr).exe »).
 'use strict';
 
 const dl = document.getElementById('dl');
-const place = (location.pathname.match(/\/assistance\/j\/(\d{3})$/) || [])[1];
-const secret = (location.hash.match(/^#(\d{6})$/) || [])[1];
-if (place && secret) dl.setAttribute('download', `Portunia Assist ${place}${secret}.exe`);
+dl.setAttribute('download', `Portunia Assist (${location.host}).exe`);
 
 // Programme absent du serveur : on le dit plutôt que de télécharger une page d'erreur.
 fetch('/assistance/portunia-assist.exe', { method: 'HEAD' }).then((r) => {

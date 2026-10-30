@@ -250,6 +250,21 @@ Couper le portail (interrupteur) affiche « Portail fermé » et ferme aussitôt
 
 Proxy Cloudflare au lieu du tunnel : dans `/etc/heimdia/heimdia.env`, `HEIMDIA_PORTAL_TLS_LISTEN=0.0.0.0:8446` (paquet), ou `HEIMDIA_PORTAL_PORT=0.0.0.0:8446` dans `.env` (Docker), puis redémarrer ; dans Cloudflare, l'adresse proxifiée pointe vers ce port en HTTPS (mode SSL « Full »).
 
+## Assistance à distance
+
+Prendre la main sur le PC d'un proche ou d'un client avec **Portunia Assist** (Heimdia 0.11 et suivants, Portunia 0.48 et suivants). La personne va sur `https://adresse-du-portail/assistance`, télécharge Portunia Assist (un seul programme, sans installation ni compte) et vous lit un code à 9 chiffres ; vous le tapez dans Portunia (**Assistance à distance** dans la barre latérale). Elle voit votre nom et choisit : voir seulement, ou voir et contrôler. Son écran s'ouvre dans un onglet Bureau à distance.
+
+| | |
+|---|---|
+| Relais | Le bastion ne fait que mettre en relation et transmettre : la liaison est chiffrée de bout en bout à partir du code (échange de clés SPAKE2, ChaCha20-Poly1305). Le bastion ne voit ni l'écran ni la frappe, et ne les enregistre pas. |
+| Code | À usage unique, donné par le bastion à l'ouverture de Portunia Assist ; un code faux met fin à la tentative et la personne en reçoit un nouveau. |
+| Qui | Les membres du **groupe des dépanneurs** seulement (« Dépanneurs » par défaut), connectés au bastion depuis Portunia. |
+| Personne aidée | Un cadre et une barre **Arrêter** restent sur son écran (invisibles dans l'image partagée) ; Échap trois fois arrête aussi. L'assistance s'arrête au bout de la durée maximale (4 heures par défaut). |
+| Programme | Le bastion télécharge `portunia-assist.exe` depuis les versions de Portunia à l'activation de l'assistance, puis une fois par jour, et vérifie son empreinte SHA-256. Il n'est pas encore signé : Windows SmartScreen avertit à la première ouverture (« Informations complémentaires » › « Exécuter quand même »). |
+| Journal | `assistance.ouverte`, `assistance.fermee`, `assistance.reglage`, `assistance.place_inconnue`, `assistance.programme`. |
+
+**Mise en place** : la page et le relais utilisent l'adresse du portail web (voir [Portail web](#portail-web), étapes 1 à 3 ; le portail lui-même peut rester coupé). Dans Portunia, activer l'extension **Assistance à distance**, puis menu **⋯** du bastion › **Administrer** › **Assistance** : groupe des dépanneurs, durée maximale, puis l'interrupteur. Créer le groupe et y ajouter les comptes des dépanneurs.
+
 ## Se connecter sans Portunia
 
 ```bash
@@ -312,7 +327,8 @@ Voir aussi [docs/exploitation.fr.md](docs/exploitation.fr.md) : sauvegardes, mis
 1. **Socle** : proxy SSH, trois modes, coffre, comptes et TOTP, droits, enregistrement signé, journal chaîné, Docker Compose.
 2. **Intégration Portunia** : API, ajout du bastion dans Portunia, serveurs dans la barre latérale, jetons à usage unique, première connexion, administration complète, clé générée et installée sur les serveurs du coffre. Assistant d'installation (0.3), paquet Debian (0.4).
 3. **Audit** : relecture et recherche (0.5), vue en direct et coupure, vidéo MP4 à la demande, lecteur détachable, conservation réglable avec estimation du disque, syslog et CSV.
-4. **Bureau à distance** : rebond (0.6), enregistré avec enregistrement signé (0.8), puis relecture, coffre (le bastion ouvre la session Windows avec le compte du coffre), règles (presse-papiers, son).
+4. **Bureau à distance** : rebond (0.6), enregistré avec enregistrement signé (0.8), relecture (0.10), puis coffre (le bastion ouvre la session Windows avec le compte du coffre), règles (presse-papiers, son).
 5. **Portail web** : SSH (0.7) et Bureau à distance (0.8) dans le navigateur derrière Cloudflare, puis clés d'accès (passkeys), personnalisation.
-6. **Exploitation** : sauvegarde intégrée, dépôt apt pour les mises à jour, paquet ARM, imports (Portunia, CSV), console web activable.
-7. **Console maître** : un Heimdia central pour les prestataires, des relais chez les clients.
+6. **Assistance à distance** : relais Portunia Assist avec un code (0.11), puis lien d'invitation, accès sans surveillance à ses propres PC, transfert de fichiers, discussion.
+7. **Exploitation** : sauvegarde intégrée, dépôt apt pour les mises à jour, paquet ARM, imports (Portunia, CSV), console web activable.
+8. **Console maître** : un Heimdia central pour les prestataires, des relais chez les clients.

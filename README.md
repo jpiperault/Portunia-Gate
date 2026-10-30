@@ -237,6 +237,21 @@ Turning the portal off (switch) shows "Portal closed" and immediately closes ope
 
 Cloudflare proxy instead of the tunnel: in `/etc/heimdia/heimdia.env`, `HEIMDIA_PORTAL_TLS_LISTEN=0.0.0.0:8446` (package), or `HEIMDIA_PORTAL_PORT=0.0.0.0:8446` in `.env` (Docker), then restart; in Cloudflare, the proxied address points to that port over HTTPS ("Full" SSL mode).
 
+## Remote assistance
+
+Take control of a relative's or a customer's PC with **Portunia Assist** (Heimdia 0.11 and later, Portunia 0.48 and later). The person goes to `https://your-portal-address/assistance`, downloads Portunia Assist (a single program, no install, no account) and reads you a 9-digit code; you type it in Portunia (**Remote assistance** in the sidebar). They see your name and choose: view only, or view and control. Their screen opens in a Remote Desktop tab.
+
+| | |
+|---|---|
+| Relay | The bastion only puts the two sides in touch and passes the data on: the link is encrypted end to end from the code (SPAKE2 key exchange, ChaCha20-Poly1305). The bastion never sees the screen nor the keystrokes, and does not record them. |
+| Code | Single use, given out by the bastion when Portunia Assist opens; a wrong code ends the attempt and the person gets a new one. |
+| Who | Members of the **helpers group** only ("Dépanneurs" by default), signed in to the bastion from Portunia. |
+| Person helped | A frame and a **Stop** bar stay on their screen (not visible in the shared image); pressing Esc three times also stops. The assistance ends after the maximum duration (4 hours by default). |
+| Program | The bastion downloads `portunia-assist.exe` from the Portunia releases when assistance is enabled, then once a day, and checks its SHA-256 fingerprint. It is not code-signed yet: Windows SmartScreen warns on first opening ("More info" › "Run anyway"). |
+| Audit log | `assistance.ouverte`, `assistance.fermee`, `assistance.reglage`, `assistance.place_inconnue`, `assistance.programme`. |
+
+**Setup**: the page and the relay use the web portal address (see [Web portal](#web-portal), steps 1 to 3; the portal itself can stay off). In Portunia, enable the **Remote assistance** extension, then bastion **⋯** menu › **Administer** › **Assistance**: helpers group, maximum duration, then the switch. Create the group and add the helpers' accounts.
+
 ## Connecting without Portunia
 
 ```bash
@@ -299,7 +314,8 @@ See also [docs/operations.md](docs/operations.md): backups, updates, logs, troub
 1. **Core**: SSH proxy, three modes, vault, accounts and TOTP, permissions, signed recording, chained audit log, Docker Compose.
 2. **Portunia integration**: API, adding the bastion in Portunia, servers in the sidebar, one-time tokens, first sign-in, full administration, keys generated and installed on vault servers. Setup wizard (0.3), Debian package (0.4).
 3. **Audit**: replay and search (0.5), live view and session termination, on-demand MP4 video, detachable player, configurable retention with disk estimate, syslog and CSV.
-4. **Remote Desktop**: jump (0.6), recorded with signed recording (0.8), then replay, vault (the bastion opens the Windows session with the vault account), rules (clipboard, sound).
+4. **Remote Desktop**: jump (0.6), recorded with signed recording (0.8), replay (0.10), then vault (the bastion opens the Windows session with the vault account), rules (clipboard, sound).
 5. **Web portal**: SSH (0.7) and Remote Desktop (0.8) in the browser behind Cloudflare, then passkeys, branding.
-6. **Operations**: built-in backup, apt repository for updates, ARM package, imports (Portunia, CSV), optional web console.
-7. **Master console**: a central Heimdia for service providers, relays at customers' sites.
+6. **Remote assistance**: Portunia Assist relay with a code (0.11), then invitation link, unattended access to your own PCs, file transfer, chat.
+7. **Operations**: built-in backup, apt repository for updates, ARM package, imports (Portunia, CSV), optional web console.
+8. **Master console**: a central Heimdia for service providers, relays at customers' sites.
