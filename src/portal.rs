@@ -202,6 +202,11 @@ fn router(state: Arc<State>, cloudflare_only: bool) -> Router {
         .route("/bureau/{nom}", get(page_desktop))
         .route("/api/rdp/{nom}", post(desktop_ticket))
         .route("/ws-rdp", get(desktop))
+        // Assistance à distance : téléchargement de Portunia Assist et relais (sans compte).
+        .route("/assistance", get(page_assist))
+        .route("/assistance/j/{place}", get(page_assist_link))
+        .route("/assistance/portunia-assist.exe", get(assist_agent_file))
+        .route("/assistance/relais", get(assist_agent))
         .layer(middleware::from_fn_with_state(portal.clone(), guard))
         // Pages et messages dans la langue du sélecteur ou du navigateur.
         .layer(middleware::from_fn(crate::lang::middleware))
@@ -307,6 +312,7 @@ fn internal(e: impl std::fmt::Display) -> Response {
 const INDEX: &str = include_str!("../portail/index.html");
 const SESSION: &str = include_str!("../portail/session.html");
 const DESKTOP: &str = include_str!("../portail/bureau.html");
+const ASSIST: &str = include_str!("../portail/assistance.html");
 
 /// Pages et scripts portent la version du bastion dans les adresses de leurs fichiers
 /// (`?v=__V__`) : après une mise à jour, le navigateur charge les nouveaux, pas ceux en cache.
@@ -352,6 +358,42 @@ async fn page_session(Path(_nom): Path<String>) -> Response {
     page(SESSION)
 }
 
+async fn page_assist() -> Response {
+    page(ASSIST)
+}
+
+async fn page_assist_link(Path(_place): Path<String>) -> Response {
+    page(ASSIST)
+}
+
+/// Portunia Assist, gardé par le bastion (téléchargé à l'activation de l'assistance).
+async fn assist_agent_file(AxState(portal): Ctx) -> Response {
+    let state = &portal.state;
+    match crate::assist::settings(state).await {
+        Ok(s) if s.enabled => {}
+        _ => return err(StatusCode::NOT_FOUND, t!("Remote assistance is disabled", "Assistance à distance désactivée")),
+    }
+    match tokio::fs::read(crate::assist::agent_file(state)).await {
+        Ok(bytes) => (
+            [
+                (header::CONTENT_TYPE, HeaderValue::from_static("application/vnd.microsoft.portable-executable")),
+                (header::CACHE_CONTROL, HeaderValue::from_static("no-cache")),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Err(_) => err(StatusCode::NOT_FOUND, t!("Program not available yet", "Programme pas encore disponible")),
+    }
+}
+
+/// Relais : connexion de Portunia Assist (personne aidée, sans compte).
+async fn assist_agent(AxState(portal): Ctx, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
+    let addr = client_ip(&portal, peer, &headers);
+    let state = portal.state.clone();
+    let lang = crate::lang::get();
+    ws.on_upgrade(move |socket| crate::lang::scope(lang, crate::assist::agent(state, socket, addr)))
+}
+
 async fn page_desktop(Path(_nom): Path<String>) -> Response {
     page(DESKTOP)
 }
@@ -361,6 +403,7 @@ async fn asset(Path(fichier): Path<String>) -> Response {
         "app.css" => ("text/css; charset=utf-8", include_bytes!("../portail/app.css")),
         "app.js" => ("text/javascript; charset=utf-8", include_bytes!("../portail/app.js")),
         "session.js" => ("text/javascript; charset=utf-8", include_bytes!("../portail/session.js")),
+        "assistance.js" => ("text/javascript; charset=utf-8", include_bytes!("../portail/assistance.js")),
         "xterm.js" => ("text/javascript; charset=utf-8", include_bytes!("../portail/xterm.js")),
         "xterm.css" => ("text/css; charset=utf-8", include_bytes!("../portail/xterm.css")),
         "addon-fit.js" => ("text/javascript; charset=utf-8", include_bytes!("../portail/addon-fit.js")),
@@ -421,7 +464,7 @@ async fn web_session(portal: &Portal, headers: &HeaderMap, s: &Settings) -> Resu
     Ok(Some(WebSession { user, expires }))
 }
 
-async fn in_group(db: &sqlx::PgPool, user: Uuid, group: &str) -> Result<bool> {
+pub(crate) async fn in_group(db: &sqlx::PgPool, user: Uuid, group: &str) -> Result<bool> {
     if group.trim().is_empty() {
         return Ok(false);
     }

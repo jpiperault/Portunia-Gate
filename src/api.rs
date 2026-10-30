@@ -116,6 +116,9 @@ pub async fn run(state: Arc<State>) -> anyhow::Result<()> {
         .route("/api/v1/audit/sessions", get(audit_sessions))
         .route("/api/v1/audit/sessions/{id}/enregistrement", get(audit_recording))
         .route("/api/v1/audit/sessions/{id}/flux", get(audit_rdp_stream))
+        .route("/api/v1/assistance", get(assist_status))
+        .route("/api/v1/assistance/{place}", get(assist_join))
+        .route("/api/v1/admin/assistance", get(admin_assist).put(admin_assist_update))
         .with_state(api)
         // Messages dans la langue demandée par Portunia (Accept-Language).
         .layer(axum::middleware::from_fn(crate::lang::middleware));
@@ -1653,6 +1656,106 @@ async fn rdp_passage(
 }
 
 // ---------- Administration : portail web ----------
+
+// ---------- Assistance à distance (Portunia Assist) ----------
+
+/// Pour la barre latérale de Portunia : le relais est-il actif, puis-je l'utiliser, et l'adresse
+/// à donner à la personne aidée.
+async fn assist_status(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
+    let user = caller(&api, &headers).await?;
+    let state = &api.state;
+    let s = crate::assist::settings(state).await?;
+    let portal = crate::portal::settings(state).await?;
+    let page = if portal.url.is_empty() { String::new() } else { format!("{}/assistance", portal.url.trim_end_matches('/')) };
+    Ok(Json(json!({
+        "actif": s.enabled,
+        "autorise": crate::assist::can_help(state, user.id).await?,
+        "adresse": page,
+        "programme": crate::assist::agent_file(state).exists(),
+    })))
+}
+
+/// Le dépanneur rejoint la place donnée par la personne aidée (WebSocket).
+async fn assist_join(AxState(api): Ctx, headers: HeaderMap, Path(place): Path<String>, ws: axum::extract::ws::WebSocketUpgrade) -> Result<Response, ApiError> {
+    let user = caller(&api, &headers).await?;
+    let state = api.state.clone();
+    if !crate::assist::can_help(&state, user.id).await? {
+        return Err(err(StatusCode::FORBIDDEN, t!("Remote assistance is disabled, or not allowed for this account", "L'assistance à distance est désactivée, ou non autorisée pour ce compte")));
+    }
+    if place.len() != 3 || !place.chars().all(|c| c.is_ascii_digit()) {
+        return Err(err(StatusCode::BAD_REQUEST, t!("Invalid code", "Code invalide")));
+    }
+    let name = setting_str(&state, "nom", "Heimdia").await?;
+    let who = format!("{} ({name})", user.login);
+    Ok(ws.on_upgrade(move |socket| crate::assist::helper(state, socket, user.login, who, place)))
+}
+
+async fn admin_assist(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
+    admin(&api, &headers).await?;
+    let state = &api.state;
+    let s = crate::assist::settings(state).await?;
+    let groups: Vec<String> = sqlx::query_scalar("SELECT name FROM groups ORDER BY name").fetch_all(&state.db).await?;
+    let portal = crate::portal::settings(state).await?;
+    let (count, today): (i64, i64) = sqlx::query_as(
+        "SELECT count(*) FILTER (WHERE event = 'assistance.ouverte'), count(*) FILTER (WHERE event = 'assistance.ouverte' AND at >= date_trunc('day', now()))
+         FROM audit WHERE event = 'assistance.ouverte'",
+    )
+    .fetch_one(&state.db)
+    .await?;
+    Ok(Json(json!({
+        "actif": s.enabled,
+        "groupe": s.group,
+        "groupes": groups,
+        "duree_h": s.hours,
+        "adresse": if portal.url.is_empty() { String::new() } else { format!("{}/assistance", portal.url.trim_end_matches('/')) },
+        "programme": crate::assist::agent_file(state).exists(),
+        "en_attente": state.assist.waiting_count(),
+        "total": count,
+        "aujourd_hui": today,
+    })))
+}
+
+#[derive(Deserialize)]
+struct AssistBody {
+    actif: Option<bool>,
+    groupe: Option<String>,
+    duree_h: Option<i64>,
+}
+
+async fn admin_assist_update(AxState(api): Ctx, headers: HeaderMap, Json(body): Json<AssistBody>) -> ApiResult {
+    let actor = admin(&api, &headers).await?;
+    let state = &api.state;
+    let db = &state.db;
+    let mut changed = serde_json::Map::new();
+    if let Some(g) = body.groupe {
+        model::set_setting(db, "assistance_groupe", json!(g.trim())).await?;
+        changed.insert("groupe".into(), json!(g.trim()));
+    }
+    if let Some(h) = body.duree_h {
+        if !(1..=12).contains(&h) {
+            return Err(err(StatusCode::BAD_REQUEST, t!("Session duration: 1 to 12 hours", "Durée d'une assistance : 1 à 12 heures")));
+        }
+        model::set_setting(db, "assistance_duree_h", json!(h)).await?;
+        changed.insert("duree_h".into(), json!(h));
+    }
+    if let Some(on) = body.actif {
+        model::set_setting(db, "assistance_actif", json!(on)).await?;
+        changed.insert("actif".into(), json!(on));
+        if on {
+            // Le programme de la personne aidée, servi par la page de téléchargement.
+            let state = api.state.clone();
+            tokio::spawn(async move {
+                if let Err(e) = crate::assist::fetch_agent(state).await {
+                    tracing::warn!("{} {e:#}", t!("Portunia Assist download:", "téléchargement de Portunia Assist :"));
+                }
+            });
+        } else {
+            state.assist.close_all();
+        }
+    }
+    audit::note(db, &actor.login, "assistance.reglage", Value::Object(changed)).await;
+    Ok(Json(json!({ "etat": "ok" })))
+}
 
 async fn admin_portal(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
     admin(&api, &headers).await?;

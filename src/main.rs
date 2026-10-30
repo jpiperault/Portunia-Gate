@@ -6,6 +6,7 @@
 #[macro_use]
 mod lang;
 mod api;
+mod assist;
 mod audit;
 mod auth;
 mod config;
@@ -36,6 +37,8 @@ pub struct State {
     pub config: Config,
     /// Terminaux ouverts depuis le portail web.
     pub web: portal::Live,
+    /// Relais de Portunia Assist : places en attente.
+    pub assist: assist::Rooms,
 }
 
 #[derive(Parser)]
@@ -385,7 +388,7 @@ async fn run(cli: Cli) -> Result<()> {
         }
     }
     let keys = Keys::load(&config.data_dir)?;
-    let state = Arc::new(State { db, keys, config, web: portal::Live::default() });
+    let state = Arc::new(State { db, keys, config, web: portal::Live::default(), assist: assist::Rooms::default() });
 
     match cli.command {
         Command::Init { .. } => unreachable!(),
@@ -534,7 +537,7 @@ async fn init(config: Config, admin: &str, no_admin: bool, provisional: bool, no
     let db = connect_db(&config).await?;
     println!("✓ {}", t!("PostgreSQL database ready", "Base PostgreSQL prête"));
     let keys = Keys::load(&config.data_dir)?;
-    let state = State { db, keys, config, web: portal::Live::default() };
+    let state = State { db, keys, config, web: portal::Live::default(), assist: assist::Rooms::default() };
     if model::setting(&state.db, "site_id").await?.is_none() {
         model::set_setting(&state.db, "site_id", json!(uuid::Uuid::new_v4())).await?;
     }
