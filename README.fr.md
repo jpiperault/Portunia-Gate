@@ -214,14 +214,14 @@ Dans les deux modes, l'utilisateur tape ses identifiants Windows à chaque ouver
 |---|---|---|
 | Chemin | Tunnel par le port SSH du bastion (2222), avec un jeton à usage unique ; la connexion RDP est chiffrée de bout en bout. | Passage du bastion (RDCleanPath, sur le port de l'API ou du portail) avec un jeton à usage unique : le bastion ouvre la connexion chiffrée avec le serveur Windows et relaie la session. |
 | Ce que voit le bastion | Rien du contenu ; il vérifie la règle et journalise (`rebond.ouvert`, durée, octets). | La session (pour l'enregistrer), mais pas le mot de passe : l'authentification Windows (NLA) se fait entre le client et le serveur. |
-| Enregistrement | Non. | Oui, fichier signé (`.rdpcap`) ; relecture dans une prochaine version. |
+| Enregistrement | Non. | Oui, fichier signé (`.rdpcap`) : l'image envoyée par le serveur, les clics, les copier-coller (texte masqué tant qu'un administrateur ne le révèle pas) et la frappe si la règle l'enregistre. Relecture dans Portunia (0.47 ou suivant), comme une session SSH. |
 | Clients | Portunia. | Portunia et le **portail web** (Bureau à distance dans le navigateur). |
 | Certificat du serveur | Vérifié par le client. | Vérifié par le bastion : empreinte gardée à la première connexion, connexion refusée si elle change (`cible.empreinte_differente`). |
 
 Le bastion doit joindre le port 3389 des serveurs Windows. Dans Portunia, l'extension Bureau à distance doit être activée ; sinon les serveurs RDP restent visibles, grisés. Un serveur RDP n'apparaît pas dans le menu `ssh` du bastion et ne s'ouvre pas en terminal.
 
 Le mode **coffre** (compte Windows fourni par le bastion, sans rien taper) et la relecture des sessions RDP arrivent dans les versions suivantes.
-
+Le mode **coffre** (compte Windows fourni par le bastion, sans rien taper) arrive dans une prochaine version.
 ## Portail web
 
 Une page web pour ouvrir ses serveurs depuis n'importe quel navigateur, sans Portunia : connexion, liste des serveurs autorisés, terminal SSH ou Bureau à distance dans un onglet. Elle ne sert pas à l'administration. Le Bureau à distance passe par le passage RDCleanPath du bastion (serveurs en mode enregistré, voir [Bureau à distance](#bureau-à-distance-rdp)). Le portail passe par le serveur SSH du bastion, avec un jeton à usage unique : mêmes règles, même coffre, même enregistrement, même journal. Une session web se relit dans l'audit comme une autre ; son adresse est suivie de « (web) ».

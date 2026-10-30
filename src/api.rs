@@ -115,6 +115,7 @@ pub async fn run(state: Arc<State>) -> anyhow::Result<()> {
         .route("/api/v1/admin/portail/fermer-sessions", post(admin_portal_close))
         .route("/api/v1/audit/sessions", get(audit_sessions))
         .route("/api/v1/audit/sessions/{id}/enregistrement", get(audit_recording))
+        .route("/api/v1/audit/sessions/{id}/flux", get(audit_rdp_stream))
         .with_state(api)
         // Messages dans la langue demandée par Portunia (Accept-Language).
         .layer(axum::middleware::from_fn(crate::lang::middleware));
@@ -1487,8 +1488,9 @@ async fn audit_sessions(AxState(api): Ctx, headers: HeaderMap, Query(q): Query<A
             json!({
                 "id": s.id, "compte": s.login, "serveur": s.target, "type": s.kind, "detail": s.detail, "mode": s.mode,
                 "adresse": s.client_addr, "debut": s.started_at, "fin": s.ended_at, "enregistree": s.recording.is_some(),
-                // Bureau à distance : enregistré et signé, relecture dans une prochaine version.
                 "relisible": s.recording.is_some() && s.kind != "rdp",
+                // Lecteur Bureau à distance : Portunia 0.47 et suivants (les précédents gardent « relecture bientôt »).
+                "relisible_rdp": s.recording.is_some() && s.kind == "rdp",
                 "frappe": s.frappe, "octets": s.bytes,
                 "trouve": hit.map(|(t, extrait)| json!({ "t": t, "extrait": extrait })),
             })
@@ -1502,18 +1504,23 @@ struct RecordingQuery {
     reveler: Option<bool>,
 }
 
-async fn audit_recording(AxState(api): Ctx, headers: HeaderMap, Path(id): Path<Uuid>, Query(q): Query<RecordingQuery>) -> ApiResult {
-    let (user, own) = reader(&api, &headers).await?;
+/// Enregistrement d'une session lisible par l'appelant, avec le contrôle de sa signature.
+struct Loaded {
+    user: User,
+    session: model::AuditSession,
+    raw: Vec<u8>,
+    sha: String,
+    signature: &'static str,
+}
+
+async fn load_recording(api: &Api, headers: &HeaderMap, id: Uuid, reveal: bool) -> Result<Loaded, ApiError> {
+    let (user, own) = reader(api, headers).await?;
     let state = &api.state;
     let s = model::audit_session(&state.db, id)
         .await?
         .filter(|s| own.as_ref().is_none_or(|o| *o == s.login))
         .ok_or_else(|| err(StatusCode::NOT_FOUND, t!("Session not found", "Session introuvable")))?;
     let path = s.recording.clone().ok_or_else(|| err(StatusCode::NOT_FOUND, t!("This session was not recorded", "Cette session n'a pas été enregistrée")))?;
-    if s.kind == "rdp" {
-        return Err(err(StatusCode::CONFLICT, t!("Remote Desktop session recorded and signed: its replay is coming in a later version", "Session Bureau à distance enregistrée et signée : sa relecture arrive dans une prochaine version")));
-    }
-    let reveal = q.reveler.unwrap_or(false);
     if reveal && user.role != "admin" {
         return Err(err(StatusCode::FORBIDDEN, t!("Only an administrator can reveal masked input", "Seul un administrateur peut révéler les saisies masquées")));
     }
@@ -1535,6 +1542,56 @@ async fn audit_recording(AxState(api): Ctx, headers: HeaderMap, Path(id): Path<U
         // Session en cours ou interrompue : pas encore de signature.
         _ => "absente",
     };
+    Ok(Loaded { user, session: s, raw, sha, signature })
+}
+
+/// Relectures déjà faites de cette session (les 20 dernières).
+async fn consultations(state: &State, id: Uuid) -> Result<Vec<Value>, ApiError> {
+    let views: Vec<(String, DateTime<Utc>, String)> = sqlx::query_as(
+        "SELECT actor, at, event FROM audit WHERE event IN ('enregistrement.consulte', 'enregistrement.revele') AND detail->>'session' = $1
+         ORDER BY seq DESC LIMIT 20",
+    )
+    .bind(id.to_string())
+    .fetch_all(&state.db)
+    .await?;
+    Ok(views.into_iter().map(|(qui, date, evenement)| json!({ "qui": qui, "date": date, "evenement": evenement })).collect())
+}
+
+async fn audit_recording(AxState(api): Ctx, headers: HeaderMap, Path(id): Path<Uuid>, Query(q): Query<RecordingQuery>) -> ApiResult {
+    let reveal = q.reveler.unwrap_or(false);
+    let Loaded { user, session: s, raw, sha, signature } = load_recording(&api, &headers, id, reveal).await?;
+    let state = &api.state;
+    let session = json!({
+        "id": s.id, "compte": s.login, "serveur": s.target, "type": s.kind, "detail": s.detail, "mode": s.mode,
+        "adresse": s.client_addr, "debut": s.started_at, "fin": s.ended_at, "frappe": s.frappe, "octets": raw.len(),
+    });
+    // Bureau à distance : les événements ici, l'image par /flux.
+    if s.kind == "rdp" {
+        let replay = tokio::task::spawn_blocking(move || crate::rdpcap::read(&raw))
+            .await
+            .map_err(|e| anyhow!("{e}"))?
+            .map_err(|e| err(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
+        let mut events = replay.events;
+        let hidden = if reveal { 0 } else { crate::rdpcap::mask_clipboard(&mut events) };
+        let clips = events.iter().filter(|e| e["k"] == "presse-papiers").count();
+        audit::note(
+            &state.db,
+            &user.login,
+            if reveal { "enregistrement.revele" } else { "enregistrement.consulte" },
+            json!({ "session": id, "cible": s.target, "compte": s.login }),
+        )
+        .await;
+        return Ok(Json(json!({
+            "session": session,
+            "rdp": { "evenements": events, "duree": replay.duration, "images": replay.display.len(), "compte": crate::rdpcap::counts(&events) },
+            "revele": reveal,
+            "saisies_masquees": if reveal { clips } else { hidden },
+            "signature": signature,
+            "empreinte": sha,
+            "commandes_sensibles": sensitive_commands(state).await?,
+            "consultations": consultations(state, id).await?,
+        })));
+    }
     let text = String::from_utf8_lossy(&raw);
     let cast = crate::replay::Cast::parse(&text);
     let hidden = cast.lines.iter().filter(|l| l.secret).count();
@@ -1546,26 +1603,38 @@ async fn audit_recording(AxState(api): Ctx, headers: HeaderMap, Path(id): Path<U
         json!({ "session": id, "cible": s.target, "compte": s.login }),
     )
     .await;
-    let views: Vec<(String, DateTime<Utc>, String)> = sqlx::query_as(
-        "SELECT actor, at, event FROM audit WHERE event IN ('enregistrement.consulte', 'enregistrement.revele') AND detail->>'session' = $1
-         ORDER BY seq DESC LIMIT 20",
-    )
-    .bind(id.to_string())
-    .fetch_all(&state.db)
-    .await?;
     Ok(Json(json!({
-        "session": {
-            "id": s.id, "compte": s.login, "serveur": s.target, "type": s.kind, "detail": s.detail, "mode": s.mode,
-            "adresse": s.client_addr, "debut": s.started_at, "fin": s.ended_at, "frappe": s.frappe, "octets": raw.len(),
-        },
+        "session": session,
         "cast": content,
         "revele": reveal,
         "saisies_masquees": hidden,
         "signature": signature,
         "empreinte": sha,
         "commandes_sensibles": sensitive_commands(state).await?,
-        "consultations": views.into_iter().map(|(qui, date, evenement)| json!({ "qui": qui, "date": date, "evenement": evenement })).collect::<Vec<_>>(),
+        "consultations": consultations(state, id).await?,
     })))
+}
+
+/// Image d'une session Bureau à distance, pour le lecteur de Portunia : blocs temps (f64),
+/// longueur (u32), message RDP du serveur. Sans presse-papiers ni authentification.
+/// La consultation est inscrite au journal par /enregistrement, que le lecteur appelle d'abord.
+async fn audit_rdp_stream(AxState(api): Ctx, headers: HeaderMap, Path(id): Path<Uuid>) -> Result<Response, ApiError> {
+    let Loaded { session: s, raw, signature, .. } = load_recording(&api, &headers, id, false).await?;
+    if s.kind != "rdp" {
+        return Err(err(StatusCode::NOT_FOUND, t!("Not a Remote Desktop session", "Ce n'est pas une session Bureau à distance")));
+    }
+    let body = tokio::task::spawn_blocking(move || crate::rdpcap::read(&raw).map(|r| crate::rdpcap::display_stream(&r)))
+        .await
+        .map_err(|e| anyhow!("{e}"))?
+        .map_err(|e| err(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
+    Ok((
+        [
+            (axum::http::header::CONTENT_TYPE, "application/octet-stream"),
+            (axum::http::header::HeaderName::from_static("x-heimdia-signature"), signature),
+        ],
+        body,
+    )
+        .into_response())
 }
 
 // ---------- Bureau à distance (Portunia) ----------

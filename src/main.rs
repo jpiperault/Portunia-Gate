@@ -14,6 +14,7 @@ mod keys;
 mod model;
 mod portal;
 mod rdp;
+mod rdpcap;
 mod recording;
 mod replay;
 mod sshd;

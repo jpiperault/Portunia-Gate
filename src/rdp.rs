@@ -9,12 +9,9 @@
 //! Ensuite il relaie la session dans les deux sens et l'enregistre.
 //!
 //! Enregistrement : `<session>.rdpcap` dans le dossier des enregistrements, signé à la fin
-//! comme les sessions SSH. Une ligne d'en-tête JSON, puis des blocs : temps (f64, secondes),
-//! sens (0 client → serveur, 1 serveur → client), longueur (u32), octets RDP déchiffrés.
+//! comme les sessions SSH ; voir `rdpcap` pour ce qui est gardé.
 
 use std::{
-    io::Write,
-    path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -114,44 +111,6 @@ async fn read_tpkt(tcp: &mut tokio::net::TcpStream) -> Result<Vec<u8>> {
     Ok(pdu)
 }
 
-struct Capturer {
-    path: PathBuf,
-    out: std::io::BufWriter<std::fs::File>,
-    start: Instant,
-    bytes: u64,
-}
-
-impl Capturer {
-    fn create(dir: &std::path::Path, session: Uuid, title: &str) -> Result<Self> {
-        let now = chrono::Utc::now();
-        let dir = dir.join(now.format("%Y/%m").to_string());
-        std::fs::create_dir_all(&dir)?;
-        let path = dir.join(format!("{session}.rdpcap"));
-        let mut out = std::io::BufWriter::new(std::fs::File::create(&path)?);
-        writeln!(out, "{}", json!({ "format": "heimdia-rdp-v1", "timestamp": now.timestamp(), "title": title }))?;
-        Ok(Self { path, out, start: Instant::now(), bytes: 0 })
-    }
-
-    fn frame(&mut self, from_server: bool, data: &[u8]) {
-        self.bytes += data.len() as u64;
-        let _ = self.out.write_all(&self.start.elapsed().as_secs_f64().to_be_bytes());
-        let _ = self.out.write_all(&[from_server as u8]);
-        let _ = self.out.write_all(&(data.len() as u32).to_be_bytes());
-        let _ = self.out.write_all(data);
-    }
-
-    /// Ferme et signe, comme un enregistrement SSH.
-    fn finish(mut self, state: &State, session: Uuid) -> Result<(String, String, String, u64)> {
-        self.out.flush()?;
-        drop(self.out);
-        let content = std::fs::read(&self.path)?;
-        let sha = sha256_hex(&content);
-        use base64::Engine;
-        let sig = base64::engine::general_purpose::STANDARD.encode(state.keys.sign(crate::recording::signature_message(session, &sha).as_bytes()));
-        Ok((self.path.display().to_string(), sha, sig, self.bytes))
-    }
-}
-
 /// Passage complet : demande, contrôles, connexion au serveur, relais enregistré.
 pub async fn relay(state: Arc<State>, mut socket: WebSocket, origin: Origin) {
     let web = matches!(origin, Origin::Portal { .. });
@@ -195,11 +154,12 @@ async fn run(state: &Arc<State>, socket: &mut WebSocket, origin: Origin) -> Resu
         refuse(socket, RDCleanPathPdu::new_http_error(403)).await;
         bail!(t!("account or server deleted", "compte ou serveur supprimé"));
     };
-    if !target.is_rdp() || target.mode != "enregistre" || model::access(db, user.id, target.id).await?.is_none() {
+    let access = model::access(db, user.id, target.id).await?;
+    let Some(access) = access.filter(|_| target.is_rdp() && target.mode == "enregistre") else {
         audit::note(db, &user.login, "acces.refuse", json!({ "cible": target.name, "type": "rdp", "adresse": addr })).await;
         refuse(socket, RDCleanPathPdu::new_http_error(403)).await;
         bail!(t!(format!("{}: access denied", target.name), format!("{} : accès refusé", target.name)));
-    }
+    };
 
     // Connexion au serveur Windows, début de la négociation RDP.
     let server = format!("{}:{}", target.host, target.port);
@@ -265,7 +225,7 @@ async fn run(state: &Arc<State>, socket: &mut WebSocket, origin: Origin) -> Resu
     )
     .await;
     let started = Instant::now();
-    let mut capture = match Capturer::create(&state.config.recordings_dir(), id, &format!("{} → {}", user.login, target.name)) {
+    let mut capture = match crate::rdpcap::Recorder::create(&state.config.recordings_dir(), id, &format!("{} → {}", user.login, target.name), access.record_input) {
         Ok(c) => Some(c),
         Err(e) => {
             tracing::error!("{} {id}: {e:#}", t!("RDP recording", "enregistrement RDP"));
@@ -280,7 +240,7 @@ async fn run(state: &Arc<State>, socket: &mut WebSocket, origin: Origin) -> Resu
             n = tls_read.read(&mut buf) => match n {
                 Ok(0) | Err(_) => break "serveur",
                 Ok(n) => {
-                    if let Some(c) = capture.as_mut() { c.frame(true, &buf[..n]); }
+                    if let Some(c) = capture.as_mut() { c.server(&buf[..n]); }
                     if socket.send(Message::Binary(buf[..n].to_vec().into())).await.is_err() {
                         break "client";
                     }
@@ -288,7 +248,7 @@ async fn run(state: &Arc<State>, socket: &mut WebSocket, origin: Origin) -> Resu
             },
             incoming = socket.recv() => match incoming {
                 Some(Ok(Message::Binary(data))) => {
-                    if let Some(c) = capture.as_mut() { c.frame(false, &data); }
+                    if let Some(c) = capture.as_mut() { c.client(&data); }
                     if tls_write.write_all(&data).await.is_err() {
                         break "serveur";
                     }
@@ -311,6 +271,7 @@ async fn run(state: &Arc<State>, socket: &mut WebSocket, origin: Origin) -> Resu
     }
     let bytes = done.bytes;
     model::session_end(db, id, done).await?;
+    model::session_index(db, id, access.record_input, "").await?;
     audit::note(
         db,
         &user.login,

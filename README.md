@@ -201,13 +201,13 @@ In both modes, users type their Windows credentials each time; neither Portunia 
 |---|---|---|
 | Path | Tunnel through the bastion's SSH port (2222), with a one-time token; the RDP connection is end-to-end encrypted. | The bastion's gateway (RDCleanPath, on the API or portal port) with a one-time token: the bastion opens the encrypted connection to the Windows server and relays the session. |
 | What the bastion sees | None of the content; it checks the rule and logs (`rebond.ouvert`, duration, bytes). | The session (to record it), but not the password: Windows authentication (NLA) happens between the client and the server. |
-| Recording | No. | Yes, signed file (`.rdpcap`); replay in a later version. |
+| Recording | No. | Yes, signed file (`.rdpcap`): the image sent by the server, clicks, copy-pastes (text masked until an administrator reveals it) and keystrokes if the rule records them. Replay in Portunia (0.47 or later), like an SSH session. |
 | Clients | Portunia. | Portunia and the **web portal** (Remote Desktop in the browser). |
 | Server certificate | Checked by the client. | Checked by the bastion: fingerprint kept on first connection, connection refused if it changes (`cible.empreinte_differente`). |
 
 The bastion must reach port 3389 of the Windows servers. In Portunia, the Remote Desktop extension must be enabled; otherwise RDP servers stay visible, greyed out. An RDP server does not appear in the bastion's `ssh` menu and does not open as a terminal.
 
-**Vault** mode (Windows account supplied by the bastion, nothing to type) and RDP session replay come in later versions.
+**Vault** mode (Windows account supplied by the bastion, nothing to type) comes in a later version.
 
 ## Web portal
 
