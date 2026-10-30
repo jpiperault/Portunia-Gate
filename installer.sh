@@ -192,7 +192,7 @@ prepare_database() {
 
 build_image() {
   step "Compilation de Heimdia ${D}(10 à 30 minutes la première fois)${N}"
-  compose build || die "La compilation a échoué. Manque de mémoire ? Voir docs/exploitation.md, section Dépannage."
+  compose build || die "La compilation a échoué. Manque de mémoire ? Voir docs/exploitation.fr.md, section Dépannage."
   remove_swap
   ok "Image construite"
 }

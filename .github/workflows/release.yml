@@ -73,14 +73,18 @@ jobs:
           tag_name: ${{ github.ref_name }}
           name: Heimdia ${{ github.ref_name }}
           body: |
-            Installation sur Debian 12/13 ou Ubuntu 22.04 et suivantes :
+            Install on Debian 12/13 or Ubuntu 22.04 and later:
 
             ```bash
             curl -fsSLO https://github.com/jpiperault/Heimdia-releases/releases/latest/download/installer.sh
             sudo bash installer.sh
             ```
 
-            Mise à jour d'un bastion installé : `sudo bash installer.sh mise-a-jour`.
+            Update an installed bastion: `sudo bash installer.sh mise-a-jour`.
+
+            ---
+
+            Installation sur Debian 12/13 ou Ubuntu 22.04 et suivantes : mêmes commandes. Mise à jour : `sudo bash installer.sh mise-a-jour`.
           files: publie/*
 
       # Copie dans ce dépôt privé, avec la liste des changements depuis la version précédente.

@@ -53,7 +53,9 @@ assets = [
     ["debian/heimdia.sh", "usr/bin/heimdia", "755"],
     ["debian/heimdia.service", "usr/lib/systemd/system/heimdia.service", "644"],
     ["README.md", "usr/share/doc/heimdia/README.md", "644"],
-    ["docs/exploitation.md", "usr/share/doc/heimdia/exploitation.md", "644"],
+    ["README.fr.md", "usr/share/doc/heimdia/README.fr.md", "644"],
+    ["docs/operations.md", "usr/share/doc/heimdia/operations.md", "644"],
+    ["docs/exploitation.fr.md", "usr/share/doc/heimdia/exploitation.fr.md", "644"],
 ]
 
 [profile.release]
