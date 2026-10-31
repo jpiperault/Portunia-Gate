@@ -1,5 +1,5 @@
-// Portail web de Heimdia : Bureau à distance dans le navigateur (client IronRDP), à travers
-// le passage RDCleanPath du bastion.
+// Portail web de Portunia Gate : Bureau à distance dans le navigateur (client IronRDP), à travers
+// le passage RDCleanPath de la Gate.
 import '/static/iron-remote-desktop.js?v=__V__';
 import { Backend, init, displayControl } from '/static/iron-remote-desktop-rdp.js?v=__V__';
 
@@ -51,7 +51,7 @@ const ready = init('WARN').catch(() => {});
 
 async function open(user, password, domain) {
   // Jeton à usage unique pour ce serveur, demandé avec la session du portail.
-  const res = await fetch(`/api/rdp/${encodeURIComponent(nom)}`, { method: 'POST', credentials: 'same-origin', headers: { 'X-Heimdia': 'portail' } });
+  const res = await fetch(`/api/rdp/${encodeURIComponent(nom)}`, { method: 'POST', credentials: 'same-origin', headers: { 'X-Portunia-Gate': 'portail' } });
   const data = await res.json().catch(() => ({}));
   if (res.status === 401) { location.href = '/'; return; }
   if (!res.ok) throw new Error(data.erreur || T('Server unavailable', 'Serveur indisponible'));

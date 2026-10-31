@@ -2,10 +2,10 @@
 //!
 //! Le client (navigateur du portail web, ou Portunia) ouvre une WebSocket et envoie une
 //! demande RDCleanPath : son jeton à usage unique et le début de la connexion RDP (X.224).
-//! Le bastion vérifie le jeton et la règle, se connecte au serveur Windows, mène la
+//! La Gate vérifie le jeton et la règle, se connecte au serveur Windows, mène la
 //! négociation chiffrée (TLS) avec lui en vérifiant son certificat (empreinte gardée à la
 //! première connexion), puis renvoie ce certificat au client : l'authentification Windows
-//! (NLA) se fait entre le client et le serveur, le bastion ne voit pas le mot de passe.
+//! (NLA) se fait entre le client et le serveur, la Gate ne voit pas le mot de passe.
 //! Ensuite il relaie la session dans les deux sens et l'enregistre.
 //!
 //! Enregistrement : `<session>.rdpcap` dans le dossier des enregistrements, signé à la fin

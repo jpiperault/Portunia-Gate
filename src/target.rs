@@ -1,4 +1,4 @@
-//! Connexion du bastion vers une cible, avec la clé du serveur mémorisée à la première
+//! Connexion de la Gate vers une cible, avec la clé du serveur mémorisée à la première
 //! connexion puis exigée ensuite.
 
 use std::sync::{Arc, Mutex};
@@ -163,7 +163,7 @@ pub async fn install_new_key(state: &State, target: &Target, account: &str, pass
     let key = PrivateKey::from(Ed25519Keypair::from_seed(&crate::keys::random::<32>()?));
     let public = key.public_key().to_openssh().map_err(|e| anyhow!("clé publique : {e}"))?;
     let line = format!(
-        "{public} heimdia-{}",
+        "{public} portunia-gate-{}",
         target.name.replace(|c: char| !c.is_ascii_alphanumeric() && c != '-', "_")
     );
     let creds = Credentials::Password {

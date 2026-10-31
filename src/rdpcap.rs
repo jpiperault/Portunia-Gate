@@ -1,6 +1,6 @@
 //! Enregistrement des sessions Bureau à distance (`.rdpcap`), et sa relecture.
 //!
-//! Le bastion voit la session en clair (passage RDCleanPath). Il n'en garde que ce qu'il faut
+//! La Gate voit la session en clair (passage RDCleanPath). Il n'en garde que ce qu'il faut
 //! pour la rejouer et l'auditer :
 //! - les messages du serveur qui portent l'image (sans l'authentification NLA ni le
 //!   presse-papiers, qui deviennent des événements) ;
@@ -8,9 +8,9 @@
 //!   clavier, et la frappe seulement si la règle d'accès l'enregistre.
 //! Ce que le poste envoie (authentification, frappe non autorisée) n'est jamais écrit.
 //!
-//! Format v2 : une ligne d'en-tête JSON (`"format": "heimdia-rdp-v2"`), puis des blocs :
+//! Format v2 : une ligne d'en-tête JSON (`"format": "portunia-gate-rdp-v2"`), puis des blocs :
 //! temps (f64, secondes, grand-boutien), sorte (u8 : 1 image, 2 événement JSON), longueur (u32),
-//! octets. Le format v1 (Heimdia 0.8 et 0.9) gardait les deux sens bruts : il se relit en
+//! octets. Le format v1 (Portunia Gate 0.8 et 0.9) gardait les deux sens bruts : il se relit en
 //! repassant par le même tri, sans la frappe.
 
 use std::{collections::HashMap, io::Write, path::PathBuf, time::Instant};
@@ -387,7 +387,7 @@ impl Recorder {
         std::fs::create_dir_all(&dir)?;
         let path = dir.join(format!("{session}.rdpcap"));
         let mut out = std::io::BufWriter::new(std::fs::File::create(&path)?);
-        writeln!(out, "{}", json!({ "format": "heimdia-rdp-v2", "timestamp": now.timestamp(), "title": title, "frappe": record_input }))?;
+        writeln!(out, "{}", json!({ "format": "portunia-gate-rdp-v2", "timestamp": now.timestamp(), "title": title, "frappe": record_input }))?;
         Ok(Self { path, out, start: Instant::now(), tap: Tap::new(record_input), bytes: 0 })
     }
 
@@ -429,8 +429,8 @@ pub fn read(raw: &[u8]) -> Result<Replay> {
     let newline = raw.iter().position(|&b| b == b'\n').unwrap_or(raw.len());
     let header: Value = serde_json::from_slice(&raw[..newline]).unwrap_or(Value::Null);
     let v1 = match header["format"].as_str() {
-        Some("heimdia-rdp-v1") => true,
-        Some("heimdia-rdp-v2") => false,
+        Some("portunia-gate-rdp-v1") => true,
+        Some("portunia-gate-rdp-v2") => false,
         _ => bail!("format d'enregistrement RDP inconnu"),
     };
     let mut replay = Replay { display: Vec::new(), events: Vec::new(), duration: 0.0 };

@@ -1,7 +1,7 @@
 iron-remote-desktop.js (@devolutions/iron-remote-desktop 0.11.0) et
 iron-remote-desktop-rdp.js (@devolutions/iron-remote-desktop-rdp 0.7.0)
 proviennent du projet IronRDP de Devolutions : https://github.com/Devolutions/IronRDP
-Licence : MIT OU Apache-2.0, au choix. Heimdia les utilise sous la licence MIT ci-dessous.
+Licence : MIT OU Apache-2.0, au choix. Portunia Gate les utilise sous la licence MIT ci-dessous.
 
 MIT License
 

@@ -2,7 +2,7 @@
 
 [English](README.md) · **Français**
 
-Passerelle SSH et Bureau à distance de [Portunia](https://github.com/jpiperault/Portunia) (anciennement Heimdia, nom gardé pour la commande `heimdia`, les dossiers, le service et le dépôt) : les utilisateurs passent par Portunia Gate pour atteindre les serveurs ; Portunia Gate vérifie qui ils sont, décide où ils peuvent aller, fournit si besoin le compte du serveur sans le leur montrer, enregistre les sessions et trace tout dans un journal infalsifiable.
+Passerelle SSH et Bureau à distance de [Portunia](https://github.com/jpiperault/Portunia) : les utilisateurs passent par Portunia Gate pour atteindre les serveurs ; Portunia Gate vérifie qui ils sont, décide où ils peuvent aller, fournit si besoin le compte du serveur sans le leur montrer, enregistre les sessions et trace tout dans un journal infalsifiable.
 
 > État : **version 0.8, Bureau à distance enregistré**, aussi dans le navigateur (portail web) ; portail web SSH (0.7), Bureau à distance en rebond (0.6), relecture des sessions SSH (0.5). Voir la [Feuille de route](#feuille-de-route).
 
@@ -15,7 +15,7 @@ Passerelle SSH et Bureau à distance de [Portunia](https://github.com/jpiperault
 | **Droits** | Des règles relient un groupe à des serveurs, avec jours, heures, date d'expiration, SFTP et tunnels autorisés ou non. Tout ce qui n'est pas permis est refusé. |
 | **Enregistrement** | Format asciicast (lisible par Portunia et asciinema), affichage seul ou aussi la frappe selon la règle. Chaque fichier est signé par la Gate. |
 | **Relecture** | Dans Portunia, comme une vidéo : la frappe en sous-titres, les pauses sautées, les commandes sensibles repérées, la recherche dans toutes les sessions. Les mots de passe tapés sont masqués ; chaque relecture est inscrite au journal. |
-| **Journal d'audit** | Connexions, échecs, sessions, changements d'administration. Chaque événement contient l'empreinte du précédent : une ligne supprimée ou modifiée se voit (`heimdia audit --verify`). |
+| **Journal d'audit** | Connexions, échecs, sessions, changements d'administration. Chaque événement contient l'empreinte du précédent : une ligne supprimée ou modifiée se voit (`portunia-gate audit --verify`). |
 | **Portunia** | Extension Portunia Gate : la Gate s'ajoute dans la barre latérale, ses serveurs s'ouvrent avec un jeton à usage unique, les administrateurs gèrent tout depuis Portunia (serveurs et coffre, comptes, groupes, règles, réglages) et les auditeurs relisent les sessions et le journal. |
 | **Bureau à distance** | Serveurs Windows (RDP) derrière la Gate, ouverts depuis Portunia ou le portail web. Modes rebond et enregistré (voir [Bureau à distance](#bureau-à-distance-rdp)). |
 | **Portail web** | Pour qui n'a pas Portunia sous la main : une page de connexion et un terminal dans le navigateur, derrière Cloudflare, sans port ouvert. Activé ou coupé d'un clic dans Portunia (voir [Portail web](#portail-web)). |
@@ -39,30 +39,30 @@ Dans les deux cas : un serveur **Debian 12 ou 13** ou **Ubuntu 22.04 ou plus ré
 ### Installation en paquet Debian
 
 ```bash
-curl -fsSLO https://github.com/jpiperault/Heimdia-releases/releases/latest/download/installer.sh
+curl -fsSLO https://github.com/jpiperault/Portunia-Gate-releases/releases/latest/download/installer.sh
 sudo bash installer.sh
 ```
 
-L'assistant télécharge la dernière version de Portunia Gate, vérifie son empreinte SHA-256, installe le paquet et PostgreSQL, crée la base (accès local par socket, sans mot de passe) et le service `heimdia`.
+L'assistant télécharge la dernière version de Portunia Gate, vérifie son empreinte SHA-256, installe le paquet et PostgreSQL, crée la base (accès local par socket, sans mot de passe) et le service `portunia-gate`.
 
 Fichiers installés :
 
 | | |
 |---|---|
-| `/usr/lib/heimdia/heimdia` | Le programme |
-| `/usr/bin/heimdia` | La commande d'administration (`sudo heimdia …`) |
-| `/etc/heimdia/heimdia.env` | Réglages : ports, fuseau, accès à la base |
-| `/var/lib/heimdia/` | Clés, certificat de l'API, enregistrements des sessions |
-| Base PostgreSQL `heimdia` | Comptes, serveurs, règles, sessions, journal |
+| `/usr/lib/portunia-gate/portunia-gate` | Le programme |
+| `/usr/bin/portunia-gate` | La commande d'administration (`sudo portunia-gate …`) |
+| `/etc/portunia-gate/portunia-gate.env` | Réglages : ports, fuseau, accès à la base |
+| `/var/lib/portunia-gate/` | Clés, certificat de l'API, enregistrements des sessions |
+| Base PostgreSQL `portunia-gate` | Comptes, serveurs, règles, sessions, journal |
 
-Le service tourne sous un compte système dédié (`_heimdia`), n'écrit que dans `/var/lib/heimdia` et ne voit ni les dossiers personnels ni le reste du système. Commandes utiles : `sudo systemctl status heimdia`, `sudo journalctl -u heimdia -f`.
+Le service tourne sous un compte système dédié (`_portunia_gate`), n'écrit que dans `/var/lib/portunia-gate` et ne voit ni les dossiers personnels ni le reste du système. Commandes utiles : `sudo systemctl status portunia-gate`, `sudo journalctl -u portunia-gate -f`.
 
-Installer un paquet précis (sans accès à Internet, ou une version antérieure) : `sudo bash installer.sh --paquet heimdia_0.4.0_amd64.deb`.
+Installer un paquet précis (sans accès à Internet, ou une version antérieure) : `sudo bash installer.sh --paquet portunia-gate_0.4.0_amd64.deb`.
 
 ### Installation avec Docker
 
 ```bash
-git clone https://github.com/jpiperault/Heimdia.git
+git clone https://github.com/jpiperault/Portunia-Gate.git
 cd Portunia Gate
 sudo ./installer.sh --docker
 ```
@@ -101,11 +101,11 @@ La Gate redémarre seul avec le serveur.
 
 ### Sauvegarder la clé du coffre, tout de suite
 
-La **clé du coffre** chiffre les mots de passe des serveurs et les codes TOTP. Sans elle, une restauration perd tous ces secrets. L'assistant en dépose une copie dans votre dossier personnel (`~/heimdia-coffre.key`) : copiez-la hors du serveur (gestionnaire de mots de passe, coffre de l'entreprise), puis effacez cette copie. L'assistant affiche les commandes exactes, par exemple :
+La **clé du coffre** chiffre les mots de passe des serveurs et les codes TOTP. Sans elle, une restauration perd tous ces secrets. L'assistant en dépose une copie dans votre dossier personnel (`~/portunia-gate-coffre.key`) : copiez-la hors du serveur (gestionnaire de mots de passe, coffre de l'entreprise), puis effacez cette copie. L'assistant affiche les commandes exactes, par exemple :
 
 ```bash
-scp julien@192.168.1.20:/home/julien/heimdia-coffre.key .   # depuis votre poste
-rm ~/heimdia-coffre.key                                      # sur le serveur
+scp julien@192.168.1.20:/home/julien/portunia-gate-coffre.key .   # depuis votre poste
+rm ~/portunia-gate-coffre.key                                      # sur le serveur
 ```
 
 ### Relancer l'assistant
@@ -124,10 +124,10 @@ Une installation interrompue (coupure, erreur) se reprend en relançant l'assist
 
 ### Sans questions (automatisation)
 
-Hors terminal, l'assistant prend les valeurs proposées, ou celles des variables `HEIMDIA_NOM`, `HEIMDIA_ADMIN`, `HEIMDIA_SSH_PORT`, `HEIMDIA_API_PORT` et `TZ` :
+Hors terminal, l'assistant prend les valeurs proposées, ou celles des variables `PORTUNIA_GATE_NOM`, `PORTUNIA_GATE_ADMIN`, `PORTUNIA_GATE_SSH_PORT`, `PORTUNIA_GATE_API_PORT` et `TZ` :
 
 ```bash
-sudo HEIMDIA_ADMIN=julien HEIMDIA_NOM="Gate ACME" bash installer.sh </dev/null
+sudo PORTUNIA_GATE_ADMIN=julien PORTUNIA_GATE_NOM="Gate ACME" bash installer.sh </dev/null
 ```
 
 ### Certificat de l'entreprise
@@ -137,30 +137,30 @@ Le certificat de l'API est auto-signé : Portunia le reconnaît par son empreint
 Paquet Debian :
 
 ```bash
-sudo install -o _heimdia -g _heimdia -m 600 cert.pem /var/lib/heimdia/entreprise.crt
-sudo install -o _heimdia -g _heimdia -m 600 cle.pem /var/lib/heimdia/entreprise.key
-echo 'HEIMDIA_TLS_CERT=/var/lib/heimdia/entreprise.crt' | sudo tee -a /etc/heimdia/heimdia.env
-echo 'HEIMDIA_TLS_KEY=/var/lib/heimdia/entreprise.key' | sudo tee -a /etc/heimdia/heimdia.env
-sudo systemctl restart heimdia
+sudo install -o _portunia_gate -g _portunia_gate -m 600 cert.pem /var/lib/portunia-gate/entreprise.crt
+sudo install -o _portunia_gate -g _portunia_gate -m 600 cle.pem /var/lib/portunia-gate/entreprise.key
+echo 'PORTUNIA_GATE_TLS_CERT=/var/lib/portunia-gate/entreprise.crt' | sudo tee -a /etc/portunia-gate/portunia-gate.env
+echo 'PORTUNIA_GATE_TLS_KEY=/var/lib/portunia-gate/entreprise.key' | sudo tee -a /etc/portunia-gate/portunia-gate.env
+sudo systemctl restart portunia-gate
 ```
 
 Docker, depuis le dossier du dépôt :
 
 ```bash
-sudo docker compose cp cert.pem heimdia:/var/lib/heimdia/entreprise.crt
-sudo docker compose cp cle.pem heimdia:/var/lib/heimdia/entreprise.key
-echo 'HEIMDIA_TLS_CERT=/var/lib/heimdia/entreprise.crt' | sudo tee -a .env
-echo 'HEIMDIA_TLS_KEY=/var/lib/heimdia/entreprise.key' | sudo tee -a .env
+sudo docker compose cp cert.pem portunia-gate:/var/lib/portunia-gate/entreprise.crt
+sudo docker compose cp cle.pem portunia-gate:/var/lib/portunia-gate/entreprise.key
+echo 'PORTUNIA_GATE_TLS_CERT=/var/lib/portunia-gate/entreprise.crt' | sudo tee -a .env
+echo 'PORTUNIA_GATE_TLS_KEY=/var/lib/portunia-gate/entreprise.key' | sudo tee -a .env
 sudo docker compose up -d
 ```
 
-L'empreinte change : les utilisateurs devront valider la nouvelle (`sudo heimdia info`).
+L'empreinte change : les utilisateurs devront valider la nouvelle (`sudo portunia-gate info`).
 
 ## Ajouter la Gate dans Portunia
 
 1. **Activer l'extension** : Portunia › Extensions › Portunia Gate › Activer. La section **Gates** apparaît dans la barre latérale.
 2. **Ajouter la Gate** : Gates › **+** › tapez l'adresse donnée par l'assistant (`192.168.1.20`, ou `192.168.1.20:9443` si vous avez changé le port de l'API).
-3. **Vérifier l'empreinte** : Portunia affiche l'empreinte du certificat de la Gate. Comparez-la à celle donnée par l'assistant (ou `sudo heimdia info` sur le serveur, ligne « Certificat de l'API »). Si elle diffère, n'allez pas plus loin : quelqu'un se fait peut-être passer pour la Gate.
+3. **Vérifier l'empreinte** : Portunia affiche l'empreinte du certificat de la Gate. Comparez-la à celle donnée par l'assistant (ou `sudo portunia-gate info` sur le serveur, ligne « Certificat de l'API »). Si elle diffère, n'allez pas plus loin : quelqu'un se fait peut-être passer pour la Gate.
 4. **Se connecter** : identifiant et mot de passe ; **laissez le champ Code vide** lors de la première connexion.
 5. **Première connexion** : Portunia demande de choisir un nouveau mot de passe (10 caractères au moins), puis affiche un code QR. Scannez-le avec votre application d'authentification et tapez le code à 6 chiffres qu'elle affiche.
 6. **Ouvrir un serveur** : les serveurs autorisés apparaissent sous la Gate, rangés par dossier. Un clic ouvre la session, sans retaper le code (jeton à usage unique) :
@@ -242,13 +242,13 @@ Une page web pour ouvrir ses serveurs depuis n'importe quel navigateur, sans Por
 
 1. **Créer le tunnel** dans Cloudflare Zero Trust › Networks › Tunnels › *Create a tunnel* (type Cloudflared), et copier son jeton (la longue suite après `--token`).
 2. **L'installer sur la Gate** : `sudo bash installer.sh portail` (paquet) ou `sudo ./installer.sh portail` (Docker), puis coller le jeton.
-3. **Publier l'adresse** : dans l'onglet *Public Hostname* du tunnel, ajouter l'adresse (ex. `acces.votre-domaine.fr`), type **HTTP**, URL `localhost:8445` (paquet) ou `heimdia:8445` (Docker).
+3. **Publier l'adresse** : dans l'onglet *Public Hostname* du tunnel, ajouter l'adresse (ex. `acces.votre-domaine.fr`), type **HTTP**, URL `localhost:8445` (paquet) ou `portunia-gate:8445` (Docker).
 4. **Conseillé : Cloudflare Access** sur cette adresse (compte de l'entreprise exigé avant même la page de connexion), et **Turnstile** (clés à saisir dans Portunia).
 5. **Activer** dans Portunia : menu **⋯** de la Gate › **Administrer** › **Portail web** : adresse publique, groupe autorisé, durées, copier-coller, puis l'interrupteur. Créer le groupe et y ajouter les comptes concernés.
 
 Couper le portail (interrupteur) affiche « Portail fermé » et ferme aussitôt les sessions web en cours ; **Fermer toutes les sessions web** les ferme sans couper le portail.
 
-Proxy Cloudflare au lieu du tunnel : dans `/etc/heimdia/heimdia.env`, `HEIMDIA_PORTAL_TLS_LISTEN=0.0.0.0:8446` (paquet), ou `HEIMDIA_PORTAL_PORT=0.0.0.0:8446` dans `.env` (Docker), puis redémarrer ; dans Cloudflare, l'adresse proxifiée pointe vers ce port en HTTPS (mode SSL « Full »).
+Proxy Cloudflare au lieu du tunnel : dans `/etc/portunia-gate/portunia-gate.env`, `PORTUNIA_GATE_PORTAL_TLS_LISTEN=0.0.0.0:8446` (paquet), ou `PORTUNIA_GATE_PORTAL_PORT=0.0.0.0:8446` dans `.env` (Docker), puis redémarrer ; dans Cloudflare, l'adresse proxifiée pointe vers ce port en HTTPS (mode SSL « Full »).
 
 ## Assistance à distance
 
@@ -260,7 +260,7 @@ Prendre la main sur le PC d'un proche ou d'un client avec **Portunia Assistance*
 | Code | À usage unique, donné par la Gate à l'ouverture de Portunia Assistance ; un code faux met fin à la tentative et la personne en reçoit un nouveau. |
 | Qui | Les membres du **groupe des dépanneurs** seulement (« Dépanneurs » par défaut), connectés à la Gate depuis Portunia. |
 | Personne aidée | Un cadre et une barre **Arrêter** restent sur son écran (invisibles dans l'image partagée) ; Échap trois fois arrête aussi. L'assistance s'arrête au bout de la durée maximale (4 heures par défaut). |
-| Programme | La Gate télécharge `portunia-assist.exe` depuis les versions de Portunia à l'activation de l'assistance, puis une fois par jour, et vérifie son empreinte SHA-256. Il n'est pas encore signé : Windows SmartScreen avertit à la première ouverture (« Informations complémentaires » › « Exécuter quand même »). |
+| Programme | La Gate télécharge `portunia-assistance.exe` depuis les versions de Portunia à l'activation de l'assistance, puis une fois par jour, et vérifie son empreinte SHA-256. Il n'est pas encore signé : Windows SmartScreen avertit à la première ouverture (« Informations complémentaires » › « Exécuter quand même »). |
 | Journal | `assistance.ouverte`, `assistance.fermee`, `assistance.reglage`, `assistance.place_inconnue`, `assistance.programme`. |
 
 **Mise en place** : la page et le relais utilisent l'adresse du portail web (voir [Portail web](#portail-web), étapes 1 à 3 ; le portail lui-même peut rester coupé). Dans Portunia, activer l'extension **Assistance à distance**, puis menu **⋯** de la Gate › **Administrer** › **Assistance** : groupe des dépanneurs, durée maximale, puis l'interrupteur. Créer le groupe et y ajouter les comptes des dépanneurs.
@@ -274,51 +274,51 @@ ssh -J julien@gate:2222 admin@fw-01  # rebond de bout en bout (serveurs en mode 
 sftp -P 2222 julien%web-01@gate      # fichiers (mode coffre, si la règle autorise SFTP)
 ```
 
-Le code TOTP doit avoir été enrôlé avant, dans Portunia ou avec `sudo heimdia user totp julien`.
+Le code TOTP doit avoir été enrôlé avant, dans Portunia ou avec `sudo portunia-gate user totp julien`.
 
 ## Administrer en ligne de commande
 
-Tout se fait aussi depuis Portunia. Sur le serveur, l'assistant installe la commande `heimdia`, qui s'utilise avec sudo depuis n'importe quel dossier :
+Tout se fait aussi depuis Portunia. Sur le serveur, l'assistant installe la commande `portunia-gate`, qui s'utilise avec sudo depuis n'importe quel dossier :
 
 ```bash
 # Informations
-sudo heimdia info                                            # version, empreintes, comptes
+sudo portunia-gate info                                            # version, empreintes, comptes
 
 # Comptes
-sudo heimdia user add marc --provisoire                      # mot de passe provisoire, code enrôlé dans Portunia
-sudo heimdia user add marc                                   # mot de passe et code saisis ici
-sudo heimdia user add presta --policy "key+totp"             # clé SSH et code obligatoires
-sudo heimdia user key marc "ssh-ed25519 AAAA… marc@pc"
-sudo heimdia user role marc auditor                          # user, auditor (relecture et journal) ou admin
-sudo heimdia user list | passwd marc | totp marc | disable marc | delete marc
+sudo portunia-gate user add marc --provisoire                      # mot de passe provisoire, code enrôlé dans Portunia
+sudo portunia-gate user add marc                                   # mot de passe et code saisis ici
+sudo portunia-gate user add presta --policy "key+totp"             # clé SSH et code obligatoires
+sudo portunia-gate user key marc "ssh-ed25519 AAAA… marc@pc"
+sudo portunia-gate user role marc auditor                          # user, auditor (relecture et journal) ou admin
+sudo portunia-gate user list | passwd marc | totp marc | disable marc | delete marc
 
 # Groupes
-sudo heimdia group add "Admins Linux"
-sudo heimdia group member "Admins Linux" marc julien
+sudo portunia-gate group add "Admins Linux"
+sudo portunia-gate group member "Admins Linux" marc julien
 
 # Serveurs
-sudo heimdia target add web-01 --host 10.0.1.11 --mode coffre --account admin --password --folder Production
-sudo heimdia target add rec-app --host 10.0.2.5 --mode enregistre --folder Recette
-sudo heimdia target add fw-edge --host 10.0.0.1 --mode rebond --folder Réseau
-sudo heimdia target add srv-ad-01 --host 10.0.3.10 --protocol rdp --mode rebond --folder Windows
-sudo heimdia target list
+sudo portunia-gate target add web-01 --host 10.0.1.11 --mode coffre --account admin --password --folder Production
+sudo portunia-gate target add rec-app --host 10.0.2.5 --mode enregistre --folder Recette
+sudo portunia-gate target add fw-edge --host 10.0.0.1 --mode rebond --folder Réseau
+sudo portunia-gate target add srv-ad-01 --host 10.0.3.10 --protocol rdp --mode rebond --folder Windows
+sudo portunia-gate target list
 
 # Règles
-sudo heimdia rule add prod --group "Admins Linux" --targets web-01,rec-app --sftp --days lun-ven --hours 7-20
-sudo heimdia rule add presta-db --group Prestataires --targets db-01 --expires 2026-12-31
+sudo portunia-gate rule add prod --group "Admins Linux" --targets web-01,rec-app --sftp --days lun-ven --hours 7-20
+sudo portunia-gate rule add presta-db --group Prestataires --targets db-01 --expires 2026-12-31
 
 # Réglages
-sudo heimdia setting auth_policy "password+totp,key+totp"    # politique générale
-sudo heimdia setting banniere "Accès réservé. Les sessions sont enregistrées."
-sudo heimdia setting nom "Gate ACME"
-sudo heimdia setting langue fr                             # en, fr, ou "" pour la langue du système
+sudo portunia-gate setting auth_policy "password+totp,key+totp"    # politique générale
+sudo portunia-gate setting banniere "Accès réservé. Les sessions sont enregistrées."
+sudo portunia-gate setting nom "Gate ACME"
+sudo portunia-gate setting langue fr                             # en, fr, ou "" pour la langue du système
 
 # Contrôle
-sudo heimdia audit --verify --last 50
-sudo heimdia sessions --last 20
+sudo portunia-gate audit --verify --last 50
+sudo portunia-gate sessions --last 20
 ```
 
-`sudo heimdia --help` et `sudo heimdia user --help` listent toutes les options.
+`sudo portunia-gate --help` et `sudo portunia-gate user --help` listent toutes les options.
 
 Voir aussi [docs/exploitation.fr.md](docs/exploitation.fr.md) : sauvegardes, mise à jour, journaux, dépannage.
 

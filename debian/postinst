@@ -1,21 +1,21 @@
 #!/bin/sh
 # Installation ou mise à jour du paquet : compte de service et dossiers.
 # La configuration (base, ports, administrateur) est faite par installer.sh.
-# Compte de service « _heimdia » (convention Debian) : pas de collision avec un compte
-# de connexion qui s'appellerait heimdia.
+# Compte de service « _portunia_gate » (convention Debian) : pas de collision avec un compte
+# de connexion qui s'appellerait portunia-gate.
 set -e
 
 if [ "$1" = configure ]; then
-  getent group _heimdia >/dev/null || groupadd --system _heimdia
-  getent passwd _heimdia >/dev/null ||
-    useradd --system --gid _heimdia --home-dir /var/lib/heimdia --no-create-home \
-      --shell /usr/sbin/nologin --comment "Gate" _heimdia
-  install -d -o _heimdia -g _heimdia -m 700 /var/lib/heimdia
-  install -d -o root -g _heimdia -m 750 /etc/heimdia
+  getent group _portunia_gate >/dev/null || groupadd --system _portunia_gate
+  getent passwd _portunia_gate >/dev/null ||
+    useradd --system --gid _portunia_gate --home-dir /var/lib/portunia-gate --no-create-home \
+      --shell /usr/sbin/nologin --comment "Gate" _portunia_gate
+  install -d -o _portunia_gate -g _portunia_gate -m 700 /var/lib/portunia-gate
+  install -d -o root -g _portunia_gate -m 750 /etc/portunia-gate
   if [ -d /run/systemd/system ]; then
     systemctl daemon-reload
-    # Mise à jour : redémarre la Gate s'il tournait ; le schéma de la base suit au démarrage.
-    if [ -n "$2" ]; then systemctl try-restart heimdia.service || true; fi
+    # Mise à jour : redémarre la Gate si elle tournait ; le schéma de la base suit au démarrage.
+    if [ -n "$2" ]; then systemctl try-restart portunia-gate.service || true; fi
   fi
 fi
 

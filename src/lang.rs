@@ -2,7 +2,7 @@
 //! Portunia ask for it. Every text is written in both languages next to each other:
 //! `t!("English", "Français")`.
 //!
-//! - Command line, installer, SSH server: the bastion's language, from `HEIMDIA_LANG`, then
+//! - Command line, installer, SSH server: the Gate's language, from `PORTUNIA_GATE_LANG`, then
 //!   `LC_ALL`, `LC_MESSAGES`, `LANG` (French if it starts with `fr`), English otherwise.
 //! - API and web portal: each request may ask for its own language (`Accept-Language`,
 //!   portal cookie); it applies to the whole handling of that request.
@@ -44,12 +44,12 @@ impl Lang {
 
 /// Language of the system the command runs on.
 pub fn from_env() -> Lang {
-    for name in ["HEIMDIA_LANG", "LC_ALL", "LC_MESSAGES", "LANG"] {
+    for name in ["PORTUNIA_GATE_LANG", "LC_ALL", "LC_MESSAGES", "LANG"] {
         if let Ok(value) = std::env::var(name) {
             if value.trim().is_empty() {
                 continue;
             }
-            // LC_ALL=C or POSIX: no preference, keep looking only for HEIMDIA_LANG's sake.
+            // LC_ALL=C or POSIX: no preference, keep looking only for PORTUNIA_GATE_LANG's sake.
             return Lang::from_tag(&value).unwrap_or(Lang::En);
         }
     }
@@ -65,7 +65,7 @@ pub fn set_process(lang: Lang) {
     PROCESS.store(lang as u8, Ordering::Relaxed);
 }
 
-/// Language in effect: the request's if any, otherwise the bastion's.
+/// Language in effect: the request's if any, otherwise the Gate's.
 pub fn get() -> Lang {
     REQUEST.try_with(|l| *l).unwrap_or_else(|_| if PROCESS.load(Ordering::Relaxed) == Lang::Fr as u8 { Lang::Fr } else { Lang::En })
 }
@@ -80,7 +80,7 @@ pub async fn scope<F: std::future::Future>(lang: Lang, f: F) -> F::Output {
 }
 
 /// Name of the web portal's cookie that keeps the language chosen with its switch.
-pub const COOKIE: &str = "heimdia_langue";
+pub const COOKIE: &str = "portunia_gate_langue";
 
 /// Language asked by a request: the portal's cookie, then `Accept-Language`.
 pub fn from_request(headers: &axum::http::HeaderMap) -> Option<Lang> {

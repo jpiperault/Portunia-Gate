@@ -1,5 +1,5 @@
 //! Certificat HTTPS de l'API : auto-signé et créé à l'installation, ou fourni par
-//! l'entreprise (HEIMDIA_TLS_CERT et HEIMDIA_TLS_KEY, fichiers PEM).
+//! l'entreprise (PORTUNIA_GATE_TLS_CERT et PORTUNIA_GATE_TLS_KEY, fichiers PEM).
 
 use std::path::{Path, PathBuf};
 
@@ -13,7 +13,7 @@ pub struct TlsFiles {
 pub fn files(data_dir: &Path) -> TlsFiles {
     // Variables vides (Docker Compose les transmet ainsi quand .env ne les définit pas) : non définies.
     let var = |name| std::env::var_os(name).filter(|v| !v.is_empty());
-    match (var("HEIMDIA_TLS_CERT"), var("HEIMDIA_TLS_KEY")) {
+    match (var("PORTUNIA_GATE_TLS_CERT"), var("PORTUNIA_GATE_TLS_KEY")) {
         (Some(cert), Some(key)) => TlsFiles {
             cert: cert.into(),
             key: key.into(),

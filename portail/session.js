@@ -1,4 +1,4 @@
-// Portail web de Heimdia : un terminal relié au bastion par WebSocket.
+// Portail web de Portunia Gate : un terminal relié à la Gate par WebSocket.
 'use strict';
 
 const FR = document.documentElement.lang === 'fr';
@@ -85,7 +85,7 @@ window.addEventListener('resize', () => {
   resizeTimer = setTimeout(() => { fit.fit(); send({ t: 'taille', c: term.cols, r: term.rows }); }, 150);
 });
 
-// Copier-coller selon le réglage du bastion.
+// Copier-coller selon le réglage de la Gate.
 document.getElementById('copier').addEventListener('click', async () => {
   const text = term.getSelection();
   if (text) await navigator.clipboard.writeText(text).catch(() => {});

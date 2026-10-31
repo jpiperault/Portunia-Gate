@@ -6,7 +6,7 @@ use chrono::{DateTime, SubsecRound, Utc};
 use serde_json::Value;
 use sqlx::PgPool;
 
-const GENESIS: &str = "heimdia-journal-v1";
+const GENESIS: &str = "portunia-gate-journal-v1";
 
 fn link(prev: &str, seq: i64, at: &DateTime<Utc>, actor: &str, event: &str, detail: &Value) -> String {
     // serde_json trie les clés des objets : le texte est stable d'une lecture à l'autre.
@@ -22,7 +22,7 @@ fn link(prev: &str, seq: i64, at: &DateTime<Utc>, actor: &str, event: &str, deta
 ///
 /// L'écriture se fait dans sa propre tâche : si l'appelant est interrompu (client qui se
 /// déconnecte), la transaction va quand même jusqu'au bout et libère le verrou. Sans cela,
-/// un verrou resté pris bloquait toutes les écritures suivantes, puis tout le bastion.
+/// un verrou resté pris bloquait toutes les écritures suivantes, puis tout la Gate.
 pub async fn log(db: &PgPool, actor: &str, event: &str, detail: Value) -> Result<()> {
     let (db, actor, event) = (db.clone(), actor.to_string(), event.to_string());
     tokio::spawn(async move { write(&db, &actor, &event, detail).await })

@@ -2,7 +2,7 @@
 //!
 //! La personne aidée ouvre Portunia Assist, qui se connecte ici (WebSocket, adresse publique du
 //! portail, sans compte) et reçoit une « place » de 3 chiffres ; son programme y ajoute 6 chiffres
-//! secrets pour former le code qu'elle dicte. Le dépanneur, compte du bastion membre du groupe
+//! secrets pour former le code qu'elle dicte. Le dépanneur, compte de la Gate membre du groupe
 //! autorisé, se connecte depuis Portunia avec la place. Le relais met les deux en relation puis
 //! transmet les messages tels quels : ils sont chiffrés de bout en bout à partir du code entier,
 //! que le relais ne connaît pas (voir assist-proto dans Portunia).
@@ -221,9 +221,9 @@ pub async fn can_help(state: &State, user: uuid::Uuid) -> Result<bool> {
 
 // ---------- Programme de la personne aidée ----------
 
-/// Où le bastion garde Portunia Assist (servi par la page de téléchargement).
+/// Où la Gate garde Portunia Assist (servi par la page de téléchargement).
 pub fn agent_file(state: &State) -> std::path::PathBuf {
-    state.config.data_dir.join("assist").join("portunia-assist.exe")
+    state.config.data_dir.join("assist").join("portunia-assistance.exe")
 }
 
 const RELEASES: &str = "https://github.com/jpiperault/Portunia-releases/releases/latest/download";
@@ -238,12 +238,12 @@ pub async fn fetch_agent(state: Arc<State>) -> Result<()> {
             std::io::Read::read_to_end(&mut std::io::Read::take(resp.into_reader(), 64 * 1024 * 1024), &mut out)?;
             Ok(out)
         };
-        Ok((get("portunia-assist.exe")?, String::from_utf8_lossy(&get("portunia-assist.exe.sha256")?).into_owned()))
+        Ok((get("portunia-assistance.exe")?, String::from_utf8_lossy(&get("portunia-assistance.exe.sha256")?).into_owned()))
     })
     .await??;
     let expected = sums.split_whitespace().next().unwrap_or_default().to_lowercase();
     let actual = crate::keys::sha256_hex(&exe);
-    anyhow::ensure!(expected == actual, "empreinte de portunia-assist.exe différente de celle publiée");
+    anyhow::ensure!(expected == actual, "empreinte de portunia-assistance.exe différente de celle publiée");
     std::fs::create_dir_all(dest.parent().unwrap())?;
     let tmp = dest.with_extension("tmp");
     std::fs::write(&tmp, &exe)?;

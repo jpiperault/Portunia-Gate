@@ -219,8 +219,8 @@ pub struct Target {
     pub protocole: String,
 }
 
-/// Protocole et mode compatibles. Bureau à distance : rebond (le bastion relaie la connexion
-/// chiffrée sans la lire) ou enregistré (le bastion relaie et enregistre ; identifiants
+/// Protocole et mode compatibles. Bureau à distance : rebond (la Gate relaie la connexion
+/// chiffrée sans la lire) ou enregistré (la Gate relaie et enregistre ; identifiants
 /// Windows tapés par l'utilisateur). Le coffre arrive ensuite.
 pub fn check_protocol(protocole: &str, mode: &str) -> Result<()> {
     match protocole {

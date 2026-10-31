@@ -7,53 +7,53 @@ services:
     image: postgres:17-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_DB: heimdia
-      POSTGRES_USER: heimdia
-      POSTGRES_PASSWORD: ${HEIMDIA_DB_PASSWORD:?définissez HEIMDIA_DB_PASSWORD dans .env}
+      POSTGRES_DB: portunia_gate
+      POSTGRES_USER: portunia_gate
+      POSTGRES_PASSWORD: ${PORTUNIA_GATE_DB_PASSWORD:?définissez PORTUNIA_GATE_DB_PASSWORD dans .env}
     volumes:
       - postgres:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U heimdia -d heimdia"]
+      test: ["CMD-SHELL", "pg_isready -U portunia_gate -d portunia_gate"]
       interval: 5s
       retries: 20
 
-  heimdia:
+  portunia-gate:
     build: .
     restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
     environment:
-      HEIMDIA_DATABASE_URL: postgres://heimdia:${HEIMDIA_DB_PASSWORD}@postgres/heimdia
+      PORTUNIA_GATE_DATABASE_URL: postgres://portunia_gate:${PORTUNIA_GATE_DB_PASSWORD}@postgres/portunia_gate
       TZ: ${TZ:-Europe/Paris}
-      HEIMDIA_SSH_PUBLIC_PORT: ${HEIMDIA_SSH_PORT:-2222}
-      # Certificat de l'entreprise (fichiers PEM copiés dans /var/lib/heimdia) ; vide = auto-signé.
-      HEIMDIA_TLS_CERT: ${HEIMDIA_TLS_CERT:-}
-      HEIMDIA_TLS_KEY: ${HEIMDIA_TLS_KEY:-}
+      PORTUNIA_GATE_SSH_PUBLIC_PORT: ${PORTUNIA_GATE_SSH_PORT:-2222}
+      # Certificat de l'entreprise (fichiers PEM copiés dans /var/lib/portunia-gate) ; vide = auto-signé.
+      PORTUNIA_GATE_TLS_CERT: ${PORTUNIA_GATE_TLS_CERT:-}
+      PORTUNIA_GATE_TLS_KEY: ${PORTUNIA_GATE_TLS_KEY:-}
       # Portail web : HTTP pour cloudflared (réseau interne de Compose, jamais publié),
       # HTTPS pour le proxy Cloudflare (adresses de Cloudflare seulement).
-      HEIMDIA_PORTAL_LISTEN: 0.0.0.0:8445
-      HEIMDIA_PORTAL_TLS_LISTEN: 0.0.0.0:8446
-      HEIMDIA_TUNNEL_METRICS: cloudflared:20241
+      PORTUNIA_GATE_PORTAL_LISTEN: 0.0.0.0:8445
+      PORTUNIA_GATE_PORTAL_TLS_LISTEN: 0.0.0.0:8446
+      PORTUNIA_GATE_TUNNEL_METRICS: cloudflared:20241
     ports:
-      - "${HEIMDIA_SSH_PORT:-2222}:2222"
-      - "${HEIMDIA_API_PORT:-8443}:8443"
-      # Proxy Cloudflare : HEIMDIA_PORTAL_PORT=0.0.0.0:8446 dans .env pour l'ouvrir au réseau.
-      - "${HEIMDIA_PORTAL_PORT:-127.0.0.1:8446}:8446"
+      - "${PORTUNIA_GATE_SSH_PORT:-2222}:2222"
+      - "${PORTUNIA_GATE_API_PORT:-8443}:8443"
+      # Proxy Cloudflare : PORTUNIA_GATE_PORTAL_PORT=0.0.0.0:8446 dans .env pour l'ouvrir au réseau.
+      - "${PORTUNIA_GATE_PORTAL_PORT:-127.0.0.1:8446}:8446"
     volumes:
-      - donnees:/var/lib/heimdia
+      - donnees:/var/lib/portunia-gate
 
   # Cloudflare Tunnel : connexion sortante vers Cloudflare, aucun port entrant.
-  # Dans Cloudflare Zero Trust, le nom public du tunnel pointe vers http://heimdia:8445.
+  # Dans Cloudflare Zero Trust, le nom public du tunnel pointe vers http://portunia-gate:8445.
   cloudflared:
     image: cloudflare/cloudflared:2026.9.1
     profiles: ["portail"]
     restart: unless-stopped
     command: tunnel --no-autoupdate --metrics 0.0.0.0:20241 run
     environment:
-      TUNNEL_TOKEN: ${HEIMDIA_TUNNEL_TOKEN:-}
+      TUNNEL_TOKEN: ${PORTUNIA_GATE_TUNNEL_TOKEN:-}
     depends_on:
-      - heimdia
+      - portunia-gate
 
 volumes:
   postgres:

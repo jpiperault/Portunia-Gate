@@ -1,4 +1,4 @@
--- Socle de Heimdia : comptes, cibles, droits, sessions et journal d'audit.
+-- Socle de Portunia Gate : comptes, cibles, droits, sessions et journal d'audit.
 
 CREATE TABLE settings (
     key   TEXT PRIMARY KEY,

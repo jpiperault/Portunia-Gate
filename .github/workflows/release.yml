@@ -1,12 +1,12 @@
 # Publie une version de Portunia Gate : à chaque tag vX.Y.Z poussé sur GitHub, compile le paquet
 # Debian (binaire autonome, musl) et crée la release dans le dépôt PUBLIC
-# jpiperault/Heimdia-releases (le code reste privé ici), où installer.sh télécharge
-# heimdia_amd64.deb et vérifie son empreinte dans SHA256SUMS. Une copie de la release,
+# jpiperault/Portunia-Gate-releases (le code reste privé ici), où installer.sh télécharge
+# portunia-gate_amd64.deb et vérifie son empreinte dans SHA256SUMS. Une copie de la release,
 # avec la liste des changements, est aussi créée dans ce dépôt.
 #
 # Secret à définir dans ce dépôt (Settings > Secrets and variables > Actions) :
 #   RELEASES_TOKEN   jeton d'accès (fine-grained) avec le droit
-#                    « Contents : Read and write » sur Heimdia-releases
+#                    « Contents : Read and write » sur Portunia-Gate-releases
 name: Publier une version
 
 on:
@@ -50,24 +50,24 @@ jobs:
       - name: Essai sur un processeur sans AVX
         run: |
           d=$(mktemp -d)
-          HEIMDIA_DATA_DIR=$d HEIMDIA_DATABASE_URL=postgres://essai@127.0.0.1:1/essai \
-            timeout 120 qemu-x86_64 -cpu qemu64 target/x86_64-unknown-linux-musl/release/heimdia init --no-admin || true
+          PORTUNIA_GATE_DATA_DIR=$d PORTUNIA_GATE_DATABASE_URL=postgres://essai@127.0.0.1:1/essai \
+            timeout 120 qemu-x86_64 -cpu qemu64 target/x86_64-unknown-linux-musl/release/portunia-gate init --no-admin || true
           ls -l $d
           test -s $d/signature.key && test -s $d/api.crt
 
       - name: Fichiers publiés
         run: |
           mkdir publie
-          cp target/x86_64-unknown-linux-musl/debian/heimdia_*.deb publie/
+          cp target/x86_64-unknown-linux-musl/debian/portunia-gate_*.deb publie/
           # Nom stable pour le lien « dernière version » utilisé par installer.sh.
-          cp publie/heimdia_*.deb publie/heimdia_amd64.deb
+          cp publie/portunia-gate_*.deb publie/portunia-gate_amd64.deb
           cp installer.sh publie/
           cd publie && sha256sum *.deb installer.sh > SHA256SUMS && cat SHA256SUMS
 
       - uses: softprops/action-gh-release@v2
         with:
           token: ${{ secrets.RELEASES_TOKEN }}
-          repository: jpiperault/Heimdia-releases
+          repository: jpiperault/Portunia-Gate-releases
           # Le dépôt public ne contient pas ce code : le tag y est créé sur sa branche main.
           target_commitish: main
           tag_name: ${{ github.ref_name }}
@@ -76,7 +76,7 @@ jobs:
             Install on Debian 12/13 or Ubuntu 22.04 and later:
 
             ```bash
-            curl -fsSLO https://github.com/jpiperault/Heimdia-releases/releases/latest/download/installer.sh
+            curl -fsSLO https://github.com/jpiperault/Portunia-Gate-releases/releases/latest/download/installer.sh
             sudo bash installer.sh
             ```
 

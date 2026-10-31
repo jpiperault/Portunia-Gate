@@ -1,6 +1,6 @@
-//! Surveillance interne : si le bastion ne répond plus, il le dit dans son journal et
-//! s'arrête, pour être redémarré par systemd (Restart=on-failure) ou Docker
-//! (restart: unless-stopped), au lieu de rester bloqué jusqu'à une intervention.
+//! Surveillance interne : si la Gate ne répond plus, elle le dit dans son journal et
+//! s'arrête, pour être redémarrée par systemd (Restart=on-failure) ou Docker
+//! (restart: unless-stopped), au lieu de rester bloquée jusqu'à une intervention.
 //!
 //! - Toutes les 20 s : la base répond (SELECT 1) et le serveur SSH accepte une connexion
 //!   et envoie sa bannière. Trois échecs de suite : arrêt, avec ce qui a échoué.

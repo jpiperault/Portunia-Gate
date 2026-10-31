@@ -1,4 +1,4 @@
--- Bureau à distance en mode enregistré : le bastion relaie la session (passage RDCleanPath)
+-- Bureau à distance en mode enregistré : la Gate relaie la session (passage RDCleanPath)
 -- et l'enregistre ; nouveau type de session « rdp ».
 
 ALTER TABLE sessions DROP CONSTRAINT IF EXISTS sessions_kind_check;

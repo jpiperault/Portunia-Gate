@@ -1,18 +1,18 @@
-// Portail web de Heimdia : connexion, puis serveurs autorisés. Aucune administration ici.
+// Portail web de Portunia Gate : connexion, puis serveurs autorisés. Aucune administration ici.
 'use strict';
 
 const app = document.getElementById('app');
 
-// Langue de la page, choisie par le bastion (cookie du sélecteur, sinon langue du navigateur).
+// Langue de la page, choisie par la Gate (cookie du sélecteur, sinon langue du navigateur).
 const FR = document.documentElement.lang === 'fr';
 const T = (en, fr) => (FR ? fr : en);
 
-// Sélecteur de langue : retenu un an dans un cookie lu par le bastion.
+// Sélecteur de langue : retenu un an dans un cookie lu par la Gate.
 function langSwitch() {
   return h('button', {
     class: 'btn lang', type: 'button', lang: FR ? 'en' : 'fr',
     onclick: () => {
-      document.cookie = `heimdia_langue=${FR ? 'en' : 'fr'}; Path=/; Max-Age=31536000; SameSite=Strict; Secure`;
+      document.cookie = `portunia_gate_langue=${FR ? 'en' : 'fr'}; Path=/; Max-Age=31536000; SameSite=Strict; Secure`;
       location.reload();
     },
   }, FR ? 'English' : 'Français');
@@ -34,7 +34,7 @@ async function api(method, path, body) {
   const res = await fetch(path, {
     method,
     credentials: 'same-origin',
-    headers: body ? { 'Content-Type': 'application/json', 'X-Heimdia': 'portail' } : { 'X-Heimdia': 'portail' },
+    headers: body ? { 'Content-Type': 'application/json', 'X-Portunia-Gate': 'portail' } : { 'X-Portunia-Gate': 'portail' },
     body: body ? JSON.stringify(body) : undefined,
   });
   const data = await res.json().catch(() => ({}));

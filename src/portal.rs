@@ -1,11 +1,11 @@
 //! Portail web : accès aux serveurs depuis un navigateur, sans Portunia, derrière Cloudflare.
 //!
-//! - Écoute HTTP locale pour Cloudflare Tunnel (HEIMDIA_PORTAL_LISTEN, 127.0.0.1:8445), et
-//!   au besoin HTTPS pour le proxy Cloudflare (HEIMDIA_PORTAL_TLS_LISTEN), réservée aux
+//! - Écoute HTTP locale pour Cloudflare Tunnel (PORTUNIA_GATE_PORTAL_LISTEN, 127.0.0.1:8445), et
+//!   au besoin HTTPS pour le proxy Cloudflare (PORTUNIA_GATE_PORTAL_TLS_LISTEN), réservée aux
 //!   adresses de Cloudflare.
 //! - Connexion : mot de passe et code toujours, Turnstile si configuré, essais limités, compte
 //!   membre du groupe choisi. Pas d'enrôlement ni de changement de mot de passe ici.
-//! - Terminal : le portail se connecte au serveur SSH du bastion lui-même, pour l'utilisateur,
+//! - Terminal : le portail se connecte au serveur SSH de la Gate lui-même, pour l'utilisateur,
 //!   avec un jeton à usage unique ; règles, coffre, enregistrement et journal sont donc ceux
 //!   de toutes les sessions. Le navigateur reçoit le terminal par WebSocket.
 //! - Pas d'administration : elle se fait dans Portunia (Administrer › Réglages › Portail web).
@@ -51,7 +51,7 @@ use crate::{
     State,
 };
 
-const COOKIE: &str = "heimdia_portail";
+const COOKIE: &str = "portunia_gate_portail";
 /// Avertissement avant la fermeture pour inactivité.
 const IDLE_WARNING: Duration = Duration::from_secs(90);
 
@@ -151,9 +151,9 @@ struct Portal {
 type Ctx = AxState<Arc<Portal>>;
 
 pub async fn run(state: Arc<State>) -> Result<()> {
-    let http = state.config.portal_listen.parse::<SocketAddr>().map_err(|_| anyhow!(t!("invalid HEIMDIA_PORTAL_LISTEN", "HEIMDIA_PORTAL_LISTEN invalide")))?;
+    let http = state.config.portal_listen.parse::<SocketAddr>().map_err(|_| anyhow!(t!("invalid PORTUNIA_GATE_PORTAL_LISTEN", "PORTUNIA_GATE_PORTAL_LISTEN invalide")))?;
     let tls = match &state.config.portal_tls_listen {
-        Some(a) => Some(a.parse::<SocketAddr>().map_err(|_| anyhow!(t!("invalid HEIMDIA_PORTAL_TLS_LISTEN", "HEIMDIA_PORTAL_TLS_LISTEN invalide")))?),
+        Some(a) => Some(a.parse::<SocketAddr>().map_err(|_| anyhow!(t!("invalid PORTUNIA_GATE_PORTAL_TLS_LISTEN", "PORTUNIA_GATE_PORTAL_TLS_LISTEN invalide")))?),
         None => None,
     };
     let plain = router(state.clone(), false);
@@ -204,7 +204,7 @@ fn router(state: Arc<State>, cloudflare_only: bool) -> Router {
         .route("/ws-rdp", get(desktop))
         // Assistance à distance : téléchargement de Portunia Assist et relais (sans compte).
         .route("/assistance", get(page_assist))
-        .route("/assistance/portunia-assist.exe", get(assist_agent_file))
+        .route("/assistance/portunia-assistance.exe", get(assist_agent_file))
         .route("/assistance/relais", get(assist_agent))
         .layer(middleware::from_fn_with_state(portal.clone(), guard))
         // Pages et messages dans la langue du sélecteur ou du navigateur.
@@ -288,7 +288,7 @@ async fn guard(AxState(portal): Ctx, ConnectInfo(peer): ConnectInfo<SocketAddr>,
 /// Requête d'écriture venue de la page elle-même (en-tête ajouté par son script, et même
 /// origine que l'adresse publique si elle est réglée) : protège contre les envois croisés.
 fn same_site(headers: &HeaderMap, public_url: &str) -> bool {
-    if headers.get("x-heimdia").and_then(|v| v.to_str().ok()) != Some("portail") {
+    if headers.get("x-portunia-gate").and_then(|v| v.to_str().ok()) != Some("portail") {
         return false;
     }
     match (headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()), public_url.trim_end_matches('/')) {
@@ -313,7 +313,7 @@ const SESSION: &str = include_str!("../portail/session.html");
 const DESKTOP: &str = include_str!("../portail/bureau.html");
 const ASSIST: &str = include_str!("../portail/assistance.html");
 
-/// Pages et scripts portent la version du bastion dans les adresses de leurs fichiers
+/// Pages et scripts portent la version de la Gate dans les adresses de leurs fichiers
 /// (`?v=__V__`) : après une mise à jour, le navigateur charge les nouveaux, pas ceux en cache.
 fn versioned(text: &str) -> String {
     text.replace("__V__", env!("CARGO_PKG_VERSION"))
@@ -361,7 +361,7 @@ async fn page_assist() -> Response {
     page(ASSIST)
 }
 
-/// Portunia Assist, gardé par le bastion (téléchargé à l'activation de l'assistance).
+/// Portunia Assist, gardé par la Gate (téléchargé à l'activation de l'assistance).
 async fn assist_agent_file(AxState(portal): Ctx) -> Response {
     let state = &portal.state;
     match crate::assist::settings(state).await {
@@ -789,7 +789,7 @@ async fn desktop(AxState(portal): Ctx, ConnectInfo(peer): ConnectInfo<SocketAddr
     ws.on_upgrade(move |socket| crate::lang::scope(lang, crate::rdp::relay(state, socket, crate::rdp::Origin::Portal { addr })))
 }
 
-/// Accepte seulement la clé du bastion lui-même (connexion locale).
+/// Accepte seulement la clé de la Gate lui-même (connexion locale).
 struct Local {
     expected: String,
 }
@@ -810,7 +810,7 @@ async fn send_json(socket: &mut WebSocket, value: Value) -> bool {
     socket.send(Message::Text(value.to_string().into())).await.is_ok()
 }
 
-/// Relie le navigateur au serveur SSH du bastion : sortie du terminal en binaire, saisie et
+/// Relie le navigateur au serveur SSH de la Gate : sortie du terminal en binaire, saisie et
 /// commandes (taille, « je suis là ») en JSON.
 #[allow(clippy::too_many_arguments)]
 async fn bridge(state: &State, mut socket: WebSocket, user: &str, ticket: &str, cols: u32, rows: u32, expires: DateTime<Utc>, idle_min: i64) -> Result<()> {
@@ -910,7 +910,7 @@ pub async fn tunnel_status(state: &State) -> &'static str {
     }
 }
 
-/// Clé du secret Turnstile, chiffrée par le coffre du bastion.
+/// Clé du secret Turnstile, chiffrée par le coffre de la Gate.
 pub fn seal_turnstile(state: &State, secret: &str) -> Result<String> {
     Ok(base64::engine::general_purpose::STANDARD.encode(state.keys.seal("reglage:turnstile", secret.as_bytes())?))
 }
@@ -939,7 +939,7 @@ mod tests {
     #[test]
     fn cookie() {
         let mut h = HeaderMap::new();
-        h.insert(header::COOKIE, HeaderValue::from_static("a=1; heimdia_portail=abc; b=2"));
+        h.insert(header::COOKIE, HeaderValue::from_static("a=1; portunia_gate_portail=abc; b=2"));
         assert_eq!(cookie_token(&h).as_deref(), Some("abc"));
     }
 }

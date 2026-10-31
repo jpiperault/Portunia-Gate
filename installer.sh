@@ -12,24 +12,24 @@
 #
 # French names are kept: --paquet, mise-a-jour, portail.
 # Messages are in French when the system's language is French (LANG=fr_…), in English otherwise;
-# HEIMDIA_LANG=en or fr chooses.
+# PORTUNIA_GATE_LANG=en or fr chooses.
 #
-# Without a terminal (automation), answers come from HEIMDIA_NOM, HEIMDIA_ADMIN, HEIMDIA_SSH_PORT,
-# HEIMDIA_API_PORT and TZ, or the defaults.
+# Without a terminal (automation), answers come from PORTUNIA_GATE_NOM, PORTUNIA_GATE_ADMIN, PORTUNIA_GATE_SSH_PORT,
+# PORTUNIA_GATE_API_PORT and TZ, or the defaults.
 set -euo pipefail
 
-RELEASES=${HEIMDIA_RELEASES:-https://github.com/jpiperault/Heimdia-releases/releases/latest/download}
-ENV_NATIVE=/etc/heimdia/heimdia.env
-DOCKER_WRAPPER=/usr/local/bin/heimdia
+RELEASES=${PORTUNIA_GATE_RELEASES:-https://github.com/jpiperault/Portunia-Gate-releases/releases/latest/download}
+ENV_NATIVE=/etc/portunia-gate/portunia-gate.env
+DOCKER_WRAPPER=/usr/local/bin/portunia-gate
 
 SELF=$(readlink -f "$0")
 DIR=$(dirname "$SELF")
 cd "$DIR"
 
-# Langue : HEIMDIA_LANG, sinon celle du système.
+# Langue : PORTUNIA_GATE_LANG, sinon celle du système.
 lang_of() {
   local v
-  for v in "${HEIMDIA_LANG:-}" "${LC_ALL:-}" "${LC_MESSAGES:-}" "${LANG:-}"; do
+  for v in "${PORTUNIA_GATE_LANG:-}" "${LC_ALL:-}" "${LC_MESSAGES:-}" "${LANG:-}"; do
     [ -n "$v" ] || continue
     case $v in fr*) echo fr ;; *) echo en ;; esac
     return
@@ -37,7 +37,7 @@ lang_of() {
   echo en
 }
 L=$(lang_of)
-export HEIMDIA_LANG=$L
+export PORTUNIA_GATE_LANG=$L
 # t "English" "Français" : le texte dans la langue de l'assistant.
 t() { if [ "$L" = fr ]; then printf '%s' "$2"; else printf '%s' "$1"; fi; }
 
@@ -78,7 +78,7 @@ done
 
 if [ "$(id -u)" -ne 0 ]; then
   command -v sudo >/dev/null || die "$(t "Run the assistant as root." "Lancez l'assistant en root.")"
-  exec sudo --preserve-env=HEIMDIA_NOM,HEIMDIA_ADMIN,HEIMDIA_SSH_PORT,HEIMDIA_API_PORT,TZ,HEIMDIA_RELEASES,HEIMDIA_TUNNEL_TOKEN,HEIMDIA_LANG -- "$SELF" "${ARGS[@]}"
+  exec sudo --preserve-env=PORTUNIA_GATE_NOM,PORTUNIA_GATE_ADMIN,PORTUNIA_GATE_SSH_PORT,PORTUNIA_GATE_API_PORT,TZ,PORTUNIA_GATE_RELEASES,PORTUNIA_GATE_TUNNEL_TOKEN,PORTUNIA_GATE_LANG -- "$SELF" "${ARGS[@]}"
 fi
 BACKUP_OWNER=${SUDO_USER:-root}
 
@@ -88,9 +88,9 @@ port_busy() { ss -Hltn "sport = :$1" 2>/dev/null | grep -q .; }
 compose() { docker compose "$@"; }
 
 # Le service n'est activé qu'une fois l'initialisation réussie : sinon, l'installation est à reprendre.
-installed_native() { [ -f "$ENV_NATIVE" ] && systemctl is-enabled --quiet heimdia 2>/dev/null; }
+installed_native() { [ -f "$ENV_NATIVE" ] && systemctl is-enabled --quiet portunia-gate 2>/dev/null; }
 installed_docker() {
-  [ -f .env ] && command -v docker >/dev/null && compose ps -a --format '{{.Service}}' 2>/dev/null | grep -qx heimdia
+  [ -f .env ] && command -v docker >/dev/null && compose ps -a --format '{{.Service}}' 2>/dev/null | grep -qx portunia-gate
 }
 
 # Mode d'une installation existante, et ses réglages.
@@ -102,9 +102,9 @@ use_mode() {
 env_value() { [ ! -f "$ENV_FILE" ] || sed -n "s/^$1=//p" "$ENV_FILE" | tail -n1; }
 # Commande d'administration de la Gate, quel que soit le mode, dans la langue de l'assistant.
 hcmd() {
-  if [ "$MODE" = docker ]; then compose exec -T -e HEIMDIA_LANG="$L" heimdia heimdia "$@"; else /usr/bin/heimdia "$@"; fi
+  if [ "$MODE" = docker ]; then compose exec -T -e PORTUNIA_GATE_LANG="$L" portunia-gate portunia-gate "$@"; else /usr/bin/portunia-gate "$@"; fi
 }
-# Valeurs lues dans la sortie de heimdia, en anglais comme en français.
+# Valeurs lues dans la sortie de portunia-gate, en anglais comme en français.
 fingerprint_of() { awk '/^(API certificate|Certificat de l)/{print $NF}'; }
 password_of() { sed -n 's/.*\(Temporary password: \|Mot de passe provisoire : \)\([^ ]*\).*/\2/p'; }
 
@@ -161,7 +161,7 @@ check_build_memory() {
   [ $((mem + swap)) -lt 3500 ] || return 0
   warn "$(t "Low memory for the build (about 3.5 GB needed, memory and swap included)." "Mémoire faible pour compiler (il faut environ 3,5 Go, mémoire et échange compris).")"
   if ! container && confirm "$(t "Add a 2 GB swap file for the duration of the build?" "Ajouter un fichier d'échange de 2 Go le temps de la compilation ?")"; then
-    SWAPFILE=/heimdia-compilation.swap
+    SWAPFILE=/portunia-gate-compilation.swap
     if fallocate -l 2G "$SWAPFILE" && chmod 600 "$SWAPFILE" && mkswap -q "$SWAPFILE" && swapon "$SWAPFILE"; then
       ok "$(t "Temporary swap file added" "Fichier d'échange temporaire ajouté")"
     else
@@ -192,10 +192,10 @@ install_package() {
     cp "$PACKAGE" "$deb"
   else
     command -v curl >/dev/null || command -v wget >/dev/null || { apt-get update -qq; apt-get install -y -qq curl >/dev/null; }
-    deb=$work/heimdia_amd64.deb
-    fetch "$RELEASES/heimdia_amd64.deb" "$deb" || die "$(t "Download failed:" "Téléchargement impossible :") $RELEASES/heimdia_amd64.deb"
+    deb=$work/portunia-gate_amd64.deb
+    fetch "$RELEASES/portunia-gate_amd64.deb" "$deb" || die "$(t "Download failed:" "Téléchargement impossible :") $RELEASES/portunia-gate_amd64.deb"
     fetch "$RELEASES/SHA256SUMS" "$work/SHA256SUMS" || die "$(t "Download failed:" "Téléchargement impossible :") $RELEASES/SHA256SUMS"
-    (cd "$work" && grep ' heimdia_amd64.deb$' SHA256SUMS | sha256sum -c --quiet -) ||
+    (cd "$work" && grep ' portunia-gate_amd64.deb$' SHA256SUMS | sha256sum -c --quiet -) ||
       die "$(t "The downloaded package is altered (different SHA-256 checksum)." "Le paquet téléchargé est altéré (empreinte SHA-256 différente).")"
     ok "$(t "Package downloaded and checked" "Paquet téléchargé et vérifié")"
   fi
@@ -204,19 +204,19 @@ install_package() {
     { cat "$work/apt.log" >&2; die "$(t "Cannot install the package." "Installation du paquet impossible.")"; }
   rm -rf "$work"
   local v pgv
-  v=$(dpkg-query -W -f '${Version}' heimdia)
+  v=$(dpkg-query -W -f '${Version}' portunia-gate)
   pgv=$(pg_lsclusters -h 2>/dev/null | awk 'NR==1{print $1}')
   ok "$(t "Portunia Gate $v and PostgreSQL $pgv installed" "Portunia Gate $v et PostgreSQL $pgv installés")"
 }
 
-# Base PostgreSQL locale, sans mot de passe : le compte de service _heimdia s'y connecte par socket.
+# Base PostgreSQL locale, sans mot de passe : le compte de service _portunia_gate s'y connecte par socket.
 pg() { (cd / && runuser -u postgres -- "$@"); }
 prepare_database() {
   systemctl enable --now postgresql >/dev/null 2>&1 || true
   for _ in $(seq 1 30); do pg psql -qtAc 'SELECT 1' >/dev/null 2>&1 && break; sleep 1; done
-  pg psql -qtAc "SELECT 1 FROM pg_roles WHERE rolname = '_heimdia'" | grep -q 1 || pg createuser _heimdia
-  pg psql -qtAc "SELECT 1 FROM pg_database WHERE datname = 'heimdia'" | grep -q 1 || pg createdb -O _heimdia heimdia
-  ok "$(t "PostgreSQL database « heimdia » ready" "Base PostgreSQL « heimdia » prête")"
+  pg psql -qtAc "SELECT 1 FROM pg_roles WHERE rolname = '_portunia_gate'" | grep -q 1 || pg createuser _portunia_gate
+  pg psql -qtAc "SELECT 1 FROM pg_database WHERE datname = 'portunia_gate'" | grep -q 1 || pg createdb -O _portunia_gate portunia_gate
+  ok "$(t "PostgreSQL database « portunia_gate » ready" "Base PostgreSQL « portunia_gate » prête")"
 }
 
 # ---------- Étapes communes ----------
@@ -231,22 +231,22 @@ build_image() {
 install_docker_wrapper() {
   cat >"$DOCKER_WRAPPER" <<EOF
 #!/bin/sh
-# Commande heimdia du serveur : relaie vers la Gate dans son conteneur ($DIR).
+# Commande portunia-gate du serveur : relaie vers la Gate dans son conteneur ($DIR).
 # Installée par installer.sh. .env (mot de passe de la base) n'est lisible que par root.
 if [ "\$(id -u)" -ne 0 ]; then exec sudo -- "\$0" "\$@"; fi
 cd "$DIR" || exit 1
 # Messages dans la langue de qui tape la commande.
-case "\${HEIMDIA_LANG:-\${LC_ALL:-\${LC_MESSAGES:-\${LANG:-}}}}" in fr*) lang=fr ;; *) lang=en ;; esac
-if ! docker compose ps --status running --format '{{.Service}}' | grep -qx heimdia; then
+case "\${PORTUNIA_GATE_LANG:-\${LC_ALL:-\${LC_MESSAGES:-\${LANG:-}}}}" in fr*) lang=fr ;; *) lang=en ;; esac
+if ! docker compose ps --status running --format '{{.Service}}' | grep -qx portunia-gate; then
   if [ "\$lang" = fr ]; then
-    echo "La Gate est arrêté. Démarrez-le : cd $DIR && docker compose up -d" >&2
+    echo "La Gate est arrêtée. Démarrez-la : cd $DIR && docker compose up -d" >&2
   else
     echo "The Gate is stopped. Start it: cd $DIR && docker compose up -d" >&2
   fi
   exit 1
 fi
-if [ -t 0 ]; then exec docker compose exec -e HEIMDIA_LANG=\$lang heimdia heimdia "\$@"; fi
-exec docker compose exec -T -e HEIMDIA_LANG=\$lang heimdia heimdia "\$@"
+if [ -t 0 ]; then exec docker compose exec -e PORTUNIA_GATE_LANG=\$lang portunia-gate portunia-gate "\$@"; fi
+exec docker compose exec -T -e PORTUNIA_GATE_LANG=\$lang portunia-gate portunia-gate "\$@"
 EOF
   chmod 755 "$DOCKER_WRAPPER"
 }
@@ -256,11 +256,11 @@ BACKUP=''
 save_vault_key() {
   local home
   home=$(getent passwd "$BACKUP_OWNER" | cut -d: -f6)
-  BACKUP=${home:-/root}/heimdia-coffre.key
+  BACKUP=${home:-/root}/portunia-gate-coffre.key
   if [ "$MODE" = docker ]; then
-    compose cp heimdia:/var/lib/heimdia/coffre.key "$BACKUP" >/dev/null 2>&1 || die "$(t "Cannot copy the vault key." "Copie de la clé du coffre impossible.")"
+    compose cp portunia-gate:/var/lib/portunia-gate/coffre.key "$BACKUP" >/dev/null 2>&1 || die "$(t "Cannot copy the vault key." "Copie de la clé du coffre impossible.")"
   else
-    cp /var/lib/heimdia/coffre.key "$BACKUP"
+    cp /var/lib/portunia-gate/coffre.key "$BACKUP"
   fi
   chown "$BACKUP_OWNER" "$BACKUP"
   chmod 600 "$BACKUP"
@@ -268,16 +268,16 @@ save_vault_key() {
 
 wait_api() {
   local port
-  port=$(env_value HEIMDIA_API_PORT)
+  port=$(env_value PORTUNIA_GATE_API_PORT)
   for _ in $(seq 1 60); do
     if (exec 3<>"/dev/tcp/127.0.0.1/${port:-8443}") 2>/dev/null; then return 0; fi
     sleep 1
   done
   if [ "$MODE" = docker ]; then
-    die "$(t "The Gate is not answering on port ${port:-8443}: docker compose logs heimdia" "La Gate ne répond pas sur le port ${port:-8443} : docker compose logs heimdia")"
+    die "$(t "The Gate is not answering on port ${port:-8443}: docker compose logs portunia-gate" "La Gate ne répond pas sur le port ${port:-8443} : docker compose logs portunia-gate")"
   fi
-  journalctl -u heimdia -n 15 --no-pager >&2 || true
-  die "$(t "The Gate is not answering on port ${port:-8443}: journalctl -u heimdia" "La Gate ne répond pas sur le port ${port:-8443} : journalctl -u heimdia")"
+  journalctl -u portunia-gate -n 15 --no-pager >&2 || true
+  die "$(t "The Gate is not answering on port ${port:-8443}: journalctl -u portunia-gate" "La Gate ne répond pas sur le port ${port:-8443} : journalctl -u portunia-gate")"
 }
 
 open_firewall() {
@@ -293,8 +293,8 @@ open_firewall() {
 summary() {
   local login=${1:-} password=${2:-} fingerprint api_port ssh_port addr
   fingerprint=$(hcmd info | fingerprint_of)
-  api_port=$(env_value HEIMDIA_API_PORT)
-  ssh_port=$(env_value HEIMDIA_SSH_PORT)
+  api_port=$(env_value PORTUNIA_GATE_API_PORT)
+  ssh_port=$(env_value PORTUNIA_GATE_SSH_PORT)
   addr=$(address)
   [ "${api_port:-8443}" = 8443 ] || addr="$addr:$api_port"
   echo
@@ -336,24 +336,24 @@ summary() {
 questions() {
   step "$(t "Configuration" "Configuration") ${D}$(t "(Enter keeps the suggested value)" "(Entrée pour garder la valeur proposée)")${N}"
   # Installation interrompue : on reprend ses réglages.
-  HEIMDIA_SSH_PORT=${HEIMDIA_SSH_PORT:-$(env_value HEIMDIA_SSH_PORT)}
-  HEIMDIA_API_PORT=${HEIMDIA_API_PORT:-$(env_value HEIMDIA_API_PORT)}
+  PORTUNIA_GATE_SSH_PORT=${PORTUNIA_GATE_SSH_PORT:-$(env_value PORTUNIA_GATE_SSH_PORT)}
+  PORTUNIA_GATE_API_PORT=${PORTUNIA_GATE_API_PORT:-$(env_value PORTUNIA_GATE_API_PORT)}
   TZ=${TZ:-$(env_value TZ)}
-  NOM=$(ask "$(t "Gate name, shown in Portunia" "Nom de la Gate, affiché dans Portunia")" "${HEIMDIA_NOM:-Portunia Gate}")
+  NOM=$(ask "$(t "Gate name, shown in Portunia" "Nom de la Gate, affiché dans Portunia")" "${PORTUNIA_GATE_NOM:-Portunia Gate}")
   while :; do
-    ADMIN=$(ask "$(t "Administrator login" "Identifiant de l'administrateur")" "${HEIMDIA_ADMIN:-admin}")
+    ADMIN=$(ask "$(t "Administrator login" "Identifiant de l'administrateur")" "${PORTUNIA_GATE_ADMIN:-admin}")
     [[ "$ADMIN" =~ ^[a-z0-9][a-z0-9._-]{0,31}$ ]] && break
     warn "$(t "Lowercase letters, digits, dot, hyphen or underscore (32 characters at most)." "Lettres minuscules, chiffres, point, tiret ou souligné (32 caractères au plus).")"
     interactive || die "$(t "Invalid login: $ADMIN" "Identifiant invalide : $ADMIN")"
   done
   while :; do
-    SSH_PORT=$(ask "$(t "Gate SSH port" "Port SSH de la Gate")" "${HEIMDIA_SSH_PORT:-2222}")
+    SSH_PORT=$(ask "$(t "Gate SSH port" "Port SSH de la Gate")" "${PORTUNIA_GATE_SSH_PORT:-2222}")
     port_busy "$SSH_PORT" || break
     warn "$(t "Port $SSH_PORT is already used on this server." "Le port $SSH_PORT est déjà utilisé sur ce serveur.")"
     interactive || die "$(t "Port $SSH_PORT in use" "Port $SSH_PORT occupé")"
   done
   while :; do
-    API_PORT=$(ask "$(t "API port for Portunia" "Port de l'API pour Portunia")" "${HEIMDIA_API_PORT:-8443}")
+    API_PORT=$(ask "$(t "API port for Portunia" "Port de l'API pour Portunia")" "${PORTUNIA_GATE_API_PORT:-8443}")
     [ "$API_PORT" != "$SSH_PORT" ] || { warn "$(t "Choose a port different from the SSH port." "Choisissez un port différent du port SSH.")"; interactive || die "$(t "Same ports" "Ports identiques")"; continue; }
     port_busy "$API_PORT" || break
     warn "$(t "Port $API_PORT is already used on this server." "Le port $API_PORT est déjà utilisé sur ce serveur.")"
@@ -380,9 +380,9 @@ initialize() {
 }
 hcmd_init() {
   if [ "$MODE" = docker ]; then
-    compose run --rm -T -e HEIMDIA_LANG="$L" heimdia init --admin "$ADMIN" --temporary --name "$NOM"
+    compose run --rm -T -e PORTUNIA_GATE_LANG="$L" portunia-gate init --admin "$ADMIN" --temporary --name "$NOM"
   else
-    /usr/bin/heimdia init --admin "$ADMIN" --temporary --name "$NOM"
+    /usr/bin/portunia-gate init --admin "$ADMIN" --temporary --name "$NOM"
   fi
 }
 
@@ -418,36 +418,36 @@ install_native() {
   (
     umask 027
     cat >"$ENV_NATIVE" <<EOF
-# Réglages de Portunia Gate, créés par installer.sh. Après modification : sudo systemctl restart heimdia
-# Portunia Gate settings, created by installer.sh. After a change: sudo systemctl restart heimdia
-HEIMDIA_DATABASE_URL=postgres://_heimdia@localhost/heimdia?host=/var/run/postgresql
-HEIMDIA_SSH_PORT=$SSH_PORT
-HEIMDIA_API_PORT=$API_PORT
+# Réglages de Portunia Gate, créés par installer.sh. Après modification : sudo systemctl restart portunia-gate
+# Portunia Gate settings, created by installer.sh. After a change: sudo systemctl restart portunia-gate
+PORTUNIA_GATE_DATABASE_URL=postgres://_portunia_gate@localhost/portunia_gate?host=/var/run/postgresql
+PORTUNIA_GATE_SSH_PORT=$SSH_PORT
+PORTUNIA_GATE_API_PORT=$API_PORT
 TZ=$ZONE
 EOF
   )
-  chgrp _heimdia "$ENV_NATIVE"
+  chgrp _portunia_gate "$ENV_NATIVE"
   ok "$(t "Settings saved in $ENV_NATIVE" "Réglages enregistrés dans $ENV_NATIVE")"
   initialize
   set_language
-  systemctl enable --now heimdia >/dev/null 2>&1 || true
+  systemctl enable --now portunia-gate >/dev/null 2>&1 || true
   wait_api
-  ok "$(t "Gate started (heimdia service, restarts with the server)" "Gate démarré (service heimdia, redémarre seul avec le serveur)")"
+  ok "$(t "Gate started (portunia-gate service, restarts with the server)" "Gate démarré (service portunia-gate, redémarre seul avec le serveur)")"
   finish
 }
 
 # La Gate parle la langue de l'assistant (modifiable ensuite dans Portunia, Administrer › Réglages).
 set_language() {
   if [ "$MODE" = docker ]; then
-    compose run --rm -T -e HEIMDIA_LANG="$L" heimdia setting language "$L" >/dev/null
+    compose run --rm -T -e PORTUNIA_GATE_LANG="$L" portunia-gate setting language "$L" >/dev/null
   else
-    /usr/bin/heimdia setting language "$L" >/dev/null
+    /usr/bin/portunia-gate setting language "$L" >/dev/null
   fi
 }
 
 install_with_docker() {
   use_mode docker
-  [ -f "$DIR/Dockerfile" ] || die "$(t "Docker mode runs from a copy of the repository: git clone https://github.com/jpiperault/Heimdia.git" "Le mode Docker s'utilise depuis une copie du dépôt : git clone https://github.com/jpiperault/Heimdia.git")"
+  [ -f "$DIR/Dockerfile" ] || die "$(t "Docker mode runs from a copy of the repository: git clone https://github.com/jpiperault/Portunia-Gate.git" "Le mode Docker s'utilise depuis une copie du dépôt : git clone https://github.com/jpiperault/Portunia-Gate.git")"
   echo "${B}$(t "Portunia Gate — installation" "Portunia Gate — installation")${N} ${D}(Docker, $DIR)${N}"
   step "$(t "Checks" "Vérifications")"
   check_system
@@ -455,15 +455,15 @@ install_with_docker() {
   check_build_memory
   questions
   local db_password
-  db_password=$(env_value HEIMDIA_DB_PASSWORD)
+  db_password=$(env_value PORTUNIA_GATE_DB_PASSWORD)
   (
     umask 077
     cat >.env <<EOF
 # Créé par installer.sh le $(date '+%d/%m/%Y'). Modifiez puis : docker compose up -d
 # Created by installer.sh on $(date '+%Y-%m-%d'). Change then: docker compose up -d
-HEIMDIA_DB_PASSWORD=${db_password:-$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')}
-HEIMDIA_SSH_PORT=$SSH_PORT
-HEIMDIA_API_PORT=$API_PORT
+PORTUNIA_GATE_DB_PASSWORD=${db_password:-$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')}
+PORTUNIA_GATE_SSH_PORT=$SSH_PORT
+PORTUNIA_GATE_API_PORT=$API_PORT
 TZ=$ZONE
 EOF
   )
@@ -477,7 +477,7 @@ EOF
   wait_api
   ok "$(t "Gate started (restarts with the server)" "Gate démarré (redémarre seul avec le serveur)")"
   install_docker_wrapper
-  ok "$(t "Command ${B}heimdia${N} installed (e.g. sudo heimdia user list)" "Commande ${B}heimdia${N} installée (ex. sudo heimdia user list)")"
+  ok "$(t "Command ${B}portunia-gate${N} installed (e.g. sudo portunia-gate user list)" "Commande ${B}portunia-gate${N} installée (ex. sudo portunia-gate user list)")"
   finish
 }
 
@@ -550,17 +550,17 @@ setup_portal() {
     echo "  In Cloudflare Zero Trust › Networks › Tunnels, create a « Cloudflared » tunnel,"
     echo "  then copy the token from its install command (the long string after --token)."
   fi
-  local token=${HEIMDIA_TUNNEL_TOKEN:-} service
+  local token=${PORTUNIA_GATE_TUNNEL_TOKEN:-} service
   if [ -z "$token" ] && interactive; then read -r -s -p "  $(t "Tunnel token:" "Jeton du tunnel :") " token; echo; fi
   token=$(tr -d '[:space:]' <<<"$token")
   [ -n "$token" ] || die "$(t "Tunnel token missing." "Jeton du tunnel manquant.")"
   [[ "$token" =~ ^[A-Za-z0-9+/=_-]+$ ]] || die "$(t "This does not look like a Cloudflare tunnel token." "Ce jeton ne ressemble pas à un jeton de tunnel Cloudflare.")"
   if [ "$MODE" = docker ]; then
-    set_env HEIMDIA_TUNNEL_TOKEN "$token"
+    set_env PORTUNIA_GATE_TUNNEL_TOKEN "$token"
     set_env COMPOSE_PROFILES portail
     local out
     out=$(compose up -d 2>&1) || { echo "$out"; die "$(t "The tunnel does not start." "Le tunnel ne démarre pas.")"; }
-    service=heimdia:8445
+    service=portunia-gate:8445
   else
     install_cloudflared
     cloudflared service uninstall >/dev/null 2>&1 || true

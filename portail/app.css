@@ -1,4 +1,4 @@
-/* Portail web de Heimdia : connexion, liste des serveurs, terminal. Clair ou sombre selon le système. */
+/* Portail web de Portunia Gate : connexion, liste des serveurs, terminal. Clair ou sombre selon le système. */
 :root {
   --bg: #eef1f5; --card: #ffffff; --line: #dde1e8; --text: #1b1f27; --muted: #5e6675; --accent: #2563d6; --accent-ink: #ffffff;
   --field: #ffffff; --danger: #c23b3b; --danger-soft: #f8dfdf; --warn: #b5650f; --warn-soft: #fbead6; --ok: #1d8a57;

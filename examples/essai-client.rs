@@ -1,8 +1,8 @@
-//! Client d'essai : se connecte au bastion (mot de passe puis code TOTP), envoie des lignes
+//! Client d'essai : se connecte à la Gate (mot de passe puis code TOTP), envoie des lignes
 //! dans le terminal et affiche ce qui revient. Sert aux essais de bout en bout.
 //!
-//!   HEIMDIA_HOTE=192.168.91.51:2222 HEIMDIA_NOM=essai%srv-coffre HEIMDIA_MDP=… \
-//!   HEIMDIA_TOTP=<clé base32> cargo run --example essai-client -- "hostname" "exit"
+//!   PORTUNIA_GATE_HOTE=192.168.91.51:2222 PORTUNIA_GATE_NOM=essai%srv-coffre PORTUNIA_GATE_MDP=… \
+//!   PORTUNIA_GATE_TOTP=<clé base32> cargo run --example essai-client -- "hostname" "exit"
 
 use std::{sync::Arc, time::Duration};
 
@@ -47,7 +47,7 @@ fn totp(secret: &[u8]) -> String {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let env = |k: &str| std::env::var(k).unwrap_or_default();
-    let (host, name, password, secret) = (env("HEIMDIA_HOTE"), env("HEIMDIA_NOM"), env("HEIMDIA_MDP"), env("HEIMDIA_TOTP"));
+    let (host, name, password, secret) = (env("PORTUNIA_GATE_HOTE"), env("PORTUNIA_GATE_NOM"), env("PORTUNIA_GATE_MDP"), env("PORTUNIA_GATE_TOTP"));
     let lines: Vec<String> = std::env::args().skip(1).collect();
     let mut handle = client::connect(Arc::new(client::Config::default()), host.as_str(), Accept).await?;
 
@@ -87,8 +87,8 @@ async fn main() -> anyhow::Result<()> {
         anyhow::bail!("authentification refusée");
     }
 
-    // Rebond (comme « ssh -J ») : on lit la bannière SSH de la cible, à travers le bastion.
-    if let Ok(address) = std::env::var("HEIMDIA_REBOND") {
+    // Rebond (comme « ssh -J ») : on lit la bannière SSH de la cible, à travers la Gate.
+    if let Ok(address) = std::env::var("PORTUNIA_GATE_REBOND") {
         let (h, p) = address.rsplit_once(':').unwrap();
         let mut stream = handle.channel_open_direct_tcpip(h, p.parse()?, "127.0.0.1", 0).await?.into_stream();
         let mut buf = [0u8; 64];

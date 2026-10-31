@@ -1199,36 +1199,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
-name = "heimdia"
-version = "0.12.0"
-dependencies = [
- "anyhow",
- "argon2 0.5.3",
- "axum",
- "axum-server",
- "base64",
- "chrono",
- "clap",
- "ironrdp-rdcleanpath",
- "libc",
- "qrcode",
- "rcgen",
- "ring",
- "rpassword",
- "russh",
- "rustls",
- "serde",
- "serde_json",
- "sqlx",
- "tokio",
- "tokio-rustls",
- "tracing",
- "tracing-subscriber",
- "ureq",
- "uuid",
-]
-
-[[package]]
 name = "hex"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2091,6 +2061,36 @@ dependencies = [
  "cpufeatures 0.3.1",
  "universal-hash",
  "zeroize",
+]
+
+[[package]]
+name = "portunia-gate"
+version = "0.13.0"
+dependencies = [
+ "anyhow",
+ "argon2 0.5.3",
+ "axum",
+ "axum-server",
+ "base64",
+ "chrono",
+ "clap",
+ "ironrdp-rdcleanpath",
+ "libc",
+ "qrcode",
+ "rcgen",
+ "ring",
+ "rpassword",
+ "russh",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "tokio-rustls",
+ "tracing",
+ "tracing-subscriber",
+ "ureq",
+ "uuid",
 ]
 
 [[package]]

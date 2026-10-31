@@ -1,7 +1,7 @@
 //! Portunia Gate, the SSH and Remote Desktop gateway of Portunia.
 //!
-//! `heimdia serve` runs the service; the other commands administer the bastion from the
-//! server (`sudo heimdia …`). Messages follow the system's language (English or French).
+//! `portunia-gate serve` runs the service; the other commands administer the Gate from the
+//! server (`sudo portunia-gate …`). Messages follow the system's language (English or French).
 
 #[macro_use]
 mod lang;
@@ -42,7 +42,7 @@ pub struct State {
 }
 
 #[derive(Parser)]
-#[command(name = "heimdia", version, about = "SSH and Remote Desktop gateway of Portunia (messages in English or French, following the system's language or HEIMDIA_LANG)")]
+#[command(name = "portunia-gate", version, about = "SSH and Remote Desktop gateway of Portunia (messages in English or French, following the system's language or PORTUNIA_GATE_LANG)")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -61,13 +61,13 @@ enum Command {
         /// Shows a temporary password: the administrator changes it and enrols their code in Portunia.
         #[arg(long = "temporary", alias = "provisoire")]
         provisoire: bool,
-        /// Bastion name shown in Portunia and in authenticator apps.
+        /// Gate name shown in Portunia and in authenticator apps.
         #[arg(long = "name", alias = "nom")]
         nom: Option<String>,
     },
     /// Version, fingerprints to compare in Portunia, and number of accounts.
     Info,
-    /// Runs the bastion.
+    /// Runs the Gate.
     Serve,
     /// User accounts.
     #[command(subcommand)]
@@ -75,7 +75,7 @@ enum Command {
     /// User groups.
     #[command(subcommand)]
     Group(GroupCmd),
-    /// Servers protected by the bastion.
+    /// Servers protected by the Gate.
     #[command(subcommand)]
     Target(TargetCmd),
     /// Access rules.
@@ -349,9 +349,9 @@ async fn main() {
     let cli = Cli::parse();
     // Le service trace son activité ; les commandes d'administration n'affichent que les avertissements.
     let default_filter = if matches!(cli.command, Command::Serve) {
-        "heimdia=info,russh=warn"
+        "portunia_gate=info,russh=warn"
     } else {
-        "heimdia=warn,russh=warn"
+        "portunia_gate=warn,russh=warn"
     };
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| default_filter.into()))
@@ -380,7 +380,7 @@ async fn run(cli: Cli) -> Result<()> {
         return init(config, admin, *no_admin, *provisoire, nom.as_deref()).await;
     }
     let db = connect_db(&config).await?;
-    // Le service parle la langue choisie dans les réglages du bastion, sinon celle du système ;
+    // Le service parle la langue choisie dans les réglages de la Gate, sinon celle du système ;
     // les commandes d'administration, celle de qui les tape.
     if matches!(cli.command, Command::Serve) {
         if let Some(l) = model::setting(&db, "langue").await?.and_then(|v| v.as_str().and_then(lang::Lang::from_tag)) {
@@ -522,10 +522,10 @@ async fn run(cli: Cli) -> Result<()> {
     }
 }
 
-/// Noms du certificat de l'API : HEIMDIA_TLS_NAMES (séparés par des virgules), sinon « heimdia ».
+/// Noms du certificat de l'API : PORTUNIA_GATE_TLS_NAMES (séparés par des virgules), sinon « portunia-gate ».
 /// Portunia vérifie l'empreinte du certificat, pas son nom.
 fn tls_names() -> Vec<String> {
-    std::env::var("HEIMDIA_TLS_NAMES")
+    std::env::var("PORTUNIA_GATE_TLS_NAMES")
         .ok()
         .map(|v| {
             v.split(',')
@@ -534,7 +534,7 @@ fn tls_names() -> Vec<String> {
                 .collect::<Vec<_>>()
         })
         .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| vec!["heimdia".into(), "localhost".into()])
+        .unwrap_or_else(|| vec!["portunia-gate".into(), "localhost".into()])
 }
 
 async fn init(config: Config, admin: &str, no_admin: bool, provisional: bool, nom: Option<&str>) -> Result<()> {
@@ -573,8 +573,8 @@ async fn init(config: Config, admin: &str, no_admin: bool, provisional: bool, no
         println!(
             "\n{}",
             t!(
-                "No administrator created (--no-admin): run « heimdia init » to create one.",
-                "Aucun administrateur créé (--no-admin) : lancez « heimdia init » pour le créer."
+                "No administrator created (--no-admin): run « portunia-gate init » to create one.",
+                "Aucun administrateur créé (--no-admin) : lancez « portunia-gate init » pour le créer."
             )
         );
     } else if has_admin {

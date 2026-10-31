@@ -1,6 +1,6 @@
-//! Clés du bastion, créées à l'installation dans le dossier de données :
+//! Clés de la Gate, créées à l'installation dans le dossier de données :
 //! - coffre.key : 32 octets, chiffre les secrets des cibles et les secrets TOTP ;
-//! - ssh_host_ed25519_key : identité SSH du bastion ;
+//! - ssh_host_ed25519_key : identité SSH de la Gate ;
 //! - signature.key : signe les enregistrements (Ed25519, PKCS#8).
 
 use std::{fs, io::Write, path::Path};
@@ -72,7 +72,7 @@ impl Keys {
     }
 
     pub fn load(dir: &Path) -> Result<Self> {
-        let raw = fs::read(dir.join("coffre.key")).context(t!("vault key unreadable (run « heimdia init »)", "clé du coffre illisible (lancez « heimdia init »)"))?;
+        let raw = fs::read(dir.join("coffre.key")).context(t!("vault key unreadable (run « portunia-gate init »)", "clé du coffre illisible (lancez « portunia-gate init »)"))?;
         let vault = LessSafeKey::new(UnboundKey::new(&AES_256_GCM, &raw).map_err(|_| anyhow!(t!("invalid vault key", "clé du coffre invalide")))?);
         let host = russh::keys::load_secret_key(dir.join("ssh_host_ed25519_key"), None).context(t!("SSH host key unreadable", "clé d'hôte SSH illisible"))?;
         let signer = Ed25519KeyPair::from_pkcs8(&fs::read(dir.join("signature.key")).context(t!("signing key unreadable", "clé de signature illisible"))?)
@@ -118,7 +118,7 @@ impl Keys {
         self.signer.public_key().as_ref().to_vec()
     }
 
-    /// Vérifie une signature produite par `sign` (clé publique du bastion).
+    /// Vérifie une signature produite par `sign` (clé publique de la Gate).
     pub fn verify(&self, message: &[u8], signature: &[u8]) -> bool {
         ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, self.signer.public_key().as_ref())
             .verify(message, signature)
@@ -127,7 +127,7 @@ impl Keys {
 }
 
 fn aad(purpose: &str) -> Vec<u8> {
-    format!("heimdia-coffre-v1:{purpose}").into_bytes()
+    format!("portunia-gate-coffre-v1:{purpose}").into_bytes()
 }
 
 pub fn hex(bytes: &[u8]) -> String {
@@ -144,7 +144,7 @@ mod tests {
 
     #[test]
     fn coffre_lie_au_usage() {
-        let dir = std::env::temp_dir().join(format!("heimdia-cles-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("portunia-gate-cles-{}", uuid::Uuid::new_v4()));
         Keys::create_missing(&dir).unwrap();
         let keys = Keys::load(&dir).unwrap();
         let sealed = keys.seal("cible:a", b"secret").unwrap();

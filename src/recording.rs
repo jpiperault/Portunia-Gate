@@ -1,5 +1,5 @@
 //! Enregistrement d'une session au format asciicast v2 (lisible par Portunia et asciinema),
-//! signé à la fermeture par la clé du bastion.
+//! signé à la fermeture par la clé de la Gate.
 
 use std::{
     fs::File,
@@ -86,7 +86,7 @@ impl Recorder {
         let _ = self.out.flush();
     }
 
-    /// Ferme le fichier ; renvoie son chemin, son empreinte et la signature du bastion.
+    /// Ferme le fichier ; renvoie son chemin, son empreinte et la signature de la Gate.
     pub fn finish(mut self, keys: &Keys, session: Uuid) -> Result<(String, String, String, u64)> {
         self.out.flush()?;
         drop(self.out);
@@ -101,7 +101,7 @@ impl Recorder {
 
 /// Texte signé : l'enregistrement est lié à sa session, il ne peut pas être échangé avec un autre.
 pub fn signature_message(session: Uuid, sha256: &str) -> String {
-    format!("heimdia-enregistrement-v1\n{session}\n{sha256}")
+    format!("portunia-gate-enregistrement-v1\n{session}\n{sha256}")
 }
 
 /// Décode ce qui est complet en UTF-8 et garde une séquence coupée pour la suite.

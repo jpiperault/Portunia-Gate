@@ -82,13 +82,13 @@ pub async fn run(state: Arc<State>) -> anyhow::Result<()> {
         .config
         .api_listen
         .parse()
-        .map_err(|_| anyhow!(t!("invalid HEIMDIA_API_LISTEN", "HEIMDIA_API_LISTEN invalide")))?;
+        .map_err(|_| anyhow!(t!("invalid PORTUNIA_GATE_API_LISTEN", "PORTUNIA_GATE_API_LISTEN invalide")))?;
     let api = Arc::new(Api {
         state,
         failures: Mutex::new(HashMap::new()),
     });
     let app = Router::new()
-        .route("/api/v1/bastion", get(bastion))
+        .route("/api/v1/gate", get(gate))
         .route("/api/v1/connexion", post(login).delete(logout))
         .route("/api/v1/moi", get(me))
         .route("/api/v1/serveurs", get(servers))
@@ -155,7 +155,7 @@ async fn remember_allowed(state: &State) -> anyhow::Result<bool> {
         .unwrap_or(false))
 }
 
-async fn bastion_info(state: &State) -> anyhow::Result<Value> {
+async fn gate_info(state: &State) -> anyhow::Result<Value> {
     Ok(json!({
         "nom": setting_str(state, "nom", "Portunia Gate").await?,
         "version": env!("CARGO_PKG_VERSION"),
@@ -203,8 +203,8 @@ async fn auditor(api: &Api, headers: &HeaderMap) -> Result<User, ApiError> {
 
 // ---------- Connexion ----------
 
-async fn bastion(AxState(api): Ctx) -> ApiResult {
-    Ok(Json(bastion_info(&api.state).await?))
+async fn gate(AxState(api): Ctx) -> ApiResult {
+    Ok(Json(gate_info(&api.state).await?))
 }
 
 #[derive(Deserialize)]
@@ -391,7 +391,7 @@ async fn login(AxState(api): Ctx, ConnectInfo(addr): ConnectInfo<SocketAddr>, Js
         "jeton": jeton,
         "expire": expires,
         "compte": { "login": user.login, "role": user.role },
-        "bastion": bastion_info(state).await?,
+        "gate": gate_info(state).await?,
     })))
 }
 
@@ -412,7 +412,7 @@ async fn logout(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
 async fn me(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
     let user = caller(&api, &headers).await?;
     Ok(Json(
-        json!({ "compte": { "login": user.login, "role": user.role }, "bastion": bastion_info(&api.state).await? }),
+        json!({ "compte": { "login": user.login, "role": user.role }, "gate": gate_info(&api.state).await? }),
     ))
 }
 
@@ -446,7 +446,7 @@ async fn servers(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
 }
 
 /// Jeton SSH à usage unique (valable 60 s) : Portunia s'en sert comme mot de passe
-/// de « login%serveur » sur le port SSH du bastion.
+/// de « login%serveur » sur le port SSH de la Gate.
 async fn ticket(AxState(api): Ctx, headers: HeaderMap, Path(nom): Path<String>) -> ApiResult {
     let user = caller(&api, &headers).await?;
     let db = &api.state.db;
@@ -533,7 +533,7 @@ enum SecretBody {
     Cle {
         valeur: String,
     },
-    /// Heimdia crée une clé et l'installe avec ce mot de passe, utilisé une seule fois.
+    /// Portunia Gate crée une clé et l'installe avec ce mot de passe, utilisé une seule fois.
     Generer {
         mot_de_passe: String,
     },
@@ -1325,7 +1325,7 @@ async fn admin_settings(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
         "memo_mot_de_passe": remember_allowed(state).await?,
         "relecture_propres": own_sessions_allowed(state).await?,
         "commandes_sensibles": sensitive_commands(state).await?,
-        // « en », « fr », ou vide : langue du système du bastion.
+        // « en », « fr », ou vide : langue du système de la Gate.
         "langue": setting_str(state, "langue", "").await?,
     })))
 }
@@ -1425,7 +1425,7 @@ async fn reader(api: &Api, headers: &HeaderMap) -> Result<(User, Option<String>)
     Err(err(StatusCode::FORBIDDEN, t!("Replay restricted to the Gate's administrators and auditors", "Relecture réservée aux administrateurs et auditeurs de la Gate")))
 }
 
-/// Date « AAAA-MM-JJ » (minuit, heure du bastion) ou RFC 3339.
+/// Date « AAAA-MM-JJ » (minuit, heure de la Gate) ou RFC 3339.
 fn parse_day(text: &str, end: bool) -> Result<DateTime<Utc>, ApiError> {
     if let Ok(d) = DateTime::parse_from_rfc3339(text) {
         return Ok(d.with_timezone(&Utc));
@@ -1633,7 +1633,7 @@ async fn audit_rdp_stream(AxState(api): Ctx, headers: HeaderMap, Path(id): Path<
     Ok((
         [
             (axum::http::header::CONTENT_TYPE, "application/octet-stream"),
-            (axum::http::header::HeaderName::from_static("x-heimdia-signature"), signature),
+            (axum::http::header::HeaderName::from_static("x-portunia-gate-signature"), signature),
         ],
         body,
     )

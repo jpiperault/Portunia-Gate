@@ -1,6 +1,6 @@
 [package]
-name = "heimdia"
-version = "0.12.0"
+name = "portunia-gate"
+version = "0.13.0"
 description = "Passerelle SSH et Bureau à distance de Portunia : accès contrôlés, coffre, enregistrement et journal d'audit"
 edition = "2021"
 publish = false
@@ -49,13 +49,13 @@ depends = "systemd, passwd, util-linux"
 recommends = "postgresql"
 maintainer-scripts = "debian/"
 assets = [
-    ["target/release/heimdia", "usr/lib/heimdia/heimdia", "755"],
-    ["debian/heimdia.sh", "usr/bin/heimdia", "755"],
-    ["debian/heimdia.service", "usr/lib/systemd/system/heimdia.service", "644"],
-    ["README.md", "usr/share/doc/heimdia/README.md", "644"],
-    ["README.fr.md", "usr/share/doc/heimdia/README.fr.md", "644"],
-    ["docs/operations.md", "usr/share/doc/heimdia/operations.md", "644"],
-    ["docs/exploitation.fr.md", "usr/share/doc/heimdia/exploitation.fr.md", "644"],
+    ["target/release/portunia-gate", "usr/lib/portunia-gate/portunia-gate", "755"],
+    ["debian/portunia-gate.sh", "usr/bin/portunia-gate", "755"],
+    ["debian/portunia-gate.service", "usr/lib/systemd/system/portunia-gate.service", "644"],
+    ["README.md", "usr/share/doc/portunia-gate/README.md", "644"],
+    ["README.fr.md", "usr/share/doc/portunia-gate/README.fr.md", "644"],
+    ["docs/operations.md", "usr/share/doc/portunia-gate/operations.md", "644"],
+    ["docs/exploitation.fr.md", "usr/share/doc/portunia-gate/exploitation.fr.md", "644"],
 ]
 
 [profile.release]

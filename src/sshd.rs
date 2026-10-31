@@ -1,10 +1,10 @@
-//! Serveur SSH du bastion : authentification des utilisateurs, choix de la cible,
+//! Serveur SSH de la Gate : authentification des utilisateurs, choix de la cible,
 //! puis relais de la session vers la cible (enregistrée selon son mode).
 //!
 //! Formes acceptées :
-//! - `ssh login@bastion` : menu des serveurs autorisés ;
-//! - `ssh login%cible@bastion` : accès direct (shell, commande, SFTP) ;
-//! - `ssh -J login@bastion cible` : rebond de bout en bout, cibles en mode rebond.
+//! - `ssh login@Gate` : menu des serveurs autorisés ;
+//! - `ssh login%cible@Gate` : accès direct (shell, commande, SFTP) ;
+//! - `ssh -J login@Gate cible` : rebond de bout en bout, cibles en mode rebond.
 
 use std::{borrow::Cow, collections::BTreeSet, net::SocketAddr, sync::Arc, time::Duration};
 
@@ -88,7 +88,7 @@ enum KiStage {
     Totp,
 }
 
-/// Une connexion d'utilisateur au bastion.
+/// Une connexion d'utilisateur à la Gate.
 struct Conn {
     state: Arc<State>,
     addr: String,
@@ -219,7 +219,7 @@ impl server::Handler for Conn {
                 None => None,
             };
             if let Some(real) = crate::api::consume_ticket(&self.state.db, password, user.id, target).await? {
-                // Portail web : la connexion vient du bastion lui-même, l'adresse utile est celle du navigateur.
+                // Portail web : la connexion vient de la Gate lui-même, l'adresse utile est celle du navigateur.
                 let via = if real.is_empty() { "jeton Portunia" } else { "portail web" };
                 if !real.is_empty() {
                     self.addr = real;
@@ -893,10 +893,10 @@ async fn finish(ctx: &Ctx, id: Uuid, recorder: Option<Recorder>, started: std::t
     .await;
 }
 
-/// Commande unique (ssh login%cible@bastion "commande"), cibles du coffre.
+/// Commande unique (ssh login%cible@Gate "commande"), cibles du coffre.
 async fn exec(ctx: Arc<Ctx>, mut channel: Channel<Msg>, pty: Option<PtyInfo>, command: String) -> Result<()> {
     let Some((target, Some(access))) = ctx.target.clone() else {
-        say(&channel, t!("Give the server in the name: user%server@bastion\n", "Indiquez le serveur dans le nom : utilisateur%serveur@bastion\n")).await;
+        say(&channel, t!("Give the server in the name: user%server@gate\n", "Indiquez le serveur dans le nom : utilisateur%serveur@gate\n")).await;
         close(&channel, 1).await;
         return Ok(());
     };
@@ -1020,7 +1020,7 @@ where
     }
 }
 
-/// Rebond de bout en bout : le bastion relaie les octets chiffrés sans les lire.
+/// Rebond de bout en bout : la Gate relaie les octets chiffrés sans les lire.
 async fn relay_tcp(ctx: Arc<Ctx>, target: Target, channel: Channel<Msg>) -> Result<()> {
     let id = Uuid::new_v4();
     let db = &ctx.state.db;

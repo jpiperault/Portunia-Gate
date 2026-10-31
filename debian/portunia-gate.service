@@ -1,24 +1,24 @@
-# Gate (paquet Debian). Réglages : /etc/heimdia/heimdia.env
+# Gate (paquet Debian). Réglages : /etc/portunia-gate/portunia-gate.env
 [Unit]
 Description=Portunia Gate, passerelle SSH et Bureau à distance de Portunia
-Documentation=https://github.com/jpiperault/Heimdia
+Documentation=https://github.com/jpiperault/Portunia-Gate
 After=network-online.target postgresql.service
 Wants=network-online.target
 
 [Service]
-User=_heimdia
-Group=_heimdia
-EnvironmentFile=/etc/heimdia/heimdia.env
-ExecStart=/usr/lib/heimdia/heimdia serve
+User=_portunia_gate
+Group=_portunia_gate
+EnvironmentFile=/etc/portunia-gate/portunia-gate.env
+ExecStart=/usr/lib/portunia-gate/portunia-gate serve
 Restart=on-failure
 RestartSec=5
 UMask=0077
 LimitNOFILE=65536
 
-# Durcissement : la Gate n'écrit que dans /var/lib/heimdia et ne voit pas le reste du système.
+# Durcissement : la Gate n'écrit que dans /var/lib/portunia-gate et ne voit pas le reste du système.
 NoNewPrivileges=yes
 ProtectSystem=strict
-ReadWritePaths=/var/lib/heimdia
+ReadWritePaths=/var/lib/portunia-gate
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes
