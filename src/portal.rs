@@ -154,12 +154,11 @@ pub async fn run(state: Arc<State>) -> Result<()> {
         None => None,
     };
     let plain = router(state.clone(), false);
-    let listener = tokio::net::TcpListener::bind(http).await?;
     tracing::info!("{} http://{http} (Cloudflare Tunnel)", t!("web portal listening on", "portail web en écoute sur"));
     let plain_task = async move {
-        axum::serve(listener, plain.into_make_service_with_connect_info::<SocketAddr>())
-            .await
-            .map_err(anyhow::Error::from)
+        let mut server = axum_server::bind(http);
+        crate::http::limit(&mut server);
+        server.serve(plain.into_make_service_with_connect_info::<SocketAddr>()).await.map_err(anyhow::Error::from)
     };
     match tls {
         None => plain_task.await,
@@ -171,10 +170,9 @@ pub async fn run(state: Arc<State>) -> Result<()> {
             tracing::info!("{} https://{addr} (Cloudflare proxy)", t!("web portal listening on", "portail web en écoute sur"));
             let secure = router(state, true);
             let tls_task = async move {
-                axum_server::bind_rustls(addr, config)
-                    .serve(secure.into_make_service_with_connect_info::<SocketAddr>())
-                    .await
-                    .map_err(anyhow::Error::from)
+                let mut server = axum_server::bind_rustls(addr, config);
+                crate::http::limit(&mut server);
+                server.serve(secure.into_make_service_with_connect_info::<SocketAddr>()).await.map_err(anyhow::Error::from)
             };
             tokio::try_join!(plain_task, tls_task).map(|_| ())
         }
@@ -205,6 +203,7 @@ fn router(state: Arc<State>, cloudflare_only: bool) -> Router {
         .layer(middleware::from_fn_with_state(portal.clone(), guard))
         // Pages et messages dans la langue du sélecteur ou du navigateur.
         .layer(middleware::from_fn(crate::lang::middleware))
+        .layer(middleware::from_fn(crate::http::deadline))
         .with_state(portal)
 }
 

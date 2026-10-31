@@ -11,6 +11,7 @@ mod audit;
 mod auth;
 mod config;
 mod health;
+mod http;
 mod keys;
 mod limits;
 mod live;

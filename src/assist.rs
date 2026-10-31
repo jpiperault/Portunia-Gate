@@ -91,6 +91,9 @@ pub async fn settings(state: &State) -> Result<Settings> {
     })
 }
 
+/// Places en attente au plus pour une même adresse : quelques adresses ne bloquent pas le relais.
+const MAX_WAITING_PER_ADDRESS: usize = 3;
+
 /// Combien de temps une place attend son dépanneur.
 const WAIT: Duration = Duration::from_secs(30 * 60);
 
@@ -115,7 +118,9 @@ pub async fn agent(state: Arc<State>, mut socket: WebSocket, addr: String) {
     let reserved = {
         let mut waiting = state.assist.waiting.lock().unwrap();
         waiting.retain(|_, w| w.since.elapsed() < WAIT && !w.tx.is_closed());
-        (waiting.len() < 900).then(|| {
+        let mine = crate::limits::address_key(&addr);
+        let held = waiting.values().filter(|w| crate::limits::address_key(&w.addr) == mine).count();
+        (waiting.len() < 900 && held < MAX_WAITING_PER_ADDRESS).then(|| {
             let place = loop {
                 let p = format!("{:03}", uuid::Uuid::new_v4().as_u128() % 1000);
                 if !waiting.contains_key(&p) {

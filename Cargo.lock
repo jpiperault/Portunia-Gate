@@ -2065,7 +2065,7 @@ dependencies = [
 
 [[package]]
 name = "portunia-gate"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "anyhow",
  "argon2 0.5.3",
@@ -2074,6 +2074,7 @@ dependencies = [
  "base64",
  "chrono",
  "clap",
+ "hyper-util",
  "ironrdp-rdcleanpath",
  "libc",
  "qrcode",

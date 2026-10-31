@@ -18,13 +18,18 @@ fn link(prev: &str, seq: i64, at: &DateTime<Utc>, actor: &str, event: &str, deta
     crate::keys::sha256_hex(text.as_bytes())
 }
 
+/// Un nom vient parfois d'une tentative sans compte : il reste court et sur une ligne.
+fn clean_actor(actor: &str) -> String {
+    actor.chars().take(64).map(|c| if c.is_control() { '_' } else { c }).collect()
+}
+
 /// Ajoute un événement. Un verrou de transaction sérialise les écritures.
 ///
 /// L'écriture se fait dans sa propre tâche : si l'appelant est interrompu (client qui se
 /// déconnecte), la transaction va quand même jusqu'au bout et libère le verrou. Sans cela,
 /// un verrou resté pris bloquait toutes les écritures suivantes, puis tout la Gate.
 pub async fn log(db: &PgPool, actor: &str, event: &str, detail: Value) -> Result<()> {
-    let (db, actor, event) = (db.clone(), actor.to_string(), event.to_string());
+    let (db, actor, event) = (db.clone(), clean_actor(actor), event.to_string());
     tokio::spawn(async move { write(&db, &actor, &event, detail).await })
         .await
         .map_err(|e| anyhow::anyhow!(t!(format!("audit log: {e}"), format!("journal d'audit : {e}"))))?
@@ -103,4 +108,16 @@ pub async fn verify(db: &PgPool) -> Result<std::result::Result<i64, String>> {
         prev = row.hash.clone();
     }
     Ok(Ok(rows.len() as i64))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nom_court_sur_une_ligne() {
+        assert_eq!(clean_actor("alice"), "alice");
+        assert_eq!(clean_actor("a\nb\t\u{0}c"), "a_b__c");
+        assert_eq!(clean_actor(&"é".repeat(1_000_000)).chars().count(), 64);
+    }
 }

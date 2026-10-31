@@ -40,7 +40,7 @@ pub struct Limiter {
 }
 
 /// Une adresse IPv6 compte pour son réseau /64 : un poste en dispose de milliards.
-fn address_key(ip: &str) -> String {
+pub fn address_key(ip: &str) -> String {
     match ip.parse::<IpAddr>().map(|a| a.to_canonical()) {
         Ok(IpAddr::V6(v6)) => {
             let s = v6.segments();

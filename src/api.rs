@@ -111,11 +111,12 @@ pub async fn run(state: Arc<State>) -> anyhow::Result<()> {
         .route("/api/v1/admin/assistance", get(admin_assist).put(admin_assist_update))
         .with_state(api)
         // Messages dans la langue demandée par Portunia (Accept-Language).
-        .layer(axum::middleware::from_fn(crate::lang::middleware));
+        .layer(axum::middleware::from_fn(crate::lang::middleware))
+        .layer(axum::middleware::from_fn(crate::http::deadline));
     tracing::info!("{} https://{listen}", t!("API listening on", "API en écoute sur"));
-    axum_server::bind_rustls(listen, tls)
-        .serve(app.into_make_service_with_connect_info::<SocketAddr>())
-        .await?;
+    let mut server = axum_server::bind_rustls(listen, tls);
+    crate::http::limit(&mut server);
+    server.serve(app.into_make_service_with_connect_info::<SocketAddr>()).await?;
     Ok(())
 }
 

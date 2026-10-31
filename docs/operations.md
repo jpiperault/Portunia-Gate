@@ -127,7 +127,7 @@ On the first connection, Portunia Gate remembers the server's key (SSH) or certi
 
 ## Limits and session closing
 
-**Sign-in attempts.** Counted together for SSH, Portunia and the portal, over 10 minutes: 5 for an account from one address, 20 for an address, 30 for an account across all addresses. The log records `auth.bloquee`. Limits are kept in memory: restarting the service clears them. An SSH connection has 60 seconds to authenticate, and unauthenticated connections are capped (16 per address, 512 in total).
+**Sign-in attempts.** Counted together for SSH, Portunia and the portal, over 10 minutes: 5 for an account from one address, 20 for an address, 30 for an account across all addresses. The log records `auth.bloquee`. Limits are kept in memory: restarting the service clears them. An HTTP request has 10 seconds for its headers and 2 minutes in all. An SSH connection has 60 seconds to authenticate, and unauthenticated connections are capped (16 per address, 512 in total).
 
 If Docker hides the clients' real address, they all seem to come from one address and share these limits: check the addresses in the log.
 

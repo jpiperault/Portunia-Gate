@@ -87,26 +87,38 @@ pub async fn run(state: Arc<State>) -> Result<()> {
             authenticated: authenticated.clone(),
             watch: None,
         };
-        tokio::spawn(serve(config.clone(), tcp, conn, authenticated));
+        tokio::spawn(serve(config.clone(), tcp, conn, authenticated, LOGIN_TIMEOUT));
     }
 }
 
+fn duplicate(tcp: tokio::net::TcpStream) -> std::io::Result<(tokio::net::TcpStream, std::net::TcpStream)> {
+    let std = tcp.into_std()?;
+    let copy = std.try_clone()?;
+    Ok((tokio::net::TcpStream::from_std(std)?, copy))
+}
+
 /// Sert une connexion ; sans authentification après `LOGIN_TIMEOUT`, elle est fermée.
-async fn serve(config: Arc<server::Config>, tcp: tokio::net::TcpStream, conn: Conn, authenticated: Arc<AtomicBool>) {
-    let Ok(Ok(mut session)) = tokio::time::timeout(LOGIN_TIMEOUT, server::run_stream(config, tcp, conn)).await else {
+async fn serve<H>(config: Arc<server::Config>, tcp: tokio::net::TcpStream, conn: H, authenticated: Arc<AtomicBool>, limit: Duration)
+where
+    H: server::Handler<Error = anyhow::Error> + Send + 'static,
+{
+    // Double du socket : fermer la session ne suffit pas tant que la négociation n'a pas abouti,
+    // la tâche resterait en attente et garderait sa place.
+    let Ok((tcp, socket)) = duplicate(tcp) else { return };
+    let cut = || {
+        let _ = socket.shutdown(std::net::Shutdown::Both);
+    };
+    let Ok(Ok(mut session)) = tokio::time::timeout(limit, server::run_stream(config, tcp, conn)).await else {
+        cut();
         return;
     };
-    let handle = session.handle();
     let ended = tokio::select! {
-        ended = &mut session => Some(ended),
-        _ = tokio::time::sleep(LOGIN_TIMEOUT) => None,
-    };
-    let ended = match ended {
-        Some(ended) => ended,
-        None if authenticated.load(Ordering::SeqCst) => session.await,
-        None => {
-            let _ = handle.disconnect(russh::Disconnect::ByApplication, "délai de connexion dépassé".into(), "fr".into()).await;
-            return;
+        ended = &mut session => ended,
+        _ = tokio::time::sleep(limit) => {
+            if !authenticated.load(Ordering::SeqCst) {
+                cut();
+            }
+            session.await
         }
     };
     if let Err(error) = ended {
@@ -1287,4 +1299,54 @@ async fn relay_tunnel(
     )
     .await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    struct Nobody;
+    impl server::Handler for Nobody {
+        type Error = anyhow::Error;
+    }
+
+    /// Lance `serve` avec une limite d'une seconde et renvoie le côté client.
+    async fn connection() -> tokio::net::TcpStream {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let client = tokio::net::TcpStream::connect(address).await.unwrap();
+        let (tcp, _) = listener.accept().await.unwrap();
+        let key = russh::keys::PrivateKey::from(russh::keys::ssh_key::private::Ed25519Keypair::from_seed(&[1; 32]));
+        let config = Arc::new(server::Config { keys: vec![key], ..Default::default() });
+        tokio::spawn(serve(config, tcp, Nobody, Arc::new(AtomicBool::new(false)), Duration::from_secs(1)));
+        client
+    }
+
+    /// Lit jusqu'à la fermeture ; faux si la connexion reste ouverte.
+    async fn closes(client: &mut tokio::net::TcpStream) -> bool {
+        let mut buf = [0u8; 4096];
+        let end = async {
+            loop {
+                match client.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(5), end).await.is_ok()
+    }
+
+    #[tokio::test]
+    async fn connexion_muette_fermee() {
+        let mut client = connection().await;
+        assert!(closes(&mut client).await);
+    }
+
+    #[tokio::test]
+    async fn connexion_sans_authentification_fermee() {
+        let mut client = connection().await;
+        client.write_all(b"SSH-2.0-essai\r\n").await.unwrap();
+        assert!(closes(&mut client).await);
+    }
 }
