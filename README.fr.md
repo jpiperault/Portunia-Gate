@@ -122,6 +122,17 @@ En mode Docker, lancez l'assistant depuis le dossier du dépôt (`sudo ./install
 
 Une installation interrompue (coupure, erreur) se reprend en relançant l'assistant : les réglages déjà saisis sont proposés de nouveau.
 
+### Durcir le serveur (facultatif)
+
+Sur un serveur dédié à la Gate, l'assistant peut ne garder que le nécessaire : pare-feu fermé sauf les ports utiles, services inutiles arrêtés, SSH du système et noyau resserrés, mises à jour de sécurité automatiques. Répondez oui à la question de l'installation, ou utilisez `--durcir`, ou plus tard :
+
+```bash
+sudo bash installer.sh durcir simulation
+sudo bash installer.sh durcir
+```
+
+La simulation ne change rien. Si une nouvelle connexion SSH n'est pas confirmée sous 5 minutes, le pare-feu et le SSH du système sont remis comme avant. Détails et annulation : [exploitation](docs/exploitation.fr.md).
+
 ### Sans questions (automatisation)
 
 Hors terminal, l'assistant prend les valeurs proposées, ou celles des variables `PORTUNIA_GATE_NOM`, `PORTUNIA_GATE_ADMIN`, `PORTUNIA_GATE_SSH_PORT`, `PORTUNIA_GATE_API_PORT` et `TZ` :

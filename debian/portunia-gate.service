@@ -14,6 +14,7 @@ Restart=on-failure
 RestartSec=5
 UMask=0077
 LimitNOFILE=65536
+LimitCORE=0
 
 # Durcissement : la Gate n'écrit que dans /var/lib/portunia-gate et ne voit pas le reste du système.
 NoNewPrivileges=yes

@@ -9,13 +9,16 @@
 #   ./installer.sh update              installs the latest version and restarts the Gate
 #   ./installer.sh admin LOGIN         creates a backup administrator (temporary password)
 #   ./installer.sh portal              installs Cloudflare Tunnel for the web portal (token asked)
+#   ./installer.sh --harden            first install, then hardens this server (dedicated to the Gate)
+#   ./installer.sh harden [plan|status|undo]   hardens this server, shows the plan or the state, or undoes it
 #
-# French names are kept: --paquet, mise-a-jour, portail.
+# French names are kept: --paquet, mise-a-jour, portail, --durcir, durcir [simulation|etat|annuler].
 # Messages are in French when the system's language is French (LANG=fr_…), in English otherwise;
 # PORTUNIA_GATE_LANG=en or fr chooses.
 #
 # Without a terminal (automation), answers come from PORTUNIA_GATE_NOM, PORTUNIA_GATE_ADMIN, PORTUNIA_GATE_SSH_PORT,
-# PORTUNIA_GATE_API_PORT and TZ, or the defaults.
+# PORTUNIA_GATE_API_PORT and TZ, or the defaults. PORTUNIA_GATE_DURCIR=oui allows hardening without a terminal
+# (access then unchecked), PORTUNIA_GATE_GARDER lists services to keep, PORTUNIA_GATE_DURCIR_PAQUETS=oui removes packages.
 set -euo pipefail
 
 RELEASES=${PORTUNIA_GATE_RELEASES:-https://github.com/jpiperault/Portunia-Gate-releases/releases/latest/download}
@@ -63,22 +66,24 @@ confirm() {
 # ---------- Arguments ----------
 
 ARGS=("$@")
-MODE='' PACKAGE='' ACTION='' ACTION_ARG=''
+MODE='' PACKAGE='' ACTION='' ACTION_ARG='' HARDEN=''
 while [ $# -gt 0 ]; do
   case $1 in
     --docker) MODE=docker ;;
+    --harden | --durcir) HARDEN=1 ;;
     --package | --paquet) PACKAGE=$(readlink -f "${2:?$(t "$1 expects a .deb file" "$1 attend un fichier .deb")}"); shift ;;
     info | admin) ACTION=$1; ACTION_ARG=${2:-}; [ -z "$ACTION_ARG" ] || shift ;;
+    harden | durcir) ACTION=harden; ACTION_ARG=${2:-}; [ -z "$ACTION_ARG" ] || shift ;;
     update | mise-a-jour) ACTION=update ;;
     portal | portail) ACTION=portal ;;
-    *) die "$(t "Usage: $0 [--docker] [--package FILE.deb] [info | update | admin LOGIN | portal]" "Usage : $0 [--docker] [--paquet FICHIER.deb] [info | mise-a-jour | admin IDENTIFIANT | portail]")" ;;
+    *) die "$(t "Usage: $0 [--docker] [--package FILE.deb] [--harden] [info | update | admin LOGIN | portal | harden]" "Usage : $0 [--docker] [--paquet FICHIER.deb] [info | mise-a-jour | admin IDENTIFIANT | portail]")" ;;
   esac
   shift
 done
 
 if [ "$(id -u)" -ne 0 ]; then
   command -v sudo >/dev/null || die "$(t "Run the assistant as root." "Lancez l'assistant en root.")"
-  exec sudo --preserve-env=PORTUNIA_GATE_NOM,PORTUNIA_GATE_ADMIN,PORTUNIA_GATE_SSH_PORT,PORTUNIA_GATE_API_PORT,TZ,PORTUNIA_GATE_RELEASES,PORTUNIA_GATE_TUNNEL_TOKEN,PORTUNIA_GATE_LANG -- "$SELF" "${ARGS[@]}"
+  exec sudo --preserve-env=PORTUNIA_GATE_NOM,PORTUNIA_GATE_ADMIN,PORTUNIA_GATE_SSH_PORT,PORTUNIA_GATE_API_PORT,TZ,PORTUNIA_GATE_RELEASES,PORTUNIA_GATE_TUNNEL_TOKEN,PORTUNIA_GATE_LANG,PORTUNIA_GATE_DURCIR,PORTUNIA_GATE_GARDER,PORTUNIA_GATE_DURCIR_PAQUETS -- "$SELF" "${ARGS[@]}"
 fi
 BACKUP_OWNER=${SUDO_USER:-root}
 
@@ -362,6 +367,11 @@ questions() {
   local tz
   tz=$(timedatectl show -p Timezone --value 2>/dev/null || cat /etc/timezone 2>/dev/null || true)
   ZONE=$(ask "$(t "Time zone of the access rules" "Fuseau horaire des règles d'accès")" "${TZ:-${tz:-Europe/Paris}}")
+  if [ -z "$HARDEN" ] && interactive; then
+    local answer=''
+    read -r -p "  $(t "Harden this server at the end? Only if it is dedicated to the Gate [y/N]:" "Durcir ce serveur à la fin ? Seulement s'il est dédié à la Gate [o/N] :") " answer || answer=''
+    case $answer in o* | O* | y* | Y*) HARDEN=1 ;; esac
+  fi
 }
 
 # Initialisation : clés, certificat, base et administrateur au mot de passe provisoire.
@@ -432,7 +442,7 @@ EOF
   set_language
   systemctl enable --now portunia-gate >/dev/null 2>&1 || true
   wait_api
-  ok "$(t "Gate started (portunia-gate service, restarts with the server)" "Gate démarré (service portunia-gate, redémarre seul avec le serveur)")"
+  ok "$(t "Gate started (portunia-gate service, restarts with the server)" "Gate démarrée (service portunia-gate, redémarre seul avec le serveur)")"
   finish
 }
 
@@ -580,6 +590,386 @@ setup_portal() {
   fi
 }
 
+# ---------- Durcissement du serveur ----------
+#
+# Facultatif : à réserver à un serveur dédié à la Gate. Ne garde que ce qu'il lui faut : pare-feu
+# fermé sauf les ports utiles, services inutiles arrêtés, SSH du système resserré, réglages du
+# noyau. Tout changement qui pourrait couper l'accès est annulé seul si une nouvelle connexion
+# n'est pas confirmée à temps.
+
+HARDEN_DIR=/etc/portunia-gate/durcissement
+HARDEN_SSH=/etc/ssh/sshd_config.d/10-portunia-gate.conf
+HARDEN_SYSCTL=/etc/sysctl.d/90-portunia-gate.conf
+HARDEN_MODPROBE=/etc/modprobe.d/portunia-gate.conf
+HARDEN_UNIT=/etc/systemd/system/portunia-gate-pare-feu.service
+HARDEN_DELAY=300
+# Paquets réseau jamais utiles à la Gate, retirés seulement sur confirmation.
+HARDEN_PACKAGES="telnetd inetutils-telnetd rsh-server vsftpd proftpd-basic tftpd-hpa xinetd avahi-daemon cups samba rpcbind nfs-kernel-server bluez snmpd apache2 nginx exim4-daemon-light postfix modemmanager"
+
+# >>> fonctions testables
+# Règles du pare-feu. Sa table lui est propre : celles de Docker et des autres outils restent.
+# harden_nft_rules "ports d'administration" "ports de la Gate" (séparés par des virgules)
+harden_nft_rules() {
+  cat <<EOF
+table inet portunia_gate
+delete table inet portunia_gate
+table inet portunia_gate {
+  chain input {
+    type filter hook input priority 0; policy drop;
+    iif lo accept
+    ct state established,related accept
+    ct state invalid drop
+    meta l4proto { icmp, ipv6-icmp } accept
+    udp sport 67 udp dport 68 accept
+    udp sport 547 udp dport 546 accept
+    tcp dport { $1 } ct state new limit rate 30/minute burst 30 packets accept
+    tcp dport { $2 } accept
+  }
+}
+EOF
+}
+
+# Le service fait-il tourner le système ou la Gate ? Tout ce qui n'est pas ici est arrêté.
+harden_keeps() {
+  case ${1%.*} in
+    ssh | sshd | ssh@* | portunia-gate* | postgresql* | docker | containerd | cloudflared*) return 0 ;;
+    systemd-* | dbus* | getty@* | serial-getty@* | container-getty@* | console-* | autovt@* | user@* | user-runtime-dir@*) return 0 ;;
+    networking | NetworkManager* | netplan* | ifup* | resolvconf*) return 0 ;;
+    cron | crond | anacron | rsyslog | syslog | chrony* | ntp* | nftables | netfilter-persistent | ufw | fail2ban | crowdsec* | apparmor | auditd | kmod* | keyboard-setup | setvtrgb) return 0 ;;
+    unattended-upgrades | apt-daily* | e2scrub* | fstrim | logrotate | lvm2* | blk-availability | dm-event* | multipathd* | mdmonitor* | zfs*) return 0 ;;
+    qemu-guest-agent | open-vm-tools | vmtoolsd | vgauth | hv-* | waagent | walinuxagent | google-* | cloud-* | snapd* | pve* | lxc* | lxd*) return 0 ;;
+    grub-* | iscsid* | uuidd* | ufw-*) return 0 ;;
+  esac
+  return 1
+}
+
+# Réglages du SSH du système. $1 = « cle » : le compte a une clé, les mots de passe sont retirés.
+harden_sshd_conf() {
+  cat <<EOF
+# Durcissement de Portunia Gate : sudo bash installer.sh harden undo pour le retirer.
+X11Forwarding no
+AllowAgentForwarding no
+AllowTcpForwarding no
+PermitTunnel no
+MaxAuthTries 3
+LoginGraceTime 30
+ClientAliveInterval 300
+ClientAliveCountMax 2
+EOF
+  if [ "$1" = cle ]; then
+    cat <<EOF
+PermitRootLogin prohibit-password
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+EOF
+  fi
+}
+# <<< fonctions testables
+
+harden_sysctl_conf() {
+  cat <<EOF
+# Durcissement de Portunia Gate
+net.ipv4.conf.all.accept_redirects = 0
+net.ipv4.conf.default.accept_redirects = 0
+net.ipv4.conf.all.send_redirects = 0
+net.ipv4.conf.default.send_redirects = 0
+net.ipv4.conf.all.accept_source_route = 0
+net.ipv4.conf.default.accept_source_route = 0
+net.ipv4.conf.all.rp_filter = 2
+net.ipv4.conf.default.rp_filter = 2
+net.ipv4.conf.all.log_martians = 1
+net.ipv4.tcp_syncookies = 1
+net.ipv6.conf.all.accept_redirects = 0
+net.ipv6.conf.default.accept_redirects = 0
+kernel.kptr_restrict = 2
+kernel.dmesg_restrict = 1
+kernel.yama.ptrace_scope = 2
+kernel.randomize_va_space = 2
+kernel.unprivileged_bpf_disabled = 1
+net.core.bpf_jit_harden = 2
+fs.protected_hardlinks = 1
+fs.protected_symlinks = 1
+fs.protected_fifos = 2
+fs.protected_regular = 2
+fs.suid_dumpable = 0
+EOF
+}
+
+harden_modprobe_conf() {
+  local m
+  echo "# Durcissement de Portunia Gate : modules jamais utiles à la Gate."
+  for m in cramfs freevxfs jffs2 hfs hfsplus udf usb-storage firewire-core bluetooth dccp sctp rds tipc; do
+    echo "install $m /bin/false"
+  done
+}
+
+harden_admin_ports() {
+  local ports
+  ports=$(sshd -T 2>/dev/null | awk '$1 == "port" {print $2}' || true)
+  # Le port de la connexion en cours reste ouvert, quoi que dise la configuration.
+  [ -z "${SSH_CONNECTION:-}" ] || ports="$ports ${SSH_CONNECTION##* }"
+  [ -n "${ports// /}" ] || ports=22
+  # shellcheck disable=SC2086
+  printf '%s\n' $ports | sort -un | paste -sd, -
+}
+
+harden_gate_ports() {
+  local ssh api tls
+  ssh=$(env_value PORTUNIA_GATE_SSH_PORT)
+  api=$(env_value PORTUNIA_GATE_API_PORT)
+  tls=$(env_value PORTUNIA_GATE_PORTAL_TLS_LISTEN)
+  printf '%s\n' "${ssh:-2222}" "${api:-8443}" ${tls:+"${tls##*:}"} | sort -un | paste -sd, -
+}
+
+# Le compte qui administre a-t-il une clé SSH déjà installée ?
+harden_has_key() {
+  local home
+  home=$(getent passwd "$BACKUP_OWNER" | cut -d: -f6)
+  [ -s "${home:-/root}/.ssh/authorized_keys" ]
+}
+
+harden_extra_kept() { echo " ${PORTUNIA_GATE_GARDER:-} ${HARDEN_KEEP:-} " | tr ',' ' '; }
+
+# Services et sockets activés qui ne servent ni au système ni à la Gate.
+harden_unneeded() {
+  local unit kept
+  kept=$(harden_extra_kept)
+  while read -r unit; do
+    [ -n "$unit" ] || continue
+    harden_keeps "$unit" && continue
+    case $kept in *" $unit "* | *" ${unit%.*} "*) continue ;; esac
+    echo "$unit"
+  done < <(systemctl list-unit-files --type=service,socket --state=enabled --no-legend 2>/dev/null | awk '{print $1}')
+}
+
+harden_packages_present() {
+  local p
+  for p in $HARDEN_PACKAGES; do
+    if dpkg-query -W -f '${Status}' "$p" 2>/dev/null | grep -q 'install ok installed'; then echo "$p"; fi
+  done
+}
+
+harden_plan() {
+  local admin gate
+  admin=$(harden_admin_ports)
+  gate=$(harden_gate_ports)
+  step "$(t "Hardening plan" "Plan du durcissement")"
+  echo "  $(t "Firewall: incoming traffic closed, except" "Pare-feu : entrées fermées, sauf")"
+  echo "    $(t "system SSH (administration):" "SSH du système (administration) :") $admin"
+  echo "    $(t "Gate:" "Gate :") $gate"
+  [ "$MODE" != docker ] || warn "$(t "Docker manages its published ports itself: this firewall does not filter them." "Docker gère lui-même ses ports publiés : ce pare-feu ne les filtre pas.")"
+  echo "  $(t "Services that will be stopped:" "Services qui seront arrêtés :")"
+  local list
+  list=$(harden_unneeded)
+  if [ -n "$list" ]; then sed 's/^/    /' <<<"$list"; else echo "    $(t "none" "aucun")"; fi
+  echo "  $(t "Packages that can be removed, after a separate confirmation:" "Paquets qui peuvent être retirés, après une confirmation à part :")"
+  list=$(harden_packages_present)
+  if [ -n "$list" ]; then sed 's/^/    /' <<<"$list"; else echo "    $(t "none" "aucun")"; fi
+  if harden_has_key; then
+    echo "  $(t "System SSH: keys only, no forwarding." "SSH du système : clés seulement, pas de redirections.")"
+  else
+    warn "$(t "No SSH key for $BACKUP_OWNER: password sign-in stays enabled on the system SSH." "Pas de clé SSH pour $BACKUP_OWNER : la connexion par mot de passe reste active sur le SSH du système.")"
+  fi
+  if container; then
+    warn "$(t "Container: the kernel belongs to the host, so kernel settings are skipped. The firewall may be refused too: then use the host's." "Conteneur : le noyau est celui de l'hôte, ses réglages sont ignorés. Le pare-feu peut aussi être refusé : utilisez alors celui de l'hôte.")"
+  else
+    echo "  $(t "Kernel: network and memory protections, unused modules blocked." "Noyau : protections réseau et mémoire, modules inutiles bloqués.")"
+  fi
+  echo "  $(t "Automatic security updates." "Mises à jour de sécurité automatiques.")"
+}
+
+# Annule ce qui peut couper l'accès.
+harden_write_rollback() {
+  cat >"$HARDEN_DIR/retour.sh" <<EOF
+#!/bin/sh
+nft delete table inet portunia_gate 2>/dev/null
+rm -f $HARDEN_SSH
+systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null
+exit 0
+EOF
+  chmod 700 "$HARDEN_DIR/retour.sh"
+}
+
+harden_reload_ssh() { systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true; }
+
+# Pare-feu et SSH, à confirmer par une nouvelle connexion. Vrai si tout est validé.
+harden_access() {
+  local firewall=0
+  apt-get install -y -qq nftables >/dev/null || die "$(t "Cannot install nftables." "Installation de nftables impossible.")"
+  harden_nft_rules "$(harden_admin_ports)" "$(harden_gate_ports)" >"$HARDEN_DIR/pare-feu.nft"
+  chmod 600 "$HARDEN_DIR/pare-feu.nft"
+  harden_write_rollback
+  if interactive; then
+    systemd-run --quiet --unit=portunia-gate-retour --on-active="$HARDEN_DELAY" /bin/sh "$HARDEN_DIR/retour.sh" ||
+      die "$(t "Cannot schedule the automatic rollback: nothing was changed." "Retour automatique impossible à prévoir : rien n'a été modifié.")"
+  fi
+  if nft -f "$HARDEN_DIR/pare-feu.nft" 2>/dev/null; then
+    firewall=1
+    ok "$(t "Firewall applied" "Pare-feu appliqué")"
+  else
+    warn "$(t "Firewall refused on this system (container?): use the host's firewall." "Pare-feu refusé sur ce système (conteneur ?) : utilisez celui de l'hôte.")"
+  fi
+  if [ -d /etc/ssh/sshd_config.d ] && grep -qsE '^[[:space:]]*Include[[:space:]].*sshd_config\.d' /etc/ssh/sshd_config; then
+    if harden_has_key; then harden_sshd_conf cle >"$HARDEN_SSH"; else harden_sshd_conf mot-de-passe >"$HARDEN_SSH"; fi
+    if sshd -t 2>/dev/null; then
+      harden_reload_ssh
+      ok "$(t "System SSH tightened" "SSH du système resserré")"
+    else
+      rm -f "$HARDEN_SSH"
+      warn "$(t "System SSH left unchanged: settings refused by sshd." "SSH du système inchangé : réglages refusés par sshd.")"
+    fi
+  else
+    warn "$(t "System SSH left unchanged: no sshd_config.d." "SSH du système inchangé : pas de sshd_config.d.")"
+  fi
+  if interactive; then
+    echo
+    echo "  ${Y}${B}$(t "Check your access now" "Vérifiez votre accès maintenant")${N}"
+    echo "  $(t "Keep this window open and, in ANOTHER window, connect again:" "Gardez cette fenêtre ouverte et, dans une AUTRE fenêtre, reconnectez-vous :")"
+    echo "    ssh $BACKUP_OWNER@$(address)"
+    echo "  $(t "Also check that Portunia reaches the Gate." "Vérifiez aussi que Portunia joint la Gate.")"
+    echo "  $(t "Without an answer within $((HARDEN_DELAY / 60)) minutes, these changes are undone." "Sans réponse sous $((HARDEN_DELAY / 60)) minutes, ces changements sont annulés.")"
+    local answer=''
+    read -r -t "$((HARDEN_DELAY - 20))" -p "  $(t "Does the new connection work? Type yes:" "La nouvelle connexion fonctionne ? Tapez oui :") " answer || answer=''
+    case $answer in
+      oui | OUI | Oui | yes | YES | Yes) systemctl stop portunia-gate-retour.timer portunia-gate-retour.service 2>/dev/null || true ;;
+      *)
+        systemctl stop portunia-gate-retour.timer 2>/dev/null || true
+        /bin/sh "$HARDEN_DIR/retour.sh"
+        warn "$(t "Firewall and system SSH restored as they were." "Pare-feu et SSH du système remis comme avant.")"
+        return 1
+        ;;
+    esac
+  else
+    warn "$(t "No terminal: access was not checked." "Sans terminal : l'accès n'a pas été vérifié.")"
+  fi
+  if [ "$firewall" = 1 ]; then
+    cat >"$HARDEN_UNIT" <<EOF
+[Unit]
+Description=Pare-feu de Portunia Gate
+After=nftables.service
+Before=network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f $HARDEN_DIR/pare-feu.nft
+ExecStop=-/usr/sbin/nft delete table inet portunia_gate
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+    systemctl enable portunia-gate-pare-feu >/dev/null 2>&1
+  fi
+}
+
+harden_services() {
+  local unit list
+  list=$(harden_unneeded)
+  [ -n "$list" ] || { ok "$(t "No unneeded service" "Aucun service inutile")"; return 0; }
+  while read -r unit; do
+    systemctl disable --now "$unit" >/dev/null 2>&1 || true
+    systemctl mask "$unit" >/dev/null 2>&1 || true
+    echo "$unit" >>"$HARDEN_DIR/services"
+    ok "$(t "Stopped:" "Arrêté :") $unit"
+  done <<<"$list"
+}
+
+harden_packages() {
+  local list
+  list=$(harden_packages_present | paste -sd' ' -)
+  [ -n "$list" ] || return 0
+  local answer=${PORTUNIA_GATE_DURCIR_PAQUETS:-non}
+  if interactive; then
+    read -r -p "  $(t "Remove these packages for good? ($list) [y/N]:" "Retirer ces paquets définitivement ? ($list) [o/N] :") " answer || answer=''
+  fi
+  case $answer in
+    o* | O* | y* | Y*)
+      # shellcheck disable=SC2086
+      DEBIAN_FRONTEND=noninteractive apt-get purge -y -qq $list >/dev/null
+      ok "$(t "Packages removed" "Paquets retirés")"
+      ;;
+    *) warn "$(t "Packages kept (their services stay stopped)." "Paquets gardés (leurs services restent arrêtés).")" ;;
+  esac
+}
+
+harden_system() {
+  if container; then return 0; fi
+  harden_sysctl_conf >"$HARDEN_SYSCTL"
+  sysctl -e -q -p "$HARDEN_SYSCTL" >/dev/null 2>&1 || true
+  harden_modprobe_conf >"$HARDEN_MODPROBE"
+  ok "$(t "Kernel settings applied" "Réglages du noyau appliqués")"
+}
+
+harden_updates() {
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq unattended-upgrades >/dev/null || { warn "$(t "Automatic updates not installed." "Mises à jour automatiques non installées.")"; return 0; }
+  printf 'APT::Periodic::Update-Package-Lists "1";\nAPT::Periodic::Unattended-Upgrade "1";\n' >/etc/apt/apt.conf.d/20auto-upgrades
+  ok "$(t "Automatic security updates enabled" "Mises à jour de sécurité automatiques activées")"
+}
+
+harden_apply() {
+  harden_plan
+  echo
+  warn "$(t "For a server dedicated to the Gate only: other programs may stop." "Pour un serveur dédié à la Gate uniquement : d'autres programmes peuvent s'arrêter.")"
+  if interactive; then
+    HARDEN_KEEP=$(ask "$(t "Services to keep, separated by spaces (monitoring, backup…)" "Services à garder, séparés par des espaces (supervision, sauvegarde…)")" "")
+    confirm "$(t "Harden this server?" "Durcir ce serveur ?")" || { warn "$(t "Nothing was changed." "Rien n'a été modifié.")"; return 0; }
+  elif [ "${PORTUNIA_GATE_DURCIR:-}" != oui ]; then
+    die "$(t "Without a terminal, set PORTUNIA_GATE_DURCIR=oui." "Sans terminal, indiquez PORTUNIA_GATE_DURCIR=oui.")"
+  fi
+  install -d -m 700 "$HARDEN_DIR"
+  step "$(t "Access" "Accès")"
+  harden_access || return 0
+  step "$(t "Services" "Services")"
+  harden_services
+  harden_packages
+  step "$(t "System" "Système")"
+  harden_system
+  harden_updates
+  echo
+  ok "$(t "Server hardened. Undo: sudo bash installer.sh harden undo" "Serveur durci. Pour annuler : sudo bash installer.sh durcir annuler")"
+}
+
+harden_status() {
+  step "$(t "Hardening" "Durcissement")"
+  local yes no
+  yes=$(t "active" "actif") no=$(t "absent" "absent")
+  if nft list table inet portunia_gate >/dev/null 2>&1; then echo "  $(t "Firewall:" "Pare-feu :") $yes"; else echo "  $(t "Firewall:" "Pare-feu :") $no"; fi
+  if [ -f "$HARDEN_SSH" ]; then echo "  $(t "System SSH:" "SSH du système :") $yes"; else echo "  $(t "System SSH:" "SSH du système :") $no"; fi
+  if [ -f "$HARDEN_SYSCTL" ]; then echo "  $(t "Kernel:" "Noyau :") $yes"; else echo "  $(t "Kernel:" "Noyau :") $no"; fi
+  local n=0
+  [ ! -f "$HARDEN_DIR/services" ] || n=$(wc -l <"$HARDEN_DIR/services")
+  echo "  $(t "Services stopped:" "Services arrêtés :") $n"
+}
+
+harden_undo() {
+  systemctl disable --now portunia-gate-pare-feu >/dev/null 2>&1 || true
+  nft delete table inet portunia_gate 2>/dev/null || true
+  rm -f "$HARDEN_UNIT" "$HARDEN_SSH" "$HARDEN_SYSCTL" "$HARDEN_MODPROBE" /etc/apt/apt.conf.d/20auto-upgrades
+  systemctl daemon-reload
+  harden_reload_ssh
+  local unit
+  if [ -f "$HARDEN_DIR/services" ]; then
+    while read -r unit; do
+      systemctl unmask "$unit" >/dev/null 2>&1 || true
+      systemctl enable --now "$unit" >/dev/null 2>&1 || warn "$(t "Cannot restart:" "Redémarrage impossible :") $unit"
+    done <"$HARDEN_DIR/services"
+  fi
+  rm -rf "$HARDEN_DIR"
+  ok "$(t "Hardening removed. Kernel settings go back at the next restart; removed packages are not reinstalled." "Durcissement retiré. Les réglages du noyau reviennent au prochain redémarrage ; les paquets retirés ne sont pas réinstallés.")"
+}
+
+harden() {
+  case ${1:-} in
+    '') harden_apply ;;
+    plan | simulation) harden_plan ;;
+    status | etat) harden_status ;;
+    undo | annuler) harden_undo ;;
+    *) die "$(t "Usage: $0 harden [plan | status | undo]" "Usage : $0 durcir [simulation | etat | annuler]")" ;;
+  esac
+}
+
 menu() {
   local where
   if [ "$MODE" = docker ]; then where="Docker, $DIR"; else where=$(t "Debian package" "paquet Debian"); fi
@@ -589,13 +979,15 @@ menu() {
   echo "  2) $(t "Update" "Mettre à jour")"
   echo "  3) $(t "Create an administrator (temporary password)" "Créer un administrateur (mot de passe provisoire)")"
   echo "  4) $(t "Install the web portal (Cloudflare Tunnel)" "Installer le portail web (Cloudflare Tunnel)")"
-  echo "  5) $(t "Quit" "Quitter")"
+  echo "  5) $(t "Harden this server" "Durcir ce serveur")"
+  echo "  6) $(t "Quit" "Quitter")"
   echo
   case $(ask "$(t "Your choice" "Votre choix")" 1) in
     1) info ;;
     2) update ;;
     3) add_admin ;;
     4) setup_portal ;;
+    5) harden ;;
     *) exit 0 ;;
   esac
 }
@@ -608,7 +1000,11 @@ elif installed_docker; then
   install_docker_wrapper
 else
   case $ACTION in
-    '') if [ "$MODE" = docker ]; then install_with_docker; else install_native; fi; exit 0 ;;
+    '')
+      if [ "$MODE" = docker ]; then install_with_docker; else install_native; fi
+      [ -z "$HARDEN" ] || harden
+      exit 0
+      ;;
     *) die "$(t "Portunia Gate is not installed on this server: first run sudo $0" "Portunia Gate n'est pas installé sur ce serveur : lancez d'abord sudo $0")" ;;
   esac
 fi
@@ -618,5 +1014,6 @@ case $ACTION in
   update) update ;;
   admin) add_admin "$ACTION_ARG" ;;
   portal) setup_portal ;;
+  harden) harden "$ACTION_ARG" ;;
   '') menu ;;
 esac

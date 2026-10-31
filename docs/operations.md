@@ -134,3 +134,25 @@ If Docker hides the clients' real address, they all seem to come from one addres
 **Access withdrawn.** Rights are checked every 30 seconds, and immediately after a change made from Portunia. A session closes when the account is disabled or deleted, the server deleted, or the rule removed, expired or **outside its hours**. A portal session also closes with the portal or when leaving its group. The log records `session.coupee`.
 
 **Recording.** A recorded session does not open if recording is impossible, and closes if a write fails (`enregistrement.echec`). Below `PORTUNIA_GATE_MIN_FREE_MB` (512 MB by default), new recorded sessions are refused (`disque.presque_plein`). Below half that threshold, ongoing ones close. Set up an alert on these events, and preferably a separate disk for `/var/lib/portunia-gate/enregistrements`.
+
+## Server hardening
+
+**Only for a server dedicated to the Gate.** Optional and off by default: choose it at install time (`--harden` or the question asked) or later.
+
+```bash
+sudo bash installer.sh harden plan
+sudo bash installer.sh harden
+sudo bash installer.sh harden status
+sudo bash installer.sh harden undo
+```
+
+- **Firewall:** all incoming traffic is closed except the system SSH, the Gate's SSH and API, and the portal's HTTPS port if set. Outgoing traffic stays open, as the Gate must reach the servers. Docker manages its published ports itself: this firewall does not filter them.
+- **Services:** any enabled service that belongs neither to the system nor to the Gate is stopped and masked. The assistant lists them first and asks which to keep (monitoring, backup…).
+- **Packages:** a list of unneeded servers (FTP, Telnet, web, mail, printing…) can be removed after a separate confirmation. `harden undo` does not reinstall them.
+- **System SSH:** no forwarding, and keys only if the account running the assistant already has one.
+- **Kernel:** network and memory protections, unused modules blocked. Skipped in an LXC container, whose kernel is the host's.
+- **Automatic security updates.**
+
+**Access safety.** After the firewall and SSH, the assistant asks you to confirm that a new connection works. Without a positive answer within 5 minutes, these two changes are undone automatically.
+
+If you change a Gate port, run `harden` again: the firewall does not follow such changes.

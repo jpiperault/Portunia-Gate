@@ -117,6 +117,17 @@ Without a terminal, the wizard uses the suggested values, or those of the `PORTU
 sudo PORTUNIA_GATE_ADMIN=julien PORTUNIA_GATE_NOM="ACME Gate" bash installer.sh </dev/null
 ```
 
+### Harden the server (optional)
+
+On a server dedicated to the Gate, the assistant can keep only what is needed: firewall closed except the useful ports, unneeded services stopped, system SSH and kernel tightened, automatic security updates. Answer yes at install time, or use `--harden`, or later:
+
+```bash
+sudo bash installer.sh harden plan
+sudo bash installer.sh harden
+```
+
+The plan changes nothing. If a new SSH connection is not confirmed within 5 minutes, the firewall and system SSH are put back as they were. Details and undoing: [operations](docs/operations.md).
+
 ### Company certificate
 
 The API certificate is self-signed: Portunia recognises it by its fingerprint, which is enough. To use a company certificate instead (PEM files, certificate followed by its chain):
