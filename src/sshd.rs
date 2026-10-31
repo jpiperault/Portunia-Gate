@@ -6,7 +6,15 @@
 //! - `ssh login%cible@Gate` : accès direct (shell, commande, SFTP) ;
 //! - `ssh -J login@Gate cible` : rebond de bout en bout, cibles en mode rebond.
 
-use std::{borrow::Cow, collections::BTreeSet, net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    borrow::Cow,
+    collections::BTreeSet,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 use anyhow::Result;
 use russh::{
@@ -19,12 +27,17 @@ use uuid::Uuid;
 
 use crate::{
     audit,
-    auth::{totp_check, verify_password, Factor},
+    auth::{check_password, totp_check, Factor},
+    limits::{Slot, Verdict},
+    live::{self, Cut, Watched},
     model::{self, Access, Target, User},
     recording::Recorder,
     target::{self, ConnectError, Credentials},
     State,
 };
+
+/// Temps laissé pour s'authentifier.
+const LOGIN_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub fn default_banner() -> &'static str {
     t!(
@@ -49,34 +62,54 @@ pub async fn run(state: Arc<State>) -> Result<()> {
         ..Default::default()
     });
     tracing::info!("{} {}", t!("SSH listening on", "SSH en écoute sur"), state.config.ssh_listen);
-    let listen = state.config.ssh_listen.clone();
-    let mut server = Server { state };
-    use russh::server::Server as _;
-    server.run_on_address(config, listen.as_str()).await?;
-    Ok(())
-}
-
-#[derive(Clone)]
-struct Server {
-    state: Arc<State>,
-}
-
-impl server::Server for Server {
-    type Handler = Conn;
-
-    fn new_client(&mut self, addr: Option<SocketAddr>) -> Conn {
-        Conn {
-            state: self.state.clone(),
-            addr: addr.map(|a| a.ip().to_string()).unwrap_or_default(),
+    let listener = tokio::net::TcpListener::bind(state.config.ssh_listen.as_str()).await?;
+    loop {
+        let (tcp, peer) = match listener.accept().await {
+            Ok(accepted) => accepted,
+            Err(e) => {
+                tracing::warn!("SSH : {e}");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+        };
+        // Plafond des connexions pas encore authentifiées.
+        let Some(slot) = state.limits.connection(peer.ip()) else { continue };
+        let authenticated = Arc::new(AtomicBool::new(false));
+        let conn = Conn {
+            state: state.clone(),
+            addr: peer.ip().to_string(),
             requested: String::new(),
             user: None,
             factors: BTreeSet::new(),
             ki: KiStage::Start,
             ctx: None,
-        }
+            slot: Some(slot),
+            authenticated: authenticated.clone(),
+            watch: None,
+        };
+        tokio::spawn(serve(config.clone(), tcp, conn, authenticated));
     }
+}
 
-    fn handle_session_error(&mut self, error: <Self::Handler as server::Handler>::Error) {
+/// Sert une connexion ; sans authentification après `LOGIN_TIMEOUT`, elle est fermée.
+async fn serve(config: Arc<server::Config>, tcp: tokio::net::TcpStream, conn: Conn, authenticated: Arc<AtomicBool>) {
+    let Ok(Ok(mut session)) = tokio::time::timeout(LOGIN_TIMEOUT, server::run_stream(config, tcp, conn)).await else {
+        return;
+    };
+    let handle = session.handle();
+    let ended = tokio::select! {
+        ended = &mut session => Some(ended),
+        _ = tokio::time::sleep(LOGIN_TIMEOUT) => None,
+    };
+    let ended = match ended {
+        Some(ended) => ended,
+        None if authenticated.load(Ordering::SeqCst) => session.await,
+        None => {
+            let _ = handle.disconnect(russh::Disconnect::ByApplication, "délai de connexion dépassé".into(), "fr".into()).await;
+            return;
+        }
+    };
+    if let Err(error) = ended {
         tracing::debug!("{} {error:#}", t!("SSH session ended:", "session SSH terminée :"));
     }
 }
@@ -98,6 +131,11 @@ struct Conn {
     factors: BTreeSet<Factor>,
     ki: KiStage,
     ctx: Option<Arc<Ctx>>,
+    /// Place parmi les connexions non authentifiées, rendue à l'authentification.
+    slot: Option<Slot>,
+    authenticated: Arc<AtomicBool>,
+    /// Inscription de la connexion : fermée si le compte perd son accès.
+    watch: Option<live::Guard>,
 }
 
 /// Ce qui est connu une fois l'utilisateur authentifié.
@@ -108,6 +146,28 @@ struct Ctx {
     /// Cible demandée dans le nom (« login%cible »), avec les droits du moment.
     target: Option<(Target, Option<Access>)>,
     requested_target: Option<String>,
+}
+
+impl Ctx {
+    /// Le compte existe encore et n'est pas désactivé.
+    async fn active(&self) -> Result<bool> {
+        Ok(model::user_by_id(&self.state.db, self.user.id).await?.is_some_and(|u| !u.disabled))
+    }
+
+    /// La cible demandée dans le nom et les droits de cet instant, relus à chaque ouverture :
+    /// une connexion restée ouverte ne garde pas des droits retirés depuis.
+    async fn current(&self) -> Result<Option<(Target, Access)>> {
+        let Some((target, _)) = &self.target else { return Ok(None) };
+        if !self.active().await? {
+            return Ok(None);
+        }
+        let Some(target) = model::target_by_id(&self.state.db, target.id).await? else { return Ok(None) };
+        Ok(model::access(&self.state.db, self.user.id, target.id).await?.map(|access| (target, access)))
+    }
+
+    fn watch(&self, target: &Target, recorded: bool) -> (live::Guard, Cut) {
+        self.state.live.watch(Watched { user: self.user.id, login: &self.user.login, target: Some(target), web: false, recorded })
+    }
 }
 
 fn split_login(requested: &str) -> (&str, Option<&str>) {
@@ -139,6 +199,24 @@ impl Conn {
         Ok(self.user.clone())
     }
 
+    /// Compte un essai avant de le vérifier ; faux si les essais sont épuisés.
+    async fn attempt(&self, requested: &str, method: &str) -> bool {
+        let (login, _) = split_login(requested);
+        match self.state.limits.attempt(login, &self.addr) {
+            Verdict::Allowed => true,
+            Verdict::Blocked { first } => {
+                if first {
+                    audit::note(&self.state.db, login, "auth.bloquee", json!({ "methode": method, "adresse": self.addr })).await;
+                }
+                false
+            }
+        }
+    }
+
+    fn forgive(&self, requested: &str) {
+        self.state.limits.forgive(split_login(requested).0, &self.addr);
+    }
+
     async fn fail(&self, method: &str, why: &str) {
         let (login, _) = split_login(&self.requested);
         audit::note(
@@ -163,6 +241,7 @@ impl Conn {
                     Factor::Totp => "code",
                 })
                 .collect();
+            self.state.limits.success(split_login(&self.requested).0, &self.addr);
             audit::note(
                 &self.state.db,
                 &user.login,
@@ -208,10 +287,13 @@ impl server::Handler for Conn {
 
     async fn auth_password(&mut self, requested: &str, password: &str) -> Result<Auth, Self::Error> {
         let Some(user) = self.load(requested).await? else {
-            self.fail("mot de passe", "compte inconnu ou désactivé").await;
+            if self.attempt(requested, "mot de passe").await {
+                self.fail("mot de passe", "compte inconnu ou désactivé").await;
+            }
             return Ok(Auth::reject());
         };
-        // Jeton à usage unique remis par l'API à Portunia, pour ce compte et ce serveur.
+        // Jeton à usage unique remis par l'API à Portunia, pour ce compte et ce serveur :
+        // aucun calcul à faire, il ne compte comme essai que s'il est refusé.
         if password.starts_with("hj1_") {
             let (_, wanted) = split_login(requested);
             let target = match wanted {
@@ -233,17 +315,23 @@ impl server::Handler for Conn {
                 .await;
                 return Ok(Auth::Accept);
             }
-            self.fail("jeton", "jeton invalide, expiré ou déjà utilisé").await;
+            if self.attempt(requested, "jeton").await {
+                self.fail("jeton", "jeton invalide, expiré ou déjà utilisé").await;
+            }
             return Ok(Auth::reject());
         }
         let policy = user.policy(&self.state.db).await?;
         if !policy.could_use(&self.factors, Factor::Password) {
             return Ok(Auth::reject());
         }
-        if !user.password_hash.as_deref().is_some_and(|h| verify_password(h, password)) {
+        if !self.attempt(requested, "mot de passe").await {
+            return Ok(Auth::reject());
+        }
+        if !check_password(user.password_hash.clone(), password.to_string()).await {
             self.fail("mot de passe", "mot de passe incorrect").await;
             return Ok(Auth::reject());
         }
+        self.forgive(requested);
         self.factors.insert(Factor::Password);
         self.decide(&user).await
     }
@@ -264,7 +352,9 @@ impl server::Handler for Conn {
         };
         let fingerprint = key.fingerprint(HashAlg::Sha256).to_string();
         if model::user_key_owner(&self.state.db, &fingerprint).await? != Some(user.id) {
-            self.fail("clé", "clé inconnue").await;
+            if self.attempt(requested, "clé").await {
+                self.fail("clé", "clé inconnue").await;
+            }
             return Ok(Auth::reject());
         }
         self.factors.insert(Factor::Key);
@@ -278,7 +368,9 @@ impl server::Handler for Conn {
         response: Option<Response<'a>>,
     ) -> Result<Auth, Self::Error> {
         let Some(user) = self.load(requested).await? else {
-            self.fail("clavier", "compte inconnu ou désactivé").await;
+            if self.attempt(requested, "clavier").await {
+                self.fail("clavier", "compte inconnu ou désactivé").await;
+            }
             return Ok(Auth::reject());
         };
         let policy = user.policy(&self.state.db).await?;
@@ -299,11 +391,16 @@ impl server::Handler for Conn {
                 }
             }
             (KiStage::Password, Some(password)) => {
-                if !user.password_hash.as_deref().is_some_and(|h| verify_password(h, &password)) {
+                if !self.attempt(requested, "mot de passe").await {
+                    self.ki = KiStage::Start;
+                    return Ok(Auth::reject());
+                }
+                if !check_password(user.password_hash.clone(), password).await {
                     self.fail("mot de passe", "mot de passe incorrect").await;
                     self.ki = KiStage::Start;
                     return Ok(Auth::reject());
                 }
+                self.forgive(requested);
                 self.factors.insert(Factor::Password);
                 if policy.satisfied(&self.factors) {
                     return self.decide(&user).await;
@@ -315,19 +412,34 @@ impl server::Handler for Conn {
                 Ok(Auth::reject())
             }
             (KiStage::Totp, Some(code)) => {
+                if !self.attempt(requested, "code").await {
+                    return Ok(Auth::reject());
+                }
                 if !self.check_totp(&user, &code).await? {
                     self.fail("code", "code incorrect ou déjà utilisé").await;
                     // On reste sur le code : une nouvelle tentative le redemande.
                     return Ok(Auth::reject());
                 }
+                self.forgive(requested);
                 self.factors.insert(Factor::Totp);
                 self.decide(&user).await
             }
         }
     }
 
-    async fn auth_succeeded(&mut self, _session: &mut Session) -> Result<(), Self::Error> {
+    async fn auth_succeeded(&mut self, session: &mut Session) -> Result<(), Self::Error> {
         let Some(user) = self.user.clone() else { return Ok(()) };
+        self.authenticated.store(true, Ordering::SeqCst);
+        self.slot = None;
+        // Compte désactivé ou supprimé : la connexion entière se ferme.
+        let (guard, mut cut) = self.state.live.watch(Watched { user: user.id, login: &user.login, target: None, web: false, recorded: false });
+        self.watch = Some(guard);
+        let handle = session.handle();
+        tokio::spawn(async move {
+            if let Some(why) = cut.wait().await {
+                let _ = handle.disconnect(russh::Disconnect::ByApplication, why, "fr".into()).await;
+            }
+        });
         let (_, wanted) = split_login(&self.requested);
         let target = match wanted {
             Some(name) => match model::target_by_name(&self.state.db, name).await? {
@@ -355,9 +467,12 @@ impl server::Handler for Conn {
         reply: ChannelOpenHandle,
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
-        let Some(ctx) = self.ctx.clone() else {
-            reply.reject(ChannelOpenFailure::AdministrativelyProhibited).await;
-            return Ok(());
+        let ctx = match self.ctx.clone() {
+            Some(ctx) if ctx.active().await? => ctx,
+            _ => {
+                reply.reject(ChannelOpenFailure::AdministrativelyProhibited).await;
+                return Ok(());
+            }
         };
         reply.accept().await;
         tokio::spawn(async move {
@@ -396,11 +511,11 @@ impl server::Handler for Conn {
 
     async fn exec_request(&mut self, channel: ChannelId, data: &[u8], session: &mut Session) -> Result<(), Self::Error> {
         let command = String::from_utf8_lossy(data);
-        let allowed = self
-            .ctx
-            .as_ref()
-            .and_then(|c| c.target.as_ref())
-            .is_some_and(|(t, access)| access.is_some_and(|a| a.sftp || !is_file_copy(&command)) && t.vaulted());
+        let current = match &self.ctx {
+            Some(ctx) => ctx.current().await?,
+            None => None,
+        };
+        let allowed = current.is_some_and(|(t, access)| (access.sftp || !is_file_copy(&command)) && t.vaulted());
         if allowed {
             session.channel_success(channel)?;
         } else {
@@ -410,12 +525,11 @@ impl server::Handler for Conn {
     }
 
     async fn subsystem_request(&mut self, channel: ChannelId, name: &str, session: &mut Session) -> Result<(), Self::Error> {
-        let allowed = name == "sftp"
-            && self
-                .ctx
-                .as_ref()
-                .and_then(|c| c.target.as_ref())
-                .is_some_and(|(t, access)| access.is_some_and(|a| a.sftp) && t.vaulted());
+        let current = match &self.ctx {
+            Some(ctx) if name == "sftp" => ctx.current().await?,
+            _ => None,
+        };
+        let allowed = current.is_some_and(|(t, access)| access.sftp && t.vaulted());
         if allowed {
             session.channel_success(channel)?;
         } else {
@@ -435,9 +549,12 @@ impl server::Handler for Conn {
         reply: ChannelOpenHandle,
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
-        let Some(ctx) = self.ctx.clone() else {
-            reply.reject(ChannelOpenFailure::AdministrativelyProhibited).await;
-            return Ok(());
+        let ctx = match self.ctx.clone() {
+            Some(ctx) if ctx.active().await? => ctx,
+            _ => {
+                reply.reject(ChannelOpenFailure::AdministrativelyProhibited).await;
+                return Ok(());
+            }
         };
         let db = &self.state.db;
         // 1. Rebond de bout en bout (ssh -J) vers une cible en mode rebond.
@@ -453,7 +570,7 @@ impl server::Handler for Conn {
             }
         }
         // 2. Tunnel (ssh -L) à travers une cible du coffre, si la règle l'autorise.
-        if let Some((t, Some(access))) = ctx.target.clone() {
+        if let Some((t, access)) = ctx.current().await? {
             if access.tunnels && t.vaulted() {
                 reply.accept().await;
                 let (host, origin) = (host.to_string(), origin.to_string());
@@ -670,8 +787,16 @@ async fn shell(ctx: Arc<Ctx>, mut channel: Channel<Msg>, mut pty: Option<PtyInfo
             }
         },
     };
-    // Les droits sont relus au moment d'ouvrir : une règle retirée s'applique tout de suite.
-    let Some(access) = model::access(db, ctx.user.id, target.id).await? else {
+    // Compte, serveur et droits sont relus au moment d'ouvrir : un retrait s'applique tout de suite.
+    let opening = if ctx.active().await? {
+        match model::target_by_id(db, target.id).await? {
+            Some(fresh) => model::access(db, ctx.user.id, fresh.id).await?.map(|access| (fresh, access)),
+            None => None,
+        }
+    } else {
+        None
+    };
+    let Some((target, access)) = opening else {
         audit::note(
             db,
             &login,
@@ -685,6 +810,12 @@ async fn shell(ctx: Arc<Ctx>, mut channel: Channel<Msg>, mut pty: Option<PtyInfo
     };
     if target.is_rdp() {
         say(&channel, &t!(format!("{} is a Remote Desktop server: open it from Portunia.\n", target.name), format!("{} est un serveur Bureau à distance : ouvrez-le depuis Portunia.\n", target.name))).await;
+        close(&channel, 1).await;
+        return Ok(());
+    }
+    if target.records() && !live::can_record(&ctx.state) {
+        audit::note(db, &login, "enregistrement.echec", json!({ "cible": target.name, "raison": "espace disque insuffisant", "adresse": ctx.addr })).await;
+        say(&channel, &format!("{}\n", live::no_space_message())).await;
         close(&channel, 1).await;
         return Ok(());
     }
@@ -718,25 +849,44 @@ async fn shell(ctx: Arc<Ctx>, mut channel: Channel<Msg>, mut pty: Option<PtyInfo
         json!({ "session": id, "cible": target.name, "compte": creds_user, "mode": target.mode, "adresse": ctx.addr }),
     )
     .await;
-    let mut recorder = if target.records() {
+    let mut recorder = None;
+    if target.records() {
         say(&channel, t!("Portunia Gate: session recorded.\n", "Portunia Gate : session enregistrée.\n")).await;
-        Some(Recorder::create(
-            &ctx.state.config.recordings_dir(),
-            id,
-            p.cols,
-            p.rows,
-            &format!("{login} → {detail}"),
-            access.record_input,
-        )?)
-    } else {
-        None
-    };
+        match Recorder::create(&ctx.state.config.recordings_dir(), id, p.cols, p.rows, &format!("{login} → {detail}"), access.record_input) {
+            Ok(r) => recorder = Some(r),
+            Err(e) => {
+                refuse_unrecorded(&ctx, id, &target.name, &e, &channel).await;
+                let _ = handle.disconnect(russh::Disconnect::ByApplication, "", "fr").await;
+                return Ok(());
+            }
+        }
+    }
+    let (_watch, mut cut) = ctx.watch(&target, recorder.is_some());
     let started = std::time::Instant::now();
-    let status = pump(&mut channel, remote, recorder.as_mut()).await;
+    let (status, ended) = pump(&mut channel, remote, recorder.as_mut(), &mut cut).await;
     let _ = handle.disconnect(russh::Disconnect::ByApplication, "", "fr").await;
     finish(&ctx, id, recorder, started, &target.name).await;
-    close(&channel, status.unwrap_or(0)).await;
+    end_session(&channel, status, ended).await;
     Ok(())
+}
+
+/// Enregistrement impossible : la session ne commence pas.
+async fn refuse_unrecorded(ctx: &Ctx, id: Uuid, target: &str, error: &anyhow::Error, channel: &Channel<Msg>) {
+    audit::note(&ctx.state.db, &ctx.user.login, "enregistrement.echec", json!({ "session": id, "cible": target, "raison": error.to_string(), "adresse": ctx.addr })).await;
+    let done = model::Finished { recording: None, sha256: None, signature: None, bytes: 0 };
+    if let Err(e) = model::session_end(&ctx.state.db, id, done).await {
+        tracing::error!("{} {id}: {e:#}", t!("end of session", "fin de session"));
+    }
+    say(channel, t!("Recording is impossible: session refused. Tell an administrator.\n", "Enregistrement impossible : session refusée. Prévenez un administrateur.\n")).await;
+    close(channel, 1).await;
+}
+
+/// Fin de session côté utilisateur, avec la raison si la Gate l'a fermée.
+async fn end_session(channel: &Channel<Msg>, status: Option<u32>, ended: Option<String>) {
+    if let Some(why) = &ended {
+        say(channel, &format!("\r\n{why}\n")).await;
+    }
+    close(channel, status.unwrap_or(if ended.is_some() { 1 } else { 0 })).await;
 }
 
 /// Connexion à la cible pour une session interactive : identifiants du coffre, ou demandés
@@ -808,13 +958,23 @@ async fn connect_interactive(
 }
 
 /// Relaie les deux sens jusqu'à la fermeture ; renvoie le code de sortie de la cible.
-async fn pump(user: &mut Channel<Msg>, mut remote: Channel<russh::client::Msg>, mut rec: Option<&mut Recorder>) -> Option<u32> {
+/// Renvoie aussi la raison si la Gate a fermé la session (accès retiré, enregistrement impossible).
+async fn pump(user: &mut Channel<Msg>, mut remote: Channel<russh::client::Msg>, mut rec: Option<&mut Recorder>, cut: &mut Cut) -> (Option<u32>, Option<String>) {
     let mut status = None;
+    let mut ended = None;
     loop {
+        if rec.as_deref().is_some_and(Recorder::failed) {
+            ended = Some(t!("Recording failed: session closed. Tell an administrator.", "Enregistrement impossible : session fermée. Prévenez un administrateur.").to_string());
+            break;
+        }
         tokio::select! {
+            why = cut.reason() => {
+                ended = Some(why);
+                break;
+            }
             msg = user.wait() => match msg {
                 Some(ChannelMsg::Data { data }) => {
-                    if let Some(r) = rec.as_deref_mut() { r.input(&data); }
+                    if let Some(r) = rec.as_deref_mut() { r.input(&data); r.flush(); }
                     if remote.data_bytes(data.to_vec()).await.is_err() { break; }
                 }
                 Some(ChannelMsg::WindowChange { col_width, row_height, pix_width, pix_height }) => {
@@ -841,7 +1001,7 @@ async fn pump(user: &mut Channel<Msg>, mut remote: Channel<russh::client::Msg>, 
             },
         }
     }
-    status
+    (status, ended)
 }
 
 async fn finish(ctx: &Ctx, id: Uuid, recorder: Option<Recorder>, started: std::time::Instant, target: &str) {
@@ -854,6 +1014,10 @@ async fn finish(ctx: &Ctx, id: Uuid, recorder: Option<Recorder>, started: std::t
     let mut index = None;
     if let Some(rec) = recorder {
         let with_input = rec.records_input();
+        if rec.failed() {
+            tracing::error!("{} {id}", t!("incomplete recording, session closed:", "enregistrement incomplet, session fermée :"));
+            audit::note(&ctx.state.db, &ctx.user.login, "enregistrement.echec", json!({ "session": id, "cible": target, "raison": "écriture impossible" })).await;
+        }
         match rec.finish(&ctx.state.keys, id) {
             Ok((path, sha, sig, bytes)) => {
                 index = Some((path.clone(), with_input));
@@ -895,12 +1059,19 @@ async fn finish(ctx: &Ctx, id: Uuid, recorder: Option<Recorder>, started: std::t
 
 /// Commande unique (ssh login%cible@Gate "commande"), cibles du coffre.
 async fn exec(ctx: Arc<Ctx>, mut channel: Channel<Msg>, pty: Option<PtyInfo>, command: String) -> Result<()> {
-    let Some((target, Some(access))) = ctx.target.clone() else {
+    let Some((target, access)) = ctx.current().await? else {
         say(&channel, t!("Give the server in the name: user%server@gate\n", "Indiquez le serveur dans le nom : utilisateur%serveur@gate\n")).await;
         close(&channel, 1).await;
         return Ok(());
     };
     if !target.vaulted() || (is_file_copy(&command) && !access.sftp) {
+        close(&channel, 1).await;
+        return Ok(());
+    }
+    let recorded = target.records() && !is_file_copy(&command);
+    if recorded && !live::can_record(&ctx.state) {
+        audit::note(&ctx.state.db, &ctx.user.login, "enregistrement.echec", json!({ "cible": target.name, "raison": "espace disque insuffisant", "adresse": ctx.addr })).await;
+        say(&channel, &format!("{}\n", live::no_space_message())).await;
         close(&channel, 1).await;
         return Ok(());
     }
@@ -932,29 +1103,29 @@ async fn exec(ctx: Arc<Ctx>, mut channel: Channel<Msg>, pty: Option<PtyInfo>, co
     .await;
     let (cols, rows) = pty.as_ref().map(|p| (p.cols, p.rows)).unwrap_or((80, 24));
     // Copies de fichiers : on journalise sans enregistrer le contenu binaire.
-    let mut recorder = if target.records() && !is_file_copy(&command) {
-        Some(Recorder::create(
-            &ctx.state.config.recordings_dir(),
-            id,
-            cols,
-            rows,
-            &format!("{} → {}: {command}", ctx.user.login, target.name),
-            access.record_input,
-        )?)
-    } else {
-        None
-    };
+    let mut recorder = None;
+    if recorded {
+        match Recorder::create(&ctx.state.config.recordings_dir(), id, cols, rows, &format!("{} → {}: {command}", ctx.user.login, target.name), access.record_input) {
+            Ok(r) => recorder = Some(r),
+            Err(e) => {
+                refuse_unrecorded(&ctx, id, &target.name, &e, &channel).await;
+                let _ = handle.disconnect(russh::Disconnect::ByApplication, "", "fr").await;
+                return Ok(());
+            }
+        }
+    }
+    let (_watch, mut cut) = ctx.watch(&target, recorder.is_some());
     let started = std::time::Instant::now();
-    let status = pump(&mut channel, remote, recorder.as_mut()).await;
+    let (status, ended) = pump(&mut channel, remote, recorder.as_mut(), &mut cut).await;
     let _ = handle.disconnect(russh::Disconnect::ByApplication, "", "fr").await;
     finish(&ctx, id, recorder, started, &target.name).await;
-    close(&channel, status.unwrap_or(0)).await;
+    end_session(&channel, status, ended).await;
     Ok(())
 }
 
 /// SFTP vers une cible du coffre : les échanges sont relayés et la session journalisée.
 async fn sftp(ctx: Arc<Ctx>, mut channel: Channel<Msg>, name: String) -> Result<()> {
-    let Some((target, Some(access))) = ctx.target.clone() else {
+    let Some((target, access)) = ctx.current().await? else {
         close(&channel, 1).await;
         return Ok(());
     };
@@ -979,18 +1150,19 @@ async fn sftp(ctx: Arc<Ctx>, mut channel: Channel<Msg>, name: String) -> Result<
         json!({ "session": id, "cible": target.name, "adresse": ctx.addr }),
     )
     .await;
+    let (_watch, mut cut) = ctx.watch(&target, false);
     let started = std::time::Instant::now();
-    let status = pump(&mut channel, remote, None).await;
+    let (status, ended) = pump(&mut channel, remote, None, &mut cut).await;
     let _ = handle.disconnect(russh::Disconnect::ByApplication, "", "fr").await;
     finish(&ctx, id, None, started, &target.name).await;
-    close(&channel, status.unwrap_or(0)).await;
+    close(&channel, status.unwrap_or(if ended.is_some() { 1 } else { 0 })).await;
     Ok(())
 }
 
 /// Relaie dans les deux sens jusqu'à la fin de l'un des côtés ; renvoie les octets passés
 /// dans chaque sens, même si la connexion se termine sur une erreur (un serveur Windows
-/// coupe brutalement après un refus d'identifiants).
-async fn relay_counted<A, B>(a: A, b: B) -> (u64, u64)
+/// coupe brutalement après un refus d'identifiants). Une fermeture par la Gate ne compte pas les octets.
+async fn relay_counted<A, B>(a: A, b: B, cut: &mut Cut) -> (u64, u64)
 where
     A: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     B: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -1017,6 +1189,7 @@ where
     tokio::select! {
         u = &mut up => (u, tokio::time::timeout(std::time::Duration::from_secs(2), &mut down).await.unwrap_or(0)),
         d = &mut down => (tokio::time::timeout(std::time::Duration::from_secs(2), &mut up).await.unwrap_or(0), d),
+        _ = cut.reason() => (0, 0),
     }
 }
 
@@ -1037,7 +1210,8 @@ async fn relay_tcp(ctx: Arc<Ctx>, target: Target, channel: Channel<Msg>) -> Resu
     )
     .await;
     let started = std::time::Instant::now();
-    let (up, down) = relay_counted(channel.into_stream(), tcp).await;
+    let (_watch, mut cut) = ctx.watch(&target, false);
+    let (up, down) = relay_counted(channel.into_stream(), tcp, &mut cut).await;
     let _ = model::session_end(
         db,
         id,
@@ -1087,8 +1261,12 @@ async fn relay_tunnel(
         json!({ "session": id, "cible": target.name, "vers": detail, "adresse": ctx.addr }),
     )
     .await;
+    let (_watch, mut cut) = ctx.watch(&target, false);
     let (mut a, mut b) = (channel.into_stream(), remote.into_stream());
-    let (up, down) = tokio::io::copy_bidirectional(&mut a, &mut b).await.unwrap_or((0, 0));
+    let (up, down) = tokio::select! {
+        copied = tokio::io::copy_bidirectional(&mut a, &mut b) => copied.unwrap_or((0, 0)),
+        _ = cut.reason() => (0, 0),
+    };
     let _ = handle.disconnect(russh::Disconnect::ByApplication, "", "fr").await;
     let _ = model::session_end(
         db,

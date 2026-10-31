@@ -18,6 +18,7 @@ use std::{
 
 use anyhow::{anyhow, bail, Context, Result};
 use axum::extract::ws::{Message, WebSocket};
+use chrono::{DateTime, Utc};
 use ironrdp_rdcleanpath::{DetectionResult, RDCleanPath, RDCleanPathPdu};
 use rustls::{
     client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
@@ -33,7 +34,8 @@ use crate::{audit, keys::sha256_hex, model, State};
 
 /// D'où vient la demande : le portail web (sessions fermées avec le portail) ou Portunia.
 pub enum Origin {
-    Portal { addr: String },
+    /// Portail : la session web fixe la durée, et le jeton doit être celui de son compte.
+    Portal { addr: String, user: Uuid, expires: DateTime<Utc>, idle: Duration },
     Portunia { addr: String },
 }
 
@@ -146,7 +148,7 @@ async fn run(state: &Arc<State>, socket: &mut WebSocket, origin: Origin) -> Resu
     };
     let addr = real_addr.unwrap_or_else(|| match &origin {
         Origin::Portunia { addr } => addr.clone(),
-        Origin::Portal { addr } => format!("{addr} (web)"),
+        Origin::Portal { addr, .. } => format!("{addr} (web)"),
     });
     let user = model::user_by_id(db, user_id).await?.filter(|u| !u.disabled);
     let target = model::target_by_id(db, target_id).await?;
@@ -154,12 +156,23 @@ async fn run(state: &Arc<State>, socket: &mut WebSocket, origin: Origin) -> Resu
         refuse(socket, RDCleanPathPdu::new_http_error(403)).await;
         bail!(t!("account or server deleted", "compte ou serveur supprimé"));
     };
+    if matches!(&origin, Origin::Portal { user: web_user, .. } if *web_user != user.id) {
+        audit::note(db, &user.login, "acces.refuse", json!({ "cible": target.name, "type": "rdp", "raison": "jeton d'un autre compte", "adresse": addr })).await;
+        refuse(socket, RDCleanPathPdu::new_http_error(403)).await;
+        bail!(t!("token of another account", "jeton d'un autre compte"));
+    }
     let access = model::access(db, user.id, target.id).await?;
     let Some(access) = access.filter(|_| target.is_rdp() && target.mode == "enregistre") else {
         audit::note(db, &user.login, "acces.refuse", json!({ "cible": target.name, "type": "rdp", "adresse": addr })).await;
         refuse(socket, RDCleanPathPdu::new_http_error(403)).await;
         bail!(t!(format!("{}: access denied", target.name), format!("{} : accès refusé", target.name)));
     };
+
+    if !crate::live::can_record(state) {
+        audit::note(db, &user.login, "enregistrement.echec", json!({ "cible": target.name, "raison": "espace disque insuffisant", "adresse": addr })).await;
+        refuse(socket, RDCleanPathPdu::new_general_error()).await;
+        bail!("{}", crate::live::no_space_message());
+    }
 
     // Connexion au serveur Windows, début de la négociation RDP.
     let server = format!("{}:{}", target.host, target.port);
@@ -211,11 +224,20 @@ async fn run(state: &Arc<State>, socket: &mut WebSocket, origin: Origin) -> Resu
         }
         _ => {}
     }
+    // Pas de session sans enregistrement.
+    let id = Uuid::new_v4();
+    let mut capture = match crate::rdpcap::Recorder::create(&state.config.recordings_dir(), id, &format!("{} → {}", user.login, target.name), access.record_input) {
+        Ok(c) => c,
+        Err(e) => {
+            audit::note(db, &user.login, "enregistrement.echec", json!({ "cible": target.name, "raison": e.to_string(), "adresse": addr })).await;
+            refuse(socket, RDCleanPathPdu::new_general_error()).await;
+            bail!("{} {id}: {e:#}", t!("RDP recording", "enregistrement RDP"));
+        }
+    };
     let response = RDCleanPathPdu::new_response(server.clone(), x224_response, chain)?.to_der()?;
     socket.send(Message::Binary(response.into())).await?;
 
     // Session ouverte : relais et enregistrement.
-    let id = Uuid::new_v4();
     model::session_start(db, id, user.id, target.id, "rdp", "enregistré", &addr).await?;
     audit::note(
         db,
@@ -225,49 +247,60 @@ async fn run(state: &Arc<State>, socket: &mut WebSocket, origin: Origin) -> Resu
     )
     .await;
     let started = Instant::now();
-    let mut capture = match crate::rdpcap::Recorder::create(&state.config.recordings_dir(), id, &format!("{} → {}", user.login, target.name), access.record_input) {
-        Ok(c) => Some(c),
-        Err(e) => {
-            tracing::error!("{} {id}: {e:#}", t!("RDP recording", "enregistrement RDP"));
-            None
-        }
-    };
+    let web = matches!(origin, Origin::Portal { .. });
+    let (_watch, mut cut) = state.live.watch(crate::live::Watched { user: user.id, login: &user.login, target: Some(&target), web, recorded: true });
+    let mut tick = tokio::time::interval(Duration::from_secs(5));
+    let mut last_input = Instant::now();
     let (mut tls_read, mut tls_write) = tokio::io::split(tls);
     let mut closing = state.web.subscribe();
     let mut buf = vec![0u8; 64 * 1024];
-    let reason: &str = loop {
+    let reason: String = loop {
         tokio::select! {
             n = tls_read.read(&mut buf) => match n {
-                Ok(0) | Err(_) => break "serveur",
+                Ok(0) | Err(_) => break "serveur".into(),
                 Ok(n) => {
-                    if let Some(c) = capture.as_mut() { c.server(&buf[..n]); }
+                    capture.server(&buf[..n]);
                     if socket.send(Message::Binary(buf[..n].to_vec().into())).await.is_err() {
-                        break "client";
+                        break "client".into();
                     }
                 }
             },
             incoming = socket.recv() => match incoming {
                 Some(Ok(Message::Binary(data))) => {
-                    if let Some(c) = capture.as_mut() { c.client(&data); }
+                    last_input = Instant::now();
+                    capture.client(&data);
                     if tls_write.write_all(&data).await.is_err() {
-                        break "serveur";
+                        break "serveur".into();
                     }
                 }
-                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break "client",
+                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break "client".into(),
                 _ => {}
             },
-            _ = closing.changed(), if matches!(origin, Origin::Portal { .. }) => break "administrateur",
+            _ = closing.changed(), if web => break "administrateur".into(),
+            why = cut.reason() => break why,
+            _ = tick.tick() => {
+                if let Origin::Portal { expires, idle, .. } = &origin {
+                    if Utc::now() >= *expires {
+                        break "session web expirée".into();
+                    }
+                    if last_input.elapsed() >= *idle {
+                        break "inactivité".into();
+                    }
+                }
+            }
+        }
+        if capture.failed() {
+            audit::note(db, &user.login, "enregistrement.echec", json!({ "session": id, "cible": target.name, "raison": "écriture impossible" })).await;
+            break "enregistrement impossible".into();
         }
     };
     let _ = tls_write.shutdown().await;
     let _ = socket.send(Message::Close(None)).await;
 
     let mut done = model::Finished { recording: None, sha256: None, signature: None, bytes: 0 };
-    if let Some(c) = capture {
-        match c.finish(state, id) {
-            Ok((path, sha, sig, bytes)) => done = model::Finished { recording: Some(path), sha256: Some(sha), signature: Some(sig), bytes: bytes as i64 },
-            Err(e) => tracing::error!("{} {id}: {e:#}", t!("RDP recording", "enregistrement RDP")),
-        }
+    match capture.finish(state, id) {
+        Ok((path, sha, sig, bytes)) => done = model::Finished { recording: Some(path), sha256: Some(sha), signature: Some(sig), bytes: bytes as i64 },
+        Err(e) => tracing::error!("{} {id}: {e:#}", t!("RDP recording", "enregistrement RDP")),
     }
     let bytes = done.bytes;
     model::session_end(db, id, done).await?;

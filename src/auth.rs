@@ -32,6 +32,18 @@ pub fn verify_password(hash: &str, password: &str) -> bool {
     PasswordHash::new(hash).is_ok_and(|parsed| Argon2::default().verify_password(password.as_bytes(), &parsed).is_ok())
 }
 
+/// Calculs Argon2 simultanés : au-delà, les vérifications attendent leur tour.
+static HASHES: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+
+/// Vérifie un mot de passe hors des fils du serveur. Une file trop longue compte comme un échec.
+pub async fn check_password(hash: Option<String>, password: String) -> bool {
+    let Some(hash) = hash else { return false };
+    let Ok(Ok(_turn)) = tokio::time::timeout(std::time::Duration::from_secs(20), HASHES.acquire()).await else {
+        return false;
+    };
+    tokio::task::spawn_blocking(move || verify_password(&hash, &password)).await.unwrap_or(false)
+}
+
 // ---------- TOTP ----------
 
 pub const TOTP_STEP: i64 = 30;
@@ -208,6 +220,14 @@ mod tests {
         assert!(!p.could_use(&BTreeSet::from([Factor::Key]), Factor::Totp));
         assert!(Policy::parse("totp").is_err());
         assert_eq!(p.to_string(), "password+totp,key");
+    }
+
+    #[tokio::test]
+    async fn verification_hors_des_fils() {
+        let h = hash_password("un mot de passe solide").unwrap();
+        assert!(check_password(Some(h.clone()), "un mot de passe solide".into()).await);
+        assert!(!check_password(Some(h), "autre chose".into()).await);
+        assert!(!check_password(None, "un mot de passe solide".into()).await);
     }
 
     #[test]

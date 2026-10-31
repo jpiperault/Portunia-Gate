@@ -12,6 +12,8 @@ mod auth;
 mod config;
 mod health;
 mod keys;
+mod limits;
+mod live;
 mod model;
 mod portal;
 mod rdp;
@@ -39,6 +41,10 @@ pub struct State {
     pub web: portal::Live,
     /// Relais de Portunia Assist : places en attente.
     pub assist: assist::Rooms,
+    /// Essais de connexion et connexions SSH non authentifiées.
+    pub limits: limits::Limiter,
+    /// Sessions en cours, fermées quand leur accès prend fin.
+    pub live: live::Registry,
 }
 
 #[derive(Parser)]
@@ -388,7 +394,7 @@ async fn run(cli: Cli) -> Result<()> {
         }
     }
     let keys = Keys::load(&config.data_dir)?;
-    let state = Arc::new(State { db, keys, config, web: portal::Live::default(), assist: assist::Rooms::default() });
+    let state = Arc::new(State { db, keys, config, web: portal::Live::default(), assist: assist::Rooms::default(), limits: Default::default(), live: Default::default() });
 
     match cli.command {
         Command::Init { .. } => unreachable!(),
@@ -436,7 +442,7 @@ async fn run(cli: Cli) -> Result<()> {
                     tokio::time::sleep(std::time::Duration::from_secs(24 * 3600)).await;
                 }
             });
-            tokio::try_join!(sshd::run(state.clone()), api::run(state.clone()), portal::run(state.clone()), health::run(state.clone()))?;
+            tokio::try_join!(sshd::run(state.clone()), api::run(state.clone()), portal::run(state.clone()), health::run(state.clone()), live::run(state.clone()))?;
             Ok(())
         }
         Command::User(cmd) => user_cmd(&state, cmd).await,
@@ -549,7 +555,7 @@ async fn init(config: Config, admin: &str, no_admin: bool, provisional: bool, no
     let db = connect_db(&config).await?;
     println!("✓ {}", t!("PostgreSQL database ready", "Base PostgreSQL prête"));
     let keys = Keys::load(&config.data_dir)?;
-    let state = State { db, keys, config, web: portal::Live::default(), assist: assist::Rooms::default() };
+    let state = State { db, keys, config, web: portal::Live::default(), assist: assist::Rooms::default(), limits: Default::default(), live: Default::default() };
     if model::setting(&state.db, "site_id").await?.is_none() {
         model::set_setting(&state.db, "site_id", json!(uuid::Uuid::new_v4())).await?;
     }

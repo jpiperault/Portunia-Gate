@@ -3,12 +3,7 @@
 //!
 //! Toutes les routes sont sous /api/v1. Authentification : « Authorization: Bearer <jeton> ».
 
-use std::{
-    collections::{BTreeSet, HashMap},
-    net::SocketAddr,
-    sync::{Arc, Mutex},
-    time::{Duration, Instant},
-};
+use std::{collections::BTreeSet, net::SocketAddr, sync::Arc};
 
 use anyhow::anyhow;
 use axum::{
@@ -66,8 +61,6 @@ type ApiResult<T = Json<Value>> = Result<T, ApiError>;
 
 struct Api {
     state: Arc<State>,
-    /// Échecs de connexion récents par compte : au-delà de 5 en 10 minutes, attente imposée.
-    failures: Mutex<HashMap<String, (u32, Instant)>>,
 }
 
 type Ctx = AxState<Arc<Api>>;
@@ -83,10 +76,7 @@ pub async fn run(state: Arc<State>) -> anyhow::Result<()> {
         .api_listen
         .parse()
         .map_err(|_| anyhow!(t!("invalid PORTUNIA_GATE_API_LISTEN", "PORTUNIA_GATE_API_LISTEN invalide")))?;
-    let api = Arc::new(Api {
-        state,
-        failures: Mutex::new(HashMap::new()),
-    });
+    let api = Arc::new(Api { state });
     let app = Router::new()
         .route("/api/v1/gate", get(gate))
         .route("/api/v1/connexion", post(login).delete(logout))
@@ -221,26 +211,19 @@ struct LoginBody {
 async fn login(AxState(api): Ctx, ConnectInfo(addr): ConnectInfo<SocketAddr>, Json(body): Json<LoginBody>) -> ApiResult {
     let state = &api.state;
     let ip = addr.ip().to_string();
-    {
-        let mut failures = api.failures.lock().unwrap();
-        failures.retain(|_, (_, at)| at.elapsed() < Duration::from_secs(600));
-        if failures.get(&body.login).is_some_and(|(n, _)| *n >= 5) {
-            return Err(err(
-                StatusCode::TOO_MANY_REQUESTS,
-                t!("Too many attempts: try again in a few minutes", "Trop d'essais : réessayez dans quelques minutes"),
-            ));
+    if let crate::limits::Verdict::Blocked { first } = state.limits.attempt(&body.login, &ip) {
+        if first {
+            audit::note(&state.db, &body.login, "auth.bloquee", json!({ "methode": "api", "adresse": ip })).await;
         }
+        return Err(err(
+            StatusCode::TOO_MANY_REQUESTS,
+            t!("Too many attempts: try again in a few minutes", "Trop d'essais : réessayez dans quelques minutes"),
+        ));
     }
     let fail = |why: &'static str| {
         let api = api.clone();
         let (login, ip) = (body.login.clone(), ip.clone());
         async move {
-            {
-                let mut failures = api.failures.lock().unwrap();
-                let entry = failures.entry(login.clone()).or_insert((0, Instant::now()));
-                entry.0 += 1;
-                entry.1 = Instant::now();
-            }
             audit::note(
                 &api.state.db,
                 &login,
@@ -255,17 +238,14 @@ async fn login(AxState(api): Ctx, ConnectInfo(addr): ConnectInfo<SocketAddr>, Js
     let Some(user) = model::user_by_login(&state.db, &body.login).await?.filter(|u| !u.disabled) else {
         return Err(fail("compte inconnu ou désactivé").await);
     };
-    if !user
-        .password_hash
-        .as_deref()
-        .is_some_and(|h| auth::verify_password(h, &body.mot_de_passe))
-    {
+    if !auth::check_password(user.password_hash.clone(), body.mot_de_passe.clone()).await {
         return Err(fail("mot de passe incorrect").await);
     }
 
     // 1. Mot de passe provisoire : à changer d'abord.
     if user.must_change_password {
         let Some(new) = body.nouveau_mot_de_passe.as_deref().filter(|p| !p.is_empty()) else {
+            state.limits.forgive(&body.login, &ip);
             return Ok(Json(json!({ "etat": "changer_mot_de_passe" })));
         };
         if new == body.mot_de_passe {
@@ -326,6 +306,7 @@ async fn login(AxState(api): Ctx, ConnectInfo(addr): ConnectInfo<SocketAddr>, Js
                     if !code.is_empty() {
                         return Err(fail("code d'enrôlement incorrect").await);
                     }
+                    state.limits.forgive(&body.login, &ip);
                     let issuer = setting_str(state, "nom", "Portunia Gate").await?;
                     return Ok(Json(json!({
                         "etat": "enrolement",
@@ -348,6 +329,7 @@ async fn login(AxState(api): Ctx, ConnectInfo(addr): ConnectInfo<SocketAddr>, Js
             }
             Some(sealed) => {
                 if code.is_empty() {
+                    state.limits.forgive(&body.login, &ip);
                     return Ok(Json(json!({ "etat": "code_requis" })));
                 }
                 let secret = state.keys.open(&format!("totp:{}", user.id), sealed)?;
@@ -364,7 +346,7 @@ async fn login(AxState(api): Ctx, ConnectInfo(addr): ConnectInfo<SocketAddr>, Js
     }
 
     // 3. Jeton de session.
-    api.failures.lock().unwrap().remove(&user.login);
+    state.limits.success(&body.login, &ip);
     let jeton = token()?;
     let expires = Utc::now() + chrono::Duration::hours(session_hours(state).await?);
     let client = body.client.unwrap_or_default().chars().take(80).collect::<String>();
@@ -728,6 +710,7 @@ async fn admin_target_update(AxState(api): Ctx, headers: HeaderMap, Path(id): Pa
         sqlx::Error::Database(d) if d.code().as_deref() == Some("23505") => err(StatusCode::CONFLICT, t!("This name is already taken", "Ce nom est déjà pris")),
         _ => e.into(),
     })?;
+    api.state.live.recheck();
     audit::note(
         db,
         &actor.login,
@@ -745,6 +728,7 @@ async fn admin_target_delete(AxState(api): Ctx, headers: HeaderMap, Path(id): Pa
         .await?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, t!("Unknown server", "Serveur inconnu")))?;
     sqlx::query("DELETE FROM targets WHERE id = $1").bind(id).execute(db).await?;
+    api.state.live.recheck();
     audit::note(db, &actor.login, "cible.supprimee", json!({ "cible": t.name })).await;
     Ok(Json(json!({ "etat": "ok" })))
 }
@@ -906,6 +890,7 @@ async fn admin_user_update(AxState(api): Ctx, headers: HeaderMap, Path(id): Path
             .execute(db)
             .await?;
     }
+    api.state.live.recheck();
     audit::note(
         db,
         &actor.login,
@@ -926,6 +911,7 @@ async fn admin_user_delete(AxState(api): Ctx, headers: HeaderMap, Path(id): Path
         .await?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, t!("Unknown account", "Compte inconnu")))?;
     sqlx::query("DELETE FROM users WHERE id = $1").bind(id).execute(db).await?;
+    api.state.live.recheck();
     audit::note(db, &actor.login, "compte.supprime", json!({ "compte": user.login })).await;
     Ok(Json(json!({ "etat": "ok" })))
 }
@@ -1040,6 +1026,7 @@ async fn admin_group_delete(AxState(api): Ctx, headers: HeaderMap, Path(id): Pat
         .fetch_optional(db)
         .await?;
     let name = name.ok_or_else(|| err(StatusCode::NOT_FOUND, t!("Unknown group", "Groupe inconnu")))?;
+    api.state.live.recheck();
     audit::note(db, &actor.login, "groupe.supprime", json!({ "groupe": name })).await;
     Ok(Json(json!({ "etat": "ok" })))
 }
@@ -1204,6 +1191,7 @@ async fn admin_rule_update(AxState(api): Ctx, headers: HeaderMap, Path(id): Path
             .await?;
     }
     tx.commit().await?;
+    api.state.live.recheck();
     audit::note(db, &actor.login, "regle.modifiee", json!({ "regle": body.nom, "groupe": body.groupe, "cibles": body.cibles, "sftp": body.sftp, "tunnels": body.tunnels, "frappe": body.frappe, "jours": body.jours, "heures": hours, "expire": body.expire })).await;
     Ok(Json(json!({ "etat": "ok" })))
 }
@@ -1216,6 +1204,7 @@ async fn admin_rule_delete(AxState(api): Ctx, headers: HeaderMap, Path(id): Path
         .fetch_optional(db)
         .await?;
     let name = name.ok_or_else(|| err(StatusCode::NOT_FOUND, t!("Unknown rule", "Règle inconnue")))?;
+    api.state.live.recheck();
     audit::note(db, &actor.login, "regle.supprimee", json!({ "regle": name })).await;
     Ok(Json(json!({ "etat": "ok" })))
 }
@@ -1687,7 +1676,7 @@ async fn assist_join(AxState(api): Ctx, headers: HeaderMap, Path(place): Path<St
     }
     let name = setting_str(&state, "nom", "Portunia Gate").await?;
     let who = format!("{} ({name})", user.login);
-    Ok(ws.on_upgrade(move |socket| crate::assist::helper(state, socket, user.login, who, place)))
+    Ok(ws.on_upgrade(move |socket| crate::assist::helper(state, socket, user.login, user.id, who, place)))
 }
 
 async fn admin_assist(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
@@ -1855,6 +1844,7 @@ async fn admin_portal_update(AxState(api): Ctx, headers: HeaderMap, Json(body): 
             audit::note(db, &actor.login, if on { "portail.active" } else { "portail.desactive" }, json!({})).await;
         }
     }
+    state.live.recheck();
     if !changed.is_empty() {
         audit::note(db, &actor.login, "portail.modifie", Value::Object(changed)).await;
     }

@@ -11,11 +11,10 @@
 //! - Pas d'administration : elle se fait dans Portunia (Administrer › Réglages › Portail web).
 
 use std::{
-    collections::HashMap,
     net::{IpAddr, SocketAddr},
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
+        Arc,
     },
     time::{Duration, Instant},
 };
@@ -142,8 +141,6 @@ pub async fn settings(state: &State) -> Result<Settings> {
 
 struct Portal {
     state: Arc<State>,
-    /// Échecs récents par compte et par adresse (10 minutes).
-    failures: Mutex<HashMap<String, (u32, Instant)>>,
     /// L'écoute HTTPS ne répond qu'aux adresses de Cloudflare.
     cloudflare_only: bool,
 }
@@ -187,7 +184,6 @@ pub async fn run(state: Arc<State>) -> Result<()> {
 fn router(state: Arc<State>, cloudflare_only: bool) -> Router {
     let portal = Arc::new(Portal {
         state,
-        failures: Mutex::new(HashMap::new()),
         cloudflare_only,
     });
     Router::new()
@@ -503,16 +499,8 @@ struct LoginBody {
     turnstile: String,
 }
 
-/// Échec : compté par compte et par adresse ; même message quel que soit le motif.
+/// Échec (déjà compté comme essai) : même message quel que soit le motif.
 async fn failed(portal: &Portal, login: &str, ip: &str, why: &str) -> Response {
-    {
-        let mut f = portal.failures.lock().unwrap();
-        for key in [format!("compte:{login}"), format!("adresse:{ip}")] {
-            let e = f.entry(key).or_insert((0, Instant::now()));
-            e.0 += 1;
-            e.1 = Instant::now();
-        }
-    }
     audit::note(
         &portal.state.db,
         login,
@@ -554,13 +542,11 @@ async fn login(AxState(portal): Ctx, ConnectInfo(peer): ConnectInfo<SocketAddr>,
             return Ok(err(StatusCode::FORBIDDEN, t!("Request refused", "Requête refusée")));
         }
         let login = body.login.trim().to_string();
-        {
-            let mut f = portal.failures.lock().unwrap();
-            f.retain(|_, (_, at)| at.elapsed() < Duration::from_secs(600));
-            let too_many = |key: String, max: u32| f.get(&key).is_some_and(|(n, _)| *n >= max);
-            if too_many(format!("compte:{login}"), 5) || too_many(format!("adresse:{ip}"), 20) {
-                return Ok(err(StatusCode::TOO_MANY_REQUESTS, t!("Too many attempts: try again in a few minutes", "Trop d'essais : réessayez dans quelques minutes")));
+        if let crate::limits::Verdict::Blocked { first } = state.limits.attempt(&login, &ip) {
+            if first {
+                audit::note(&state.db, &login, "auth.bloquee", json!({ "methode": "portail", "adresse": ip })).await;
             }
+            return Ok(err(StatusCode::TOO_MANY_REQUESTS, t!("Too many attempts: try again in a few minutes", "Trop d'essais : réessayez dans quelques minutes")));
         }
         if let Some(secret) = s.turnstile_secret.as_deref().filter(|_| !s.turnstile_site.is_empty()) {
             if !turnstile_ok(secret, &body.turnstile, &ip).await {
@@ -570,7 +556,7 @@ async fn login(AxState(portal): Ctx, ConnectInfo(peer): ConnectInfo<SocketAddr>,
         let Some(user) = model::user_by_login(&state.db, &login).await?.filter(|u| !u.disabled) else {
             return Ok(failed(&portal, &login, &ip, "compte inconnu ou désactivé").await);
         };
-        if !user.password_hash.as_deref().is_some_and(|h| auth::verify_password(h, &body.mot_de_passe)) {
+        if !auth::check_password(user.password_hash.clone(), body.mot_de_passe.clone()).await {
             return Ok(failed(&portal, &login, &ip, "mot de passe incorrect").await);
         }
         // Première connexion et code perdu : pas depuis Internet.
@@ -593,10 +579,7 @@ async fn login(AxState(portal): Ctx, ConnectInfo(peer): ConnectInfo<SocketAddr>,
             audit::note(&state.db, &login, "portail.echec", json!({ "raison": "hors du groupe du portail", "adresse": ip })).await;
             return Ok(err(StatusCode::FORBIDDEN, t!("This account has no access to the web portal", "Ce compte n'a pas accès au portail web")));
         }
-        {
-            let mut f = portal.failures.lock().unwrap();
-            f.remove(&format!("compte:{login}"));
-        }
+        state.limits.success(&login, &ip);
         let token = B64URL.encode(random::<32>()?);
         let expires = Utc::now() + chrono::Duration::hours(s.hours);
         sqlx::query("DELETE FROM web_sessions WHERE expires_at < now()").execute(&state.db).await?;
@@ -725,7 +708,8 @@ async fn terminal(
         let state = portal.state.clone();
         state.web.active.fetch_add(1, Ordering::Relaxed);
         let user = format!("{}%{}", w.user.login, target.name);
-        if let Err(e) = bridge(&state, socket, &user, &ticket, cols, rows, w.expires, idle_min).await {
+        let (_watch, cut) = state.live.watch(crate::live::Watched { user: w.user.id, login: &w.user.login, target: Some(&target), web: true, recorded: false });
+        if let Err(e) = bridge(&state, socket, &user, &ticket, cols, rows, w.expires, idle_min, cut).await {
             tracing::warn!("{} {user}: {e:#}", t!("portal: terminal", "portail : terminal"));
         }
         state.web.active.fetch_sub(1, Ordering::Relaxed);
@@ -776,17 +760,28 @@ async fn desktop_ticket(AxState(portal): Ctx, ConnectInfo(peer): ConnectInfo<Soc
 /// Passage RDCleanPath du client RDP du navigateur.
 async fn desktop(AxState(portal): Ctx, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
     let addr = client_ip(&portal, peer, &headers);
-    let url = match settings(&portal.state).await {
-        Ok(s) if s.enabled => s.url,
+    let s = match settings(&portal.state).await {
+        Ok(s) if s.enabled => s,
         Ok(_) => return err(StatusCode::SERVICE_UNAVAILABLE, t!("Portal closed", "Portail fermé")),
         Err(e) => return internal(e),
     };
-    if !origin_ok(&headers, &url) {
+    if !origin_ok(&headers, &s.url) {
         return err(StatusCode::FORBIDDEN, t!("Origin refused", "Origine refusée"));
     }
+    let session = match web_session(&portal, &headers, &s).await {
+        Ok(Some(w)) => w,
+        Ok(None) => return err(StatusCode::UNAUTHORIZED, t!("Session expired", "Session expirée")),
+        Err(e) => return internal(e),
+    };
     let state = portal.state.clone();
     let lang = crate::lang::get();
-    ws.on_upgrade(move |socket| crate::lang::scope(lang, crate::rdp::relay(state, socket, crate::rdp::Origin::Portal { addr })))
+    let origin = crate::rdp::Origin::Portal {
+        addr,
+        user: session.user.id,
+        expires: session.expires,
+        idle: Duration::from_secs(s.idle_min as u64 * 60),
+    };
+    ws.on_upgrade(move |socket| crate::lang::scope(lang, crate::rdp::relay(state, socket, origin)))
 }
 
 /// Accepte seulement la clé de la Gate lui-même (connexion locale).
@@ -813,7 +808,7 @@ async fn send_json(socket: &mut WebSocket, value: Value) -> bool {
 /// Relie le navigateur au serveur SSH de la Gate : sortie du terminal en binaire, saisie et
 /// commandes (taille, « je suis là ») en JSON.
 #[allow(clippy::too_many_arguments)]
-async fn bridge(state: &State, mut socket: WebSocket, user: &str, ticket: &str, cols: u32, rows: u32, expires: DateTime<Utc>, idle_min: i64) -> Result<()> {
+async fn bridge(state: &State, mut socket: WebSocket, user: &str, ticket: &str, cols: u32, rows: u32, expires: DateTime<Utc>, idle_min: i64, mut cut: crate::live::Cut) -> Result<()> {
     let config = Arc::new(client::Config {
         inactivity_timeout: None,
         keepalive_interval: Some(Duration::from_secs(30)),
@@ -869,6 +864,7 @@ async fn bridge(state: &State, mut socket: WebSocket, user: &str, ticket: &str, 
                 _ => {}
             },
             _ = closing.changed() => break t!("Session closed by the administrator", "Session fermée par l'administrateur").into(),
+            why = cut.reason() => break why,
             _ = tick.tick() => {
                 if Utc::now() >= expires {
                     break t!("Web session expired: sign in again", "Session web expirée : reconnectez-vous").into();

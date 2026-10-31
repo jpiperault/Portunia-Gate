@@ -1,0 +1,261 @@
+//! Sessions en cours : chacune s'inscrit ici et se ferme dès que son accès n'est plus valable
+//! (compte désactivé ou supprimé, règle retirée, expirée ou hors de ses horaires, portail
+//! fermé, serveur supprimé) ou que l'espace disque manque pour l'enregistrer.
+//!
+//! Les droits sont revérifiés toutes les 30 secondes, et tout de suite après un changement
+//! fait par l'API. Une commande d'administration, processus à part, attend le tour suivant.
+
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, Mutex,
+    },
+    time::Duration,
+};
+
+use anyhow::Result;
+use serde_json::json;
+use tokio::sync::{watch, Notify};
+use uuid::Uuid;
+
+use crate::{audit, model, State};
+
+const SWEEP: Duration = Duration::from_secs(30);
+
+struct Entry {
+    user: Uuid,
+    login: String,
+    target: Option<(Uuid, String)>,
+    web: bool,
+    recorded: bool,
+    cut: watch::Sender<Option<String>>,
+}
+
+#[derive(Default)]
+pub struct Registry {
+    next: AtomicU64,
+    entries: Arc<Mutex<HashMap<u64, Entry>>>,
+    wake: Notify,
+    low_disk: AtomicBool,
+}
+
+/// Ce que l'on inscrit : une connexion (sans serveur) ou une session vers un serveur.
+pub struct Watched<'a> {
+    pub user: Uuid,
+    pub login: &'a str,
+    pub target: Option<&'a model::Target>,
+    /// Ouverte depuis le portail : dépend aussi du portail et de son groupe.
+    pub web: bool,
+    /// Enregistrée : se ferme si le disque se remplit.
+    pub recorded: bool,
+}
+
+/// Inscription, retirée quand elle est lâchée.
+pub struct Guard {
+    id: u64,
+    entries: Arc<Mutex<HashMap<u64, Entry>>>,
+}
+
+impl Drop for Guard {
+    fn drop(&mut self) {
+        self.entries.lock().unwrap().remove(&self.id);
+    }
+}
+
+/// Signal de fermeture d'une session, avec sa raison.
+pub struct Cut(watch::Receiver<Option<String>>);
+
+impl Cut {
+    /// La raison de la fermeture ; `None` si l'inscription a été retirée sans fermeture.
+    pub async fn wait(&mut self) -> Option<String> {
+        loop {
+            if let Some(why) = self.0.borrow_and_update().clone() {
+                return Some(why);
+            }
+            if self.0.changed().await.is_err() {
+                return None;
+            }
+        }
+    }
+
+    /// Pour un `select!` : n'aboutit que sur une vraie fermeture.
+    pub async fn reason(&mut self) -> String {
+        match self.wait().await {
+            Some(why) => why,
+            None => std::future::pending().await,
+        }
+    }
+}
+
+impl Registry {
+    pub fn watch(&self, w: Watched<'_>) -> (Guard, Cut) {
+        let id = self.next.fetch_add(1, Ordering::Relaxed);
+        let (cut, rx) = watch::channel(None);
+        let entry = Entry {
+            user: w.user,
+            login: w.login.to_string(),
+            target: w.target.map(|t| (t.id, t.name.clone())),
+            web: w.web,
+            recorded: w.recorded,
+            cut,
+        };
+        self.entries.lock().unwrap().insert(id, entry);
+        (Guard { id, entries: self.entries.clone() }, Cut(rx))
+    }
+
+    /// Un droit vient de changer : revérifie sans attendre.
+    pub fn recheck(&self) {
+        self.wake.notify_one();
+    }
+}
+
+/// Espace libre pour le compte de service sur ce disque ; inconnu hors Unix.
+pub fn free_bytes(dir: &Path) -> Option<u64> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let path = std::ffi::CString::new(dir.as_os_str().as_bytes()).ok()?;
+        let mut stats: libc::statvfs = unsafe { std::mem::zeroed() };
+        let done = unsafe { libc::statvfs(path.as_ptr(), &mut stats) };
+        (done == 0).then(|| stats.f_bavail as u64 * stats.f_frsize as u64)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+        None
+    }
+}
+
+fn enough(free: Option<u64>, minimum: u64) -> bool {
+    free.is_none_or(|f| f >= minimum)
+}
+
+/// Assez de place pour ouvrir une session enregistrée ?
+pub fn can_record(state: &State) -> bool {
+    enough(free_bytes(&state.config.data_dir), state.config.min_free_bytes())
+}
+
+pub fn no_space_message() -> &'static str {
+    t!("Not enough disk space to record: session refused. Tell an administrator.", "Espace disque insuffisant pour enregistrer : session refusée. Prévenez un administrateur.")
+}
+
+/// Pourquoi ce compte ne peut plus garder cette session, s'il y a une raison.
+async fn revoked(state: &State, user: Uuid, target: Option<Uuid>, web: bool, portal: &crate::portal::Settings) -> Result<Option<&'static str>> {
+    let db = &state.db;
+    if !model::user_by_id(db, user).await?.is_some_and(|u| !u.disabled) {
+        return Ok(Some(t!("Your account has been disabled: connection closed.", "Votre compte a été désactivé : connexion fermée.")));
+    }
+    if let Some(id) = target {
+        let exists = model::target_by_id(db, id).await?.is_some();
+        if !exists || model::access(db, user, id).await?.is_none() {
+            return Ok(Some(t!("Your access to this server has ended: session closed.", "Votre accès à ce serveur a pris fin : session fermée.")));
+        }
+    }
+    if web && (!portal.enabled || !crate::portal::in_group(db, user, &portal.group).await?) {
+        return Ok(Some(t!("Your web portal access has ended: session closed.", "Votre accès au portail web a pris fin : session fermée.")));
+    }
+    Ok(None)
+}
+
+async fn sweep(state: &State) -> Result<()> {
+    let list: Vec<(u64, Uuid, String, Option<(Uuid, String)>, bool, bool)> = state
+        .live
+        .entries
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(id, e)| (*id, e.user, e.login.clone(), e.target.clone(), e.web, e.recorded))
+        .collect();
+
+    let free = free_bytes(&state.config.data_dir);
+    let minimum = state.config.min_free_bytes();
+    let low = !enough(free, minimum);
+    if low != state.live.low_disk.swap(low, Ordering::Relaxed) {
+        let event = if low { "disque.presque_plein" } else { "disque.place_retrouvee" };
+        audit::note(&state.db, "systeme", event, json!({ "libre_mo": free.map(|f| f / (1024 * 1024)), "minimum_mo": minimum / (1024 * 1024) })).await;
+        if low {
+            tracing::error!("{}", t!("Disk almost full: recorded sessions are refused", "Disque presque plein : les sessions enregistrées sont refusées"));
+        }
+    }
+    // Sous la moitié du minimum, les sessions enregistrées en cours s'arrêtent aussi.
+    let critical = !enough(free, minimum / 2);
+
+    if list.is_empty() {
+        return Ok(());
+    }
+    let portal = crate::portal::settings(state).await?;
+    let mut answers: HashMap<(Uuid, Option<Uuid>, bool), Option<&'static str>> = HashMap::new();
+    let mut noted: HashSet<(String, Option<Uuid>)> = HashSet::new();
+    for (id, user, login, target, web, recorded) in list {
+        let key = (user, target.as_ref().map(|t| t.0), web);
+        let why = match answers.get(&key) {
+            Some(why) => *why,
+            None => {
+                let why = revoked(state, user, key.1, web, &portal).await?;
+                answers.insert(key, why);
+                why
+            }
+        };
+        let why = why.or_else(|| (critical && recorded).then(no_space_message));
+        let Some(why) = why else { continue };
+        if let Some(entry) = state.live.entries.lock().unwrap().get(&id) {
+            entry.cut.send_replace(Some(why.to_string()));
+        }
+        if noted.insert((login.clone(), target.as_ref().map(|t| t.0))) {
+            audit::note(&state.db, &login, "session.coupee", json!({ "cible": target.map(|t| t.1), "raison": why })).await;
+        }
+    }
+    Ok(())
+}
+
+pub async fn run(state: Arc<State>) -> Result<()> {
+    let mut tick = tokio::time::interval(SWEEP);
+    loop {
+        tokio::select! {
+            _ = tick.tick() => {}
+            _ = state.live.wake.notified() => {}
+        }
+        if let Err(e) = sweep(&state).await {
+            tracing::error!("{} {e:#}", t!("checking open sessions:", "vérification des sessions ouvertes :"));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn watched(login: &str) -> Watched<'_> {
+        Watched { user: Uuid::nil(), login, target: None, web: false, recorded: false }
+    }
+
+    #[tokio::test]
+    async fn fermeture_transmise() {
+        let registry = Registry::default();
+        let (_guard, mut cut) = registry.watch(watched("alice"));
+        for e in registry.entries.lock().unwrap().values() {
+            e.cut.send_replace(Some("fin".into()));
+        }
+        assert_eq!(cut.wait().await.as_deref(), Some("fin"));
+        assert_eq!(cut.reason().await, "fin", "la raison reste lisible");
+    }
+
+    #[tokio::test]
+    async fn inscription_retiree() {
+        let registry = Registry::default();
+        let (guard, mut cut) = registry.watch(watched("alice"));
+        assert_eq!(registry.entries.lock().unwrap().len(), 1);
+        drop(guard);
+        assert!(registry.entries.lock().unwrap().is_empty());
+        assert_eq!(cut.wait().await, None, "pas de fermeture, juste une fin");
+    }
+
+    #[test]
+    fn seuil_disque() {
+        assert!(enough(None, 10), "espace inconnu : pas de refus");
+        assert!(enough(Some(10), 10));
+        assert!(!enough(Some(9), 10));
+    }
+}

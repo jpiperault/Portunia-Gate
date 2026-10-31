@@ -23,6 +23,8 @@ pub struct Recorder {
     carry_out: Vec<u8>,
     carry_in: Vec<u8>,
     pub bytes: u64,
+    /// Une écriture a échoué : l'enregistrement n'est plus complet.
+    failed: bool,
 }
 
 impl Recorder {
@@ -49,6 +51,7 @@ impl Recorder {
             carry_out: Vec::new(),
             carry_in: Vec::new(),
             bytes: 0,
+            failed: false,
         })
     }
 
@@ -57,7 +60,7 @@ impl Recorder {
             return;
         }
         let line = json!([self.start.elapsed().as_secs_f64(), kind, text]);
-        let _ = writeln!(self.out, "{line}");
+        self.failed |= writeln!(self.out, "{line}").is_err();
     }
 
     pub fn output(&mut self, data: &[u8]) {
@@ -78,17 +81,23 @@ impl Recorder {
         self.event("r", &format!("{cols}x{rows}"));
     }
 
+    /// La session doit s'arrêter : elle ne serait plus enregistrée.
+    pub fn failed(&self) -> bool {
+        self.failed
+    }
+
     pub fn records_input(&self) -> bool {
         self.record_input
     }
 
     pub fn flush(&mut self) {
-        let _ = self.out.flush();
+        self.failed |= self.out.flush().is_err();
     }
 
     /// Ferme le fichier ; renvoie son chemin, son empreinte et la signature de la Gate.
+    /// Ce qui a pu être écrit reste signé, même après une erreur d'écriture.
     pub fn finish(mut self, keys: &Keys, session: Uuid) -> Result<(String, String, String, u64)> {
-        self.out.flush()?;
+        let _ = self.out.flush();
         drop(self.out);
         let content = std::fs::read(&self.path)?;
         let sha = sha256_hex(&content);
@@ -137,6 +146,18 @@ fn take_utf8(carry: &mut Vec<u8>, data: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn disque_plein() {
+        // /dev/full refuse toute écriture, comme un disque plein.
+        let out = BufWriter::with_capacity(1, std::fs::OpenOptions::new().write(true).open("/dev/full").unwrap());
+        let mut r = Recorder { path: "/dev/full".into(), out, start: Instant::now(), record_input: true, carry_out: Vec::new(), carry_in: Vec::new(), bytes: 0, failed: false };
+        assert!(!r.failed());
+        r.output(b"texte");
+        r.flush();
+        assert!(r.failed());
+    }
 
     #[test]
     fn utf8_coupe() {

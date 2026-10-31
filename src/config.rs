@@ -21,6 +21,9 @@ pub struct Config {
     pub portal_tls_listen: Option<String>,
     /// État du tunnel Cloudflare (cloudflared) : PORTUNIA_GATE_TUNNEL_METRICS (par défaut 127.0.0.1:20241).
     pub tunnel_metrics: String,
+    /// Espace libre minimal pour ouvrir une session enregistrée : PORTUNIA_GATE_MIN_FREE_MB
+    /// (par défaut 512). Sous la moitié, les sessions enregistrées en cours se ferment.
+    pub min_free_mb: u64,
 }
 
 impl Config {
@@ -44,12 +47,17 @@ impl Config {
             portal_listen: text("PORTUNIA_GATE_PORTAL_LISTEN").unwrap_or_else(|| "127.0.0.1:8445".into()),
             portal_tls_listen: text("PORTUNIA_GATE_PORTAL_TLS_LISTEN"),
             tunnel_metrics: text("PORTUNIA_GATE_TUNNEL_METRICS").unwrap_or_else(|| "127.0.0.1:20241".into()),
+            min_free_mb: text("PORTUNIA_GATE_MIN_FREE_MB").and_then(|v| v.parse().ok()).unwrap_or(512),
         })
     }
 
     /// Port local du serveur SSH, auquel le portail se connecte pour l'utilisateur.
     pub fn ssh_local_port(&self) -> u16 {
         self.ssh_listen.rsplit(':').next().and_then(|p| p.parse().ok()).unwrap_or(2222)
+    }
+
+    pub fn min_free_bytes(&self) -> u64 {
+        self.min_free_mb.saturating_mul(1024 * 1024)
     }
 
     pub fn recordings_dir(&self) -> PathBuf {

@@ -35,6 +35,8 @@ services:
       PORTUNIA_GATE_PORTAL_LISTEN: 0.0.0.0:8445
       PORTUNIA_GATE_PORTAL_TLS_LISTEN: 0.0.0.0:8446
       PORTUNIA_GATE_TUNNEL_METRICS: cloudflared:20241
+      # Espace libre minimal (Mo) pour ouvrir une session enregistrée.
+      PORTUNIA_GATE_MIN_FREE_MB: ${PORTUNIA_GATE_MIN_FREE_MB:-512}
     ports:
       - "${PORTUNIA_GATE_SSH_PORT:-2222}:2222"
       - "${PORTUNIA_GATE_API_PORT:-8443}:8443"

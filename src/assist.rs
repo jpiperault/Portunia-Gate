@@ -26,7 +26,7 @@ use crate::{audit, model, State};
 /// Place réservée à une personne aidée qui attend son dépanneur.
 struct Waiting {
     /// Le dépanneur arrive : sa WebSocket, son nom affiché et son compte.
-    tx: oneshot::Sender<(WebSocket, String, String)>,
+    tx: oneshot::Sender<(WebSocket, String, String, uuid::Uuid)>,
     since: Instant,
     addr: String,
 }
@@ -142,11 +142,11 @@ pub async fn agent(state: Arc<State>, mut socket: WebSocket, addr: String) {
         _ = wait_closed(&mut socket) => None,
     };
     state.assist.waiting.lock().unwrap().remove(&place);
-    let Some((helper, who, login)) = paired else { return };
+    let Some((helper, who, login, user)) = paired else { return };
     if !send_json(&mut socket, json!({ "type": "relie", "depanneur": who })).await {
         return;
     }
-    relay(state, socket, helper, &login, &addr, s.hours).await;
+    relay(state, socket, helper, &login, user, &addr, s.hours).await;
 }
 
 /// Attend la fermeture (ou une erreur) de la WebSocket, en ignorant les messages.
@@ -159,7 +159,7 @@ async fn wait_closed(socket: &mut WebSocket) {
 }
 
 /// Dépanneur : rejoint la place demandée. `who` est le nom montré à la personne aidée.
-pub async fn helper(state: Arc<State>, mut socket: WebSocket, login: String, who: String, place: String) {
+pub async fn helper(state: Arc<State>, mut socket: WebSocket, login: String, user: uuid::Uuid, who: String, place: String) {
     let waiting = state.assist.waiting.lock().unwrap().remove(&place);
     let Some(w) = waiting.filter(|w| w.since.elapsed() < WAIT) else {
         audit::note(&state.db, &login, "assistance.place_inconnue", json!({ "place": place })).await;
@@ -170,12 +170,14 @@ pub async fn helper(state: Arc<State>, mut socket: WebSocket, login: String, who
         return;
     }
     audit::note(&state.db, &login, "assistance.ouverte", json!({ "place": place, "adresse": w.addr })).await;
-    let _ = w.tx.send((socket, who, login));
+    let _ = w.tx.send((socket, who, login, user));
 }
 
 /// Transmet les messages binaires dans les deux sens, jusqu'à la fin ou la durée maximale.
-async fn relay(state: Arc<State>, mut agent: WebSocket, mut helper: WebSocket, login: &str, addr: &str, hours: i64) {
+async fn relay(state: Arc<State>, mut agent: WebSocket, mut helper: WebSocket, login: &str, user: uuid::Uuid, addr: &str, hours: i64) {
     let started = Instant::now();
+    // Compte du dépanneur désactivé : la session se ferme.
+    let (_watch, mut cut) = state.live.watch(crate::live::Watched { user, login, target: None, web: false, recorded: false });
     let mut closing = state.assist.closing();
     let mut bytes = 0u64;
     let limit = tokio::time::sleep(Duration::from_secs(hours as u64 * 3600));
@@ -199,6 +201,7 @@ async fn relay(state: Arc<State>, mut agent: WebSocket, mut helper: WebSocket, l
                 _ => {}
             },
             _ = closing.changed() => break "relais coupe",
+            _ = cut.reason() => break "compte desactive",
             _ = &mut limit => break "duree maximale",
         }
     };

@@ -124,3 +124,13 @@ On the first connection, Portunia Gate remembers the server's key (SSH) or certi
 - Sign-in from Portunia: accounts using a password (with or without a code). An "SSH key only" account connects with a standard SSH client.
 - One install per server for the `portunia-gate` command (it points to the last installed folder).
 - Remote Desktop: Vault mode and session replay are not available yet.
+
+## Limits and session closing
+
+**Sign-in attempts.** Counted together for SSH, Portunia and the portal, over 10 minutes: 5 for an account from one address, 20 for an address, 30 for an account across all addresses. The log records `auth.bloquee`. Limits are kept in memory: restarting the service clears them. An SSH connection has 60 seconds to authenticate, and unauthenticated connections are capped (16 per address, 512 in total).
+
+If Docker hides the clients' real address, they all seem to come from one address and share these limits: check the addresses in the log.
+
+**Access withdrawn.** Rights are checked every 30 seconds, and immediately after a change made from Portunia. A session closes when the account is disabled or deleted, the server deleted, or the rule removed, expired or **outside its hours**. A portal session also closes with the portal or when leaving its group. The log records `session.coupee`.
+
+**Recording.** A recorded session does not open if recording is impossible, and closes if a write fails (`enregistrement.echec`). Below `PORTUNIA_GATE_MIN_FREE_MB` (512 MB by default), new recorded sessions are refused (`disque.presque_plein`). Below half that threshold, ongoing ones close. Set up an alert on these events, and preferably a separate disk for `/var/lib/portunia-gate/enregistrements`.

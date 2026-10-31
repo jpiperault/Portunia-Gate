@@ -378,6 +378,8 @@ pub struct Recorder {
     start: Instant,
     tap: Tap,
     bytes: u64,
+    /// Une écriture a échoué : l'enregistrement n'est plus complet.
+    failed: bool,
 }
 
 impl Recorder {
@@ -388,26 +390,38 @@ impl Recorder {
         let path = dir.join(format!("{session}.rdpcap"));
         let mut out = std::io::BufWriter::new(std::fs::File::create(&path)?);
         writeln!(out, "{}", json!({ "format": "portunia-gate-rdp-v2", "timestamp": now.timestamp(), "title": title, "frappe": record_input }))?;
-        Ok(Self { path, out, start: Instant::now(), tap: Tap::new(record_input), bytes: 0 })
+        Ok(Self { path, out, start: Instant::now(), tap: Tap::new(record_input), bytes: 0, failed: false })
     }
 
     pub fn server(&mut self, data: &[u8]) {
         let t = self.start.elapsed().as_secs_f64();
         for r in self.tap.server(t, data) {
-            self.bytes += write_record(&mut self.out, &r).unwrap_or(0);
+            self.write(&r);
         }
     }
 
     pub fn client(&mut self, data: &[u8]) {
         let t = self.start.elapsed().as_secs_f64();
         for r in self.tap.client(t, data) {
-            self.bytes += write_record(&mut self.out, &r).unwrap_or(0);
+            self.write(&r);
         }
+    }
+
+    fn write(&mut self, record: &Record) {
+        match write_record(&mut self.out, record) {
+            Ok(n) => self.bytes += n,
+            Err(_) => self.failed = true,
+        }
+    }
+
+    /// La session doit s'arrêter : elle ne serait plus enregistrée.
+    pub fn failed(&self) -> bool {
+        self.failed
     }
 
     /// Ferme et signe, comme un enregistrement SSH.
     pub fn finish(mut self, state: &State, session: Uuid) -> Result<(String, String, String, u64)> {
-        self.out.flush()?;
+        let _ = self.out.flush();
         drop(self.out);
         let content = std::fs::read(&self.path)?;
         let sha = sha256_hex(&content);
