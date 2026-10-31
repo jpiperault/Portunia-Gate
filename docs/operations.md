@@ -155,4 +155,6 @@ sudo bash installer.sh harden undo
 
 **Access safety.** After the firewall and SSH, the assistant asks you to confirm that a new connection works. Without a positive answer within 5 minutes, these two changes are undone automatically.
 
+**In Portunia.** Administer › Hardening shows the state read on the server every 15 minutes, and flags a stopped firewall, a restarted service or an outdated reading. This tab changes nothing: hardening is driven on the server, as root. It is a dashboard, not proof: an attacker who controls the server can forge this reading.
+
 If you change a Gate port, run `harden` again: the firewall does not follow such changes.

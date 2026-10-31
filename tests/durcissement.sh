@@ -43,4 +43,24 @@ check lacks "$without" 'PasswordAuthentication'
 check lacks "$without" 'PermitRootLogin'
 check has "$without" 'X11Forwarding no'
 
+# Script d'état : exécuté pour de vrai, avec de faux nft et systemctl.
+work=$(mktemp -d)
+mkdir "$work/bin"
+printf '#!/bin/sh\nexit 0\n' >"$work/bin/nft"
+printf '#!/bin/sh\n[ "$1 $2" = "is-active cups.service" ] && echo active || echo inactive\n' >"$work/bin/systemctl"
+chmod +x "$work/bin/nft" "$work/bin/systemctl"
+printf 'cups.service\navahi-daemon.socket\n' >"$work/services"
+touch "$work/ssh" "$work/unit"
+write='cp "$tmp" '"$work/etat.json"
+harden_state_script "$work" "$work/ssh" "$work/absent" "$work/unit" "$write" >"$work/etat.sh"
+PATH="$work/bin:$PATH" sh "$work/etat.sh"
+state=$(cat "$work/etat.json")
+check has "$state" '"pare_feu":true'
+check has "$state" '"pare_feu_prevu":true'
+check has "$state" '"ssh":true'
+check has "$state" '"noyau":false'
+check has "$state" '"services_arretes":2'
+check has "$state" '"services_relances":["cups.service"]'
+rm -rf "$work"
+
 [ "$fails" = 0 ] && echo "Tout est bon." || { echo "$fails échec(s)"; exit 1; }

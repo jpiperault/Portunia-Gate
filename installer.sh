@@ -602,6 +602,8 @@ HARDEN_SSH=/etc/ssh/sshd_config.d/10-portunia-gate.conf
 HARDEN_SYSCTL=/etc/sysctl.d/90-portunia-gate.conf
 HARDEN_MODPROBE=/etc/modprobe.d/portunia-gate.conf
 HARDEN_UNIT=/etc/systemd/system/portunia-gate-pare-feu.service
+HARDEN_STATE=/var/lib/portunia-gate/durcissement.json
+HARDEN_STATE_UNIT=/etc/systemd/system/portunia-gate-etat
 HARDEN_DELAY=300
 # Paquets réseau jamais utiles à la Gate, retirés seulement sur confirmation.
 HARDEN_PACKAGES="telnetd inetutils-telnetd rsh-server vsftpd proftpd-basic tftpd-hpa xinetd avahi-daemon cups samba rpcbind nfs-kernel-server bluez snmpd apache2 nginx exim4-daemon-light postfix modemmanager"
@@ -663,6 +665,31 @@ PasswordAuthentication no
 KbdInteractiveAuthentication no
 EOF
   fi
+}
+
+# Script lancé par root toutes les 15 minutes : la Gate, sans droits, ne fait que lire son résultat.
+# harden_state_script dossier fichier-ssh fichier-noyau unité-pare-feu "commande d'écriture"
+harden_state_script() {
+  cat <<EOF
+#!/bin/sh
+umask 022
+yes() { if "\$@" >/dev/null 2>&1; then echo true; else echo false; fi; }
+stopped=0
+back=''
+if [ -f $1/services ]; then
+  while read -r unit; do
+    stopped=\$((stopped + 1))
+    if [ "\$(systemctl is-active "\$unit" 2>/dev/null)" = active ]; then back="\$back\"\$unit\","; fi
+  done <$1/services
+fi
+tmp=\$(mktemp)
+printf '{"date":"%s","pare_feu":%s,"pare_feu_prevu":%s,"ssh":%s,"noyau":%s,"mises_a_jour":%s,"services_arretes":%s,"services_relances":[%s]}\n' \\
+  "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" "\$(yes nft list table inet portunia_gate)" "\$(yes test -f $4)" "\$(yes test -f $2)" \\
+  "\$(yes test -f $3)" "\$(yes test -f /etc/apt/apt.conf.d/20auto-upgrades)" "\$stopped" "\${back%,}" >"\$tmp"
+chmod 644 "\$tmp"
+$5
+rm -f "\$tmp"
+EOF
 }
 # <<< fonctions testables
 
@@ -927,8 +954,43 @@ harden_apply() {
   step "$(t "System" "Système")"
   harden_system
   harden_updates
+  harden_state_install
   echo
   ok "$(t "Server hardened. Undo: sudo bash installer.sh harden undo" "Serveur durci. Pour annuler : sudo bash installer.sh durcir annuler")"
+}
+
+# État lisible dans Portunia (Administrer › Durcissement).
+harden_state_install() {
+  local write
+  if [ "$MODE" = docker ]; then
+    write="cd $DIR && docker compose cp \"\$tmp\" portunia-gate:$HARDEN_STATE"
+  else
+    write="cp \"\$tmp\" $HARDEN_STATE"
+  fi
+  harden_state_script "$HARDEN_DIR" "$HARDEN_SSH" "$HARDEN_SYSCTL" "$HARDEN_UNIT" "$write" >"$HARDEN_DIR/etat.sh"
+  chmod 700 "$HARDEN_DIR/etat.sh"
+  cat >"$HARDEN_STATE_UNIT.service" <<EOF
+[Unit]
+Description=État du durcissement de Portunia Gate
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh $HARDEN_DIR/etat.sh
+EOF
+  cat >"$HARDEN_STATE_UNIT.timer" <<EOF
+[Unit]
+Description=État du durcissement de Portunia Gate, toutes les 15 minutes
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=15min
+
+[Install]
+WantedBy=timers.target
+EOF
+  systemctl daemon-reload
+  systemctl enable --now portunia-gate-etat.timer >/dev/null 2>&1 || warn "$(t "Hardening state not scheduled." "État du durcissement non planifié.")"
+  systemctl start portunia-gate-etat.service >/dev/null 2>&1 || true
 }
 
 harden_status() {
@@ -944,7 +1006,9 @@ harden_status() {
 }
 
 harden_undo() {
-  systemctl disable --now portunia-gate-pare-feu >/dev/null 2>&1 || true
+  systemctl disable --now portunia-gate-pare-feu portunia-gate-etat.timer >/dev/null 2>&1 || true
+  rm -f "$HARDEN_STATE_UNIT.service" "$HARDEN_STATE_UNIT.timer"
+  if [ "$MODE" = docker ]; then compose exec -T portunia-gate rm -f "$HARDEN_STATE" >/dev/null 2>&1 || true; else rm -f "$HARDEN_STATE"; fi
   nft delete table inet portunia_gate 2>/dev/null || true
   rm -f "$HARDEN_UNIT" "$HARDEN_SSH" "$HARDEN_SYSCTL" "$HARDEN_MODPROBE" /etc/apt/apt.conf.d/20auto-upgrades
   systemctl daemon-reload

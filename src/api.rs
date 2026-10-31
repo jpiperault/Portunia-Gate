@@ -109,6 +109,7 @@ pub async fn run(state: Arc<State>) -> anyhow::Result<()> {
         .route("/api/v1/assistance", get(assist_status))
         .route("/api/v1/assistance/{place}", get(assist_join))
         .route("/api/v1/admin/assistance", get(admin_assist).put(admin_assist_update))
+        .route("/api/v1/admin/durcissement", get(admin_hardening))
         .with_state(api)
         // Messages dans la langue demandée par Portunia (Accept-Language).
         .layer(axum::middleware::from_fn(crate::lang::middleware))
@@ -1747,6 +1748,39 @@ async fn admin_assist_update(AxState(api): Ctx, headers: HeaderMap, Json(body): 
     Ok(Json(json!({ "etat": "ok" })))
 }
 
+// ---------- Administration : durcissement ----------
+
+/// Âge au-delà duquel l'état du serveur n'est plus relevé (normalement toutes les 15 minutes).
+const HARDENING_STALE_MIN: i64 = 60;
+
+/// État écrit par le serveur (voir installer.sh), avec ce qui mérite une alerte. La Gate ne fait
+/// que lire : le durcissement se pilote sur le serveur, avec les droits de root.
+fn hardening_report(text: Option<&str>, now: DateTime<Utc>) -> Value {
+    let Some(text) = text else { return json!({ "actif": false }) };
+    let Ok(state) = serde_json::from_str::<Value>(text) else {
+        return json!({ "actif": true, "alertes": ["illisible"] });
+    };
+    let date = state["date"].as_str().and_then(|d| DateTime::parse_from_rfc3339(d).ok());
+    let age = date.map(|d| (now - d.with_timezone(&Utc)).num_minutes());
+    let mut alerts = Vec::new();
+    if age.is_none_or(|a| a > HARDENING_STALE_MIN) {
+        alerts.push("ancien");
+    }
+    if state["pare_feu_prevu"] == json!(true) && state["pare_feu"] != json!(true) {
+        alerts.push("pare_feu");
+    }
+    if state["services_relances"].as_array().is_some_and(|l| !l.is_empty()) {
+        alerts.push("services");
+    }
+    json!({ "actif": true, "etat": state, "age_min": age, "alertes": alerts })
+}
+
+async fn admin_hardening(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
+    admin(&api, &headers).await?;
+    let text = tokio::fs::read_to_string(api.state.config.data_dir.join("durcissement.json")).await.ok();
+    Ok(Json(hardening_report(text.as_deref().filter(|t| t.len() < 64 * 1024), Utc::now())))
+}
+
 async fn admin_portal(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
     admin(&api, &headers).await?;
     let state = &api.state;
@@ -1860,4 +1894,39 @@ async fn admin_portal_close(AxState(api): Ctx, headers: HeaderMap) -> ApiResult 
     api.state.web.close_all();
     audit::note(db, &actor.login, "portail.sessions_fermees", json!({ "terminaux": open })).await;
     Ok(Json(json!({ "etat": "ok", "fermees": open })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn at(minutes: i64) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-11-01T10:00:00Z").unwrap().with_timezone(&Utc) + chrono::Duration::minutes(minutes)
+    }
+
+    const GOOD: &str = r#"{"date":"2026-11-01T10:00:00Z","pare_feu":true,"pare_feu_prevu":true,"ssh":true,"noyau":true,"mises_a_jour":true,"services_arretes":2,"services_relances":[]}"#;
+
+    #[test]
+    fn durcissement_absent() {
+        assert_eq!(hardening_report(None, at(0))["actif"], false);
+    }
+
+    #[test]
+    fn durcissement_sans_alerte() {
+        let r = hardening_report(Some(GOOD), at(15));
+        assert_eq!(r["age_min"], 15);
+        assert_eq!(r["alertes"], json!([]));
+    }
+
+    #[test]
+    fn durcissement_alertes() {
+        assert_eq!(hardening_report(Some(GOOD), at(61))["alertes"], json!(["ancien"]));
+        let off = GOOD.replace("\"pare_feu\":true", "\"pare_feu\":false");
+        assert_eq!(hardening_report(Some(&off), at(1))["alertes"], json!(["pare_feu"]));
+        let lxc = off.replace("\"pare_feu_prevu\":true", "\"pare_feu_prevu\":false");
+        assert_eq!(hardening_report(Some(&lxc), at(1))["alertes"], json!([]), "pare-feu de l'hôte : pas d'alerte");
+        let back = GOOD.replace("\"services_relances\":[]", "\"services_relances\":[\"cups.service\"]");
+        assert_eq!(hardening_report(Some(&back), at(1))["alertes"], json!(["services"]));
+        assert_eq!(hardening_report(Some("pas du json"), at(1))["alertes"], json!(["illisible"]));
+    }
 }
