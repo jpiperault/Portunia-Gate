@@ -1,4 +1,6 @@
-//! Portail web : accès aux serveurs depuis un navigateur, sans Portunia, derrière Cloudflare.
+//! Portail web : accès aux serveurs depuis un navigateur, sans Portunia. Le mode d'exposition
+//! (Cloudflare, interne, HTTPS direct, proxy ou WAF) décide qui peut joindre le portail et d'où
+//! vient l'adresse réelle du visiteur ; un en-tête n'est cru que venant d'une source déclarée.
 //!
 //! - Écoute HTTP locale pour Cloudflare Tunnel (PORTUNIA_GATE_PORTAL_LISTEN, 127.0.0.1:8445), et
 //!   au besoin HTTPS pour le proxy Cloudflare (PORTUNIA_GATE_PORTAL_TLS_LISTEN), réservée aux
@@ -19,7 +21,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -137,17 +139,205 @@ pub async fn settings(state: &State) -> Result<Settings> {
     })
 }
 
+// ---------- Exposition ----------
+
+/// Comment les navigateurs atteignent le portail.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum Mode {
+    #[default]
+    Cloudflare,
+    Internal,
+    Direct,
+    Proxy,
+}
+
+impl Mode {
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "cloudflare" => Some(Self::Cloudflare),
+            "interne" | "internal" => Some(Self::Internal),
+            "direct" => Some(Self::Direct),
+            "proxy" => Some(Self::Proxy),
+            _ => None,
+        }
+    }
+
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Cloudflare => "cloudflare",
+            Self::Internal => "interne",
+            Self::Direct => "direct",
+            Self::Proxy => "proxy",
+        }
+    }
+}
+
+pub const DEFAULT_HEADER: &str = "X-Forwarded-For";
+
+/// Réglages d'exposition gardés en mémoire : lus à chaque requête, sans passer par la base.
+#[derive(Clone, Debug, Default)]
+pub struct Exposure {
+    pub mode: Mode,
+    /// Mode proxy : seules adresses admises, et seules à pouvoir donner l'adresse réelle.
+    pub proxies: Vec<String>,
+    /// Mode proxy : en-tête qui porte l'adresse réelle.
+    pub header: String,
+    /// Modes interne et direct : réseaux admis.
+    pub networks: Vec<String>,
+    /// Mode Cloudflare : voisins dont cloudflared peut venir, en plus de la machine elle-même.
+    pub tunnel_peers: Vec<String>,
+}
+
+fn listed(list: &[String], ip: IpAddr) -> bool {
+    list.iter().any(|c| in_cidr(ip, c))
+}
+
+fn is_private(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => v4.is_loopback() || v4.is_private(),
+        IpAddr::V6(v6) => v6.is_loopback() || (v6.segments()[0] & 0xfe00) == 0xfc00,
+    }
+}
+
+impl Exposure {
+    /// Cette adresse peut-elle joindre le portail ? `tls` : par l'écoute HTTPS.
+    fn admits(&self, tls: bool, ip: IpAddr) -> bool {
+        match self.mode {
+            Mode::Cloudflare => !tls || from_cloudflare(ip),
+            Mode::Proxy => listed(&self.proxies, ip),
+            Mode::Direct => self.networks.is_empty() || listed(&self.networks, ip),
+            Mode::Internal if self.networks.is_empty() => is_private(ip),
+            Mode::Internal => listed(&self.networks, ip),
+        }
+    }
+
+    /// Adresse réelle du navigateur : l'en-tête n'est cru que venant d'une source déclarée.
+    fn real_ip(&self, tls: bool, peer: IpAddr, headers: &HeaderMap) -> IpAddr {
+        let found = match self.mode {
+            Mode::Cloudflare if tls && from_cloudflare(peer) => cloudflare_ip(headers),
+            Mode::Cloudflare if !tls && (peer.is_loopback() || listed(&self.tunnel_peers, peer)) => cloudflare_ip(headers),
+            Mode::Proxy if listed(&self.proxies, peer) => forwarded_ip(headers, &self.header, &self.proxies),
+            _ => None,
+        };
+        found.unwrap_or(peer)
+    }
+}
+
+fn cloudflare_ip(headers: &HeaderMap) -> Option<IpAddr> {
+    headers.get("cf-connecting-ip")?.to_str().ok()?.trim().parse().ok()
+}
+
+fn parse_ip(text: &str) -> Option<IpAddr> {
+    let text = text.trim();
+    // Certains proxys ajoutent le port (Azure Application Gateway).
+    text.parse().ok().or_else(|| text.parse::<SocketAddr>().ok().map(|a| a.ip()))
+}
+
+/// Lu de droite à gauche : le visiteur peut écrire ce qu'il veut à gauche, seul ce que nos proxys
+/// ont ajouté à droite est sûr. La première adresse qui n'est pas un proxy est la sienne.
+fn forwarded_ip(headers: &HeaderMap, name: &str, proxies: &[String]) -> Option<IpAddr> {
+    let values: Vec<&str> = headers.get_all(name).iter().filter_map(|v| v.to_str().ok()).collect();
+    for item in values.iter().rev().flat_map(|v| v.rsplit(',')) {
+        let ip = parse_ip(item)?;
+        if !listed(proxies, ip) {
+            return Some(ip);
+        }
+    }
+    None
+}
+
+/// Adresses ou réseaux saisis, ramenés à la forme adresse/masque. Erreur : l'entrée refusée.
+pub fn parse_networks(items: &[String]) -> std::result::Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    for item in items.iter().flat_map(|i| i.split([',', ' ', '\n'])).map(str::trim).filter(|i| !i.is_empty()) {
+        let (addr, bits) = item.split_once('/').map_or((item, None), |(a, b)| (a, Some(b)));
+        let ip: IpAddr = addr.parse().map_err(|_| item.to_string())?;
+        let max = if ip.is_ipv4() { 32 } else { 128 };
+        let bits = match bits {
+            None => max,
+            Some(b) => b.parse::<u32>().ok().filter(|b| *b <= max).ok_or_else(|| item.to_string())?,
+        };
+        out.push(format!("{ip}/{bits}"));
+    }
+    Ok(out)
+}
+
+async fn read_exposure(state: &State) -> Result<Exposure> {
+    let list = |value: Option<serde_json::Value>| -> Vec<String> {
+        value.and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default()
+    };
+    let mode = text_setting(state, "portail_mode", "cloudflare").await?;
+    Ok(Exposure {
+        mode: Mode::parse(&mode).unwrap_or_default(),
+        proxies: list(model::setting(&state.db, "portail_proxys").await?),
+        header: text_setting(state, "portail_entete", DEFAULT_HEADER).await?,
+        networks: list(model::setting(&state.db, "portail_reseaux").await?),
+        tunnel_peers: state.config.portal_tunnel_peers.clone(),
+    })
+}
+
+pub async fn reload_exposure(state: &State) -> Result<()> {
+    let fresh = read_exposure(state).await?;
+    *state.exposure.write().unwrap_or_else(|e| e.into_inner()) = fresh;
+    Ok(())
+}
+
+pub fn exposure(state: &State) -> Exposure {
+    state.exposure.read().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// Change l'exposition (ce qui est absent reste tel quel). Commun à Portunia et à la ligne de
+/// commande. Renvoie l'état obtenu, ou le message à montrer.
+pub async fn set_exposure(state: &State, mode: Option<&str>, proxies: Option<&[String]>, header: Option<&str>, networks: Option<&[String]>) -> Result<Exposure> {
+    let mut next = read_exposure(state).await?;
+    if let Some(text) = mode {
+        next.mode = Mode::parse(text).ok_or_else(|| anyhow!(t!("Mode: cloudflare, internal, direct or proxy", "Mode : cloudflare, interne, direct ou proxy")))?;
+    }
+    if let Some(items) = proxies {
+        next.proxies = parse_networks(items).map_err(|bad| anyhow!(t!(format!("Invalid address: {bad}"), format!("Adresse invalide : {bad}"))))?;
+    }
+    if let Some(items) = networks {
+        next.networks = parse_networks(items).map_err(|bad| anyhow!(t!(format!("Invalid address: {bad}"), format!("Adresse invalide : {bad}"))))?;
+    }
+    if let Some(text) = header {
+        next.header = text.trim().to_string();
+    }
+    if axum::http::HeaderName::from_bytes(next.header.as_bytes()).is_err() {
+        bail!(t!("Invalid header name", "Nom d'en-tête invalide"));
+    }
+    if next.mode == Mode::Proxy && next.proxies.is_empty() {
+        bail!(t!("Proxy mode: give at least one trusted proxy address", "Mode proxy : indiquez au moins une adresse de proxy de confiance"));
+    }
+    model::set_setting(&state.db, "portail_mode", json!(next.mode.id())).await?;
+    model::set_setting(&state.db, "portail_proxys", json!(next.proxies)).await?;
+    model::set_setting(&state.db, "portail_entete", json!(next.header)).await?;
+    model::set_setting(&state.db, "portail_reseaux", json!(next.networks)).await?;
+    reload_exposure(state).await?;
+    Ok(next)
+}
+
 // ---------- Serveur ----------
 
 struct Portal {
     state: Arc<State>,
-    /// L'écoute HTTPS ne répond qu'aux adresses de Cloudflare.
-    cloudflare_only: bool,
+    /// Écoute HTTPS, celle qui peut être ouverte au réseau.
+    tls: bool,
 }
 
 type Ctx = AxState<Arc<Portal>>;
 
 pub async fn run(state: Arc<State>) -> Result<()> {
+    reload_exposure(&state).await?;
+    // La ligne de commande écrit en base depuis un autre processus.
+    let refresh = state.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            if let Err(e) = reload_exposure(&refresh).await {
+                tracing::error!("{} {e}", t!("portal:", "portail :"));
+            }
+        }
+    });
     let http = state.config.portal_listen.parse::<SocketAddr>().map_err(|_| anyhow!(t!("invalid PORTUNIA_GATE_PORTAL_LISTEN", "PORTUNIA_GATE_PORTAL_LISTEN invalide")))?;
     let tls = match &state.config.portal_tls_listen {
         Some(a) => Some(a.parse::<SocketAddr>().map_err(|_| anyhow!(t!("invalid PORTUNIA_GATE_PORTAL_TLS_LISTEN", "PORTUNIA_GATE_PORTAL_TLS_LISTEN invalide")))?),
@@ -179,11 +369,8 @@ pub async fn run(state: Arc<State>) -> Result<()> {
     }
 }
 
-fn router(state: Arc<State>, cloudflare_only: bool) -> Router {
-    let portal = Arc::new(Portal {
-        state,
-        cloudflare_only,
-    });
+fn router(state: Arc<State>, tls: bool) -> Router {
+    let portal = Arc::new(Portal { state, tls });
     Router::new()
         .route("/", get(page_index))
         .route("/session/{nom}", get(page_session))
@@ -237,27 +424,15 @@ fn from_cloudflare(ip: IpAddr) -> bool {
     CLOUDFLARE.iter().any(|c| in_cidr(ip, c))
 }
 
-/// Adresse réelle du navigateur : l'en-tête de Cloudflare, cru seulement s'il arrive par le
-/// tunnel (connexion locale ou réseau privé, cloudflared) ou depuis une adresse de Cloudflare.
+/// Adresse réelle du navigateur, selon le mode d'exposition.
 fn client_ip(portal: &Portal, peer: SocketAddr, headers: &HeaderMap) -> String {
-    let ip = peer.ip();
-    let trusted = match ip {
-        _ if portal.cloudflare_only => from_cloudflare(ip),
-        IpAddr::V4(v4) => v4.is_loopback() || v4.is_private(),
-        IpAddr::V6(v6) => v6.is_loopback() || (v6.segments()[0] & 0xfe00) == 0xfc00,
-    };
-    if trusted {
-        if let Some(real) = headers.get("cf-connecting-ip").and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse::<IpAddr>().ok()) {
-            return real.to_string();
-        }
-    }
-    ip.to_string()
+    exposure(&portal.state).real_ip(portal.tls, peer.ip().to_canonical(), headers).to_string()
 }
 
-/// En-têtes de sécurité sur toutes les réponses ; l'écoute HTTPS refuse ce qui ne vient pas de Cloudflare.
+/// En-têtes de sécurité sur toutes les réponses ; ce que le mode d'exposition n'admet pas est refusé.
 async fn guard(AxState(portal): Ctx, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: axum::extract::Request, next: Next) -> Response {
-    if portal.cloudflare_only && !from_cloudflare(peer.ip()) {
-        return (StatusCode::FORBIDDEN, t!("Access restricted to Cloudflare", "Accès réservé à Cloudflare")).into_response();
+    if !exposure(&portal.state).admits(portal.tls, peer.ip().to_canonical()) {
+        return (StatusCode::FORBIDDEN, t!("Access restricted", "Accès restreint")).into_response();
     }
     let mut res = next.run(req).await;
     let h = res.headers_mut();
@@ -920,6 +1095,76 @@ mod tests {
         assert!(from_cloudflare("2606:4700::1".parse().unwrap()));
         assert!(!from_cloudflare("192.168.1.10".parse().unwrap()));
         assert!(!from_cloudflare("8.8.8.8".parse().unwrap()));
+    }
+
+    fn ip(text: &str) -> IpAddr {
+        text.parse().unwrap()
+    }
+
+    fn with(name: &'static str, value: &'static str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.append(name, HeaderValue::from_static(value));
+        h
+    }
+
+    fn behind_proxy() -> Exposure {
+        Exposure { mode: Mode::Proxy, proxies: vec!["10.0.5.0/24".into()], header: DEFAULT_HEADER.into(), ..Default::default() }
+    }
+
+    #[test]
+    fn en_tete_cloudflare_falsifie() {
+        let e = Exposure::default();
+        let h = with("cf-connecting-ip", "1.2.3.4");
+        assert_eq!(e.real_ip(false, ip("127.0.0.1"), &h), ip("1.2.3.4"), "cloudflared sur la machine");
+        assert_eq!(e.real_ip(false, ip("192.168.1.50"), &h), ip("192.168.1.50"), "un voisin du réseau privé n'est pas cru");
+        assert_eq!(e.real_ip(true, ip("8.8.8.8"), &h), ip("8.8.8.8"));
+        assert_eq!(e.real_ip(true, ip("104.16.1.1"), &h), ip("1.2.3.4"));
+        let docker = Exposure { tunnel_peers: vec!["172.16.0.0/12".into()], ..Default::default() };
+        assert_eq!(docker.real_ip(false, ip("172.18.0.4"), &h), ip("1.2.3.4"), "cloudflared en conteneur");
+    }
+
+    #[test]
+    fn adresse_derriere_un_proxy() {
+        let e = behind_proxy();
+        let proxy = ip("10.0.5.10");
+        let real = |v: &'static str| e.real_ip(false, proxy, &with("x-forwarded-for", v));
+        assert_eq!(real("203.0.113.9"), ip("203.0.113.9"));
+        assert_eq!(real("9.9.9.9, 203.0.113.9"), ip("203.0.113.9"), "la partie gauche est écrite par le visiteur");
+        assert_eq!(real("203.0.113.9, 10.0.5.11"), ip("203.0.113.9"), "deux proxys à la suite");
+        assert_eq!(real("203.0.113.9:51234"), ip("203.0.113.9"), "port ajouté par le proxy");
+        assert_eq!(real("n'importe quoi"), proxy);
+        assert_eq!(e.real_ip(false, proxy, &HeaderMap::new()), proxy);
+        assert_eq!(e.real_ip(false, ip("203.0.113.1"), &with("x-forwarded-for", "1.1.1.1")), ip("203.0.113.1"), "hors liste, l'en-tête est ignoré");
+        assert_eq!(e.real_ip(false, proxy, &with("cf-connecting-ip", "1.1.1.1")), proxy);
+        let custom = Exposure { header: "X-Real-IP".into(), ..behind_proxy() };
+        assert_eq!(custom.real_ip(false, proxy, &with("x-real-ip", "203.0.113.9")), ip("203.0.113.9"));
+    }
+
+    #[test]
+    fn qui_peut_joindre_le_portail() {
+        let cloudflare = Exposure::default();
+        assert!(cloudflare.admits(false, ip("127.0.0.1")));
+        assert!(!cloudflare.admits(true, ip("8.8.8.8")));
+        let proxy = behind_proxy();
+        assert!(proxy.admits(true, ip("10.0.5.10")));
+        assert!(!proxy.admits(false, ip("127.0.0.1")));
+        assert!(!proxy.admits(true, ip("10.0.6.1")));
+        assert!(!Exposure { mode: Mode::Proxy, ..Default::default() }.admits(true, ip("10.0.5.10")), "liste vide : personne");
+        let internal = Exposure { mode: Mode::Internal, ..Default::default() };
+        assert!(internal.admits(true, ip("192.168.1.2")));
+        assert!(!internal.admits(true, ip("8.8.8.8")));
+        let restricted = Exposure { mode: Mode::Internal, networks: vec!["10.0.0.0/8".into()], ..Default::default() };
+        assert!(!restricted.admits(true, ip("192.168.1.2")));
+        assert!(Exposure { mode: Mode::Direct, ..Default::default() }.admits(true, ip("8.8.8.8")));
+        assert!(!Exposure { mode: Mode::Direct, networks: vec!["203.0.113.0/24".into()], ..Default::default() }.admits(true, ip("8.8.8.8")));
+    }
+
+    #[test]
+    fn saisie_des_reseaux() {
+        let parsed = parse_networks(&["10.0.5.10, 10.0.6.0/24".into(), "2001:db8::1".into()]).unwrap();
+        assert_eq!(parsed, ["10.0.5.10/32", "10.0.6.0/24", "2001:db8::1/128"]);
+        assert_eq!(parse_networks(&["10.0.0.0/33".into()]).unwrap_err(), "10.0.0.0/33");
+        assert_eq!(parse_networks(&["proxy.lan".into()]).unwrap_err(), "proxy.lan");
     }
 
     #[test]

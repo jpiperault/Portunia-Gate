@@ -46,6 +46,8 @@ pub struct State {
     pub limits: limits::Limiter,
     /// Sessions en cours, fermées quand leur accès prend fin.
     pub live: live::Registry,
+    /// Mode d'exposition du portail web.
+    pub exposure: std::sync::RwLock<portal::Exposure>,
 }
 
 #[derive(Parser)]
@@ -102,12 +104,35 @@ enum Command {
         #[arg(long, default_value_t = 30)]
         last: i64,
     },
+    /// Web portal.
+    #[command(subcommand)]
+    Portal(PortalCmd),
     /// General settings: auth_policy, banner (banniere), name (nom), language (langue: en or fr).
     Setting {
         /// auth_policy, banner, name or language.
         key: String,
         /// New value; without a value, shows the current one.
         value: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum PortalCmd {
+    /// Shows how the portal is exposed.
+    Show,
+    /// Changes how browsers reach the portal; what is not given stays as it is.
+    Expose {
+        /// cloudflare, internal, direct or proxy.
+        mode: Option<String>,
+        /// Proxy mode: trusted proxies, comma-separated addresses or networks.
+        #[arg(long)]
+        trusted: Option<String>,
+        /// Proxy mode: header holding the visitor's address.
+        #[arg(long)]
+        header: Option<String>,
+        /// Internal and direct modes: allowed networks, comma-separated (empty: the default).
+        #[arg(long)]
+        networks: Option<String>,
     },
 }
 
@@ -395,7 +420,7 @@ async fn run(cli: Cli) -> Result<()> {
         }
     }
     let keys = Keys::load(&config.data_dir)?;
-    let state = Arc::new(State { db, keys, config, web: portal::Live::default(), assist: assist::Rooms::default(), limits: Default::default(), live: Default::default() });
+    let state = Arc::new(State { db, keys, config, web: portal::Live::default(), assist: assist::Rooms::default(), limits: Default::default(), live: Default::default(), exposure: Default::default() });
 
     match cli.command {
         Command::Init { .. } => unreachable!(),
@@ -450,6 +475,7 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Group(cmd) => group_cmd(&state, cmd).await,
         Command::Target(cmd) => target_cmd(&state, cmd).await,
         Command::Rule(cmd) => rule_cmd(&state, cmd).await,
+        Command::Portal(cmd) => portal_cmd(&state, cmd).await,
         Command::Audit { verify, last } => {
             if verify {
                 match audit::verify(&state.db).await? {
@@ -556,7 +582,7 @@ async fn init(config: Config, admin: &str, no_admin: bool, provisional: bool, no
     let db = connect_db(&config).await?;
     println!("✓ {}", t!("PostgreSQL database ready", "Base PostgreSQL prête"));
     let keys = Keys::load(&config.data_dir)?;
-    let state = State { db, keys, config, web: portal::Live::default(), assist: assist::Rooms::default(), limits: Default::default(), live: Default::default() };
+    let state = State { db, keys, config, web: portal::Live::default(), assist: assist::Rooms::default(), limits: Default::default(), live: Default::default(), exposure: Default::default() };
     if model::setting(&state.db, "site_id").await?.is_none() {
         model::set_setting(&state.db, "site_id", json!(uuid::Uuid::new_v4())).await?;
     }
@@ -856,6 +882,26 @@ async fn target_cmd(state: &State, cmd: TargetCmd) -> Result<()> {
             }
         }
     }
+    Ok(())
+}
+
+async fn portal_cmd(state: &State, cmd: PortalCmd) -> Result<()> {
+    let e = match cmd {
+        PortalCmd::Show => {
+            portal::reload_exposure(state).await?;
+            portal::exposure(state)
+        }
+        PortalCmd::Expose { mode, trusted, header, networks } => {
+            let e = portal::set_exposure(state, mode.as_deref(), trusted.map(|v| vec![v]).as_deref(), header.as_deref(), networks.map(|v| vec![v]).as_deref()).await?;
+            audit::log(&state.db, "console", "portail.exposition", json!({ "mode": e.mode.id(), "proxys": e.proxies, "entete": e.header, "reseaux": e.networks })).await?;
+            println!("✓ {}", t!("Saved: applied within 30 seconds", "Enregistré : appliqué sous 30 secondes"));
+            e
+        }
+    };
+    println!("{} {}", t!("Mode:", "Mode :"), e.mode.id());
+    println!("{} {}", t!("Trusted proxies:", "Proxys de confiance :"), e.proxies.join(", "));
+    println!("{} {}", t!("Address header:", "En-tête de l'adresse :"), e.header);
+    println!("{} {}", t!("Allowed networks:", "Réseaux autorisés :"), e.networks.join(", "));
     Ok(())
 }
 

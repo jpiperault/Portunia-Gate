@@ -259,6 +259,21 @@ Une page web pour ouvrir ses serveurs depuis n'importe quel navigateur, sans Por
 
 Couper le portail (interrupteur) affiche « Portail fermé » et ferme aussitôt les sessions web en cours ; **Fermer toutes les sessions web** les ferme sans couper le portail.
 
+**Mode d'exposition** (Portunia 0.52 et Portunia Gate 0.17 et suivants) : Administrer › Portail web, ou `sudo portunia-gate portal expose` (`portal show` l'affiche, appliqué sous 30 secondes).
+
+| Mode | Qui joint le portail | Adresse du visiteur |
+|---|---|---|
+| `cloudflare` (défaut) | Tunnel ; HTTPS depuis les adresses de Cloudflare seulement | `CF-Connecting-IP`, venant de la machine elle-même ou de Cloudflare seulement |
+| `proxy` | Les proxys de confiance déclarés, personne d'autre | En-tête choisi (`X-Forwarded-For` par défaut), lu de droite à gauche |
+| `interne` | Réseaux privés, ou les réseaux indiqués | Adresse de la connexion |
+| `direct` | Tout le monde, ou les réseaux indiqués | Adresse de la connexion |
+
+```bash
+sudo portunia-gate portal expose proxy --trusted 10.0.5.10,10.0.5.11 --header X-Forwarded-For
+```
+
+Les modes autres que `cloudflare` passent par l'écoute HTTPS : réglez `PORTUNIA_GATE_PORTAL_TLS_LISTEN=0.0.0.0:8446` comme indiqué ci-dessous et ouvrez le port. Le WebSocket doit traverser le proxy ou le WAF. `cloudflared` sur une autre machine que la Gate : indiquez son réseau dans `PORTUNIA_GATE_PORTAL_TUNNEL_PEERS`, sinon son en-tête est ignoré.
+
 Proxy Cloudflare au lieu du tunnel : dans `/etc/portunia-gate/portunia-gate.env`, `PORTUNIA_GATE_PORTAL_TLS_LISTEN=0.0.0.0:8446` (paquet), ou `PORTUNIA_GATE_PORTAL_PORT=0.0.0.0:8446` dans `.env` (Docker), puis redémarrer ; dans Cloudflare, l'adresse proxifiée pointe vers ce port en HTTPS (mode SSL « Full »).
 
 ## Assistance à distance

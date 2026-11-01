@@ -1792,7 +1792,13 @@ async fn admin_portal(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
     .fetch_one(&state.db)
     .await?;
     let groups: Vec<String> = sqlx::query_scalar("SELECT name FROM groups ORDER BY name").fetch_all(&state.db).await?;
+    crate::portal::reload_exposure(state).await?;
+    let exposed = crate::portal::exposure(state);
     Ok(Json(json!({
+        "mode": exposed.mode.id(),
+        "proxys": exposed.proxies,
+        "entete": exposed.header,
+        "reseaux": exposed.networks,
         "actif": s.enabled,
         "url": s.url,
         "groupe": s.group,
@@ -1821,6 +1827,10 @@ struct PortalBody {
     turnstile_site: Option<String>,
     /// Vide : efface le secret ; absent : le garde.
     turnstile_secret: Option<String>,
+    mode: Option<String>,
+    proxys: Option<Vec<String>>,
+    entete: Option<String>,
+    reseaux: Option<Vec<String>>,
 }
 
 async fn admin_portal_update(AxState(api): Ctx, headers: HeaderMap, Json(body): Json<PortalBody>) -> ApiResult {
@@ -1831,7 +1841,7 @@ async fn admin_portal_update(AxState(api): Ctx, headers: HeaderMap, Json(body): 
     if let Some(url) = body.url {
         let url = url.trim().trim_end_matches('/').to_string();
         if !url.is_empty() && !url.starts_with("https://") {
-            return Err(err(StatusCode::BAD_REQUEST, t!("Public address: https://… (Cloudflare provides the certificate)", "Adresse publique : https://… (Cloudflare fournit le certificat)")));
+            return Err(err(StatusCode::BAD_REQUEST, t!("Public address: https://…", "Adresse publique : https://…")));
         }
         model::set_setting(db, "portail_url", json!(url)).await?;
         changed.insert("url".into(), json!(url));
@@ -1866,6 +1876,15 @@ async fn admin_portal_update(AxState(api): Ctx, headers: HeaderMap, Json(body): 
         let sealed = if secret.trim().is_empty() { String::new() } else { crate::portal::seal_turnstile(state, secret.trim())? };
         model::set_setting(db, "portail_turnstile_secret", json!(sealed)).await?;
         changed.insert("turnstile_secret".into(), json!(if sealed.is_empty() { "effacé" } else { "changé" }));
+    }
+    if body.mode.is_some() || body.proxys.is_some() || body.entete.is_some() || body.reseaux.is_some() {
+        let before = crate::portal::exposure(state);
+        let after = crate::portal::set_exposure(state, body.mode.as_deref(), body.proxys.as_deref(), body.entete.as_deref(), body.reseaux.as_deref())
+            .await
+            .map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
+        if before.mode != after.mode || before.proxies != after.proxies || before.header != after.header || before.networks != after.networks {
+            audit::note(db, &actor.login, "portail.exposition", json!({ "mode": after.mode.id(), "proxys": after.proxies, "entete": after.header, "reseaux": after.networks })).await;
+        }
     }
     if let Some(on) = body.actif {
         let was = crate::portal::settings(state).await?.enabled;

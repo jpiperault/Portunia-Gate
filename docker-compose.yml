@@ -34,6 +34,8 @@ services:
       # HTTPS pour le proxy Cloudflare (adresses de Cloudflare seulement).
       PORTUNIA_GATE_PORTAL_LISTEN: 0.0.0.0:8445
       PORTUNIA_GATE_PORTAL_TLS_LISTEN: 0.0.0.0:8446
+      # cloudflared arrive du réseau de Compose : le port 8445 n'est pas publié.
+      PORTUNIA_GATE_PORTAL_TUNNEL_PEERS: 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
       PORTUNIA_GATE_TUNNEL_METRICS: cloudflared:20241
       # Espace libre minimal (Mo) pour ouvrir une session enregistrée.
       PORTUNIA_GATE_MIN_FREE_MB: ${PORTUNIA_GATE_MIN_FREE_MB:-512}

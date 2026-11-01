@@ -246,6 +246,21 @@ A web page to open your servers from any browser, without Portunia: sign-in, lis
 
 Turning the portal off (switch) shows "Portal closed" and immediately closes open web sessions; **Close all web sessions** closes them without turning the portal off.
 
+**Exposure mode** (Portunia 0.52 and Portunia Gate 0.17 and later): Administer › Web portal, or `sudo portunia-gate portal expose` (`portal show` displays it, applied within 30 seconds).
+
+| Mode | Who can reach the portal | Visitor address |
+|---|---|---|
+| `cloudflare` (default) | Tunnel; HTTPS from Cloudflare addresses only | `CF-Connecting-IP`, from the machine itself or Cloudflare only |
+| `proxy` | The declared trusted proxies, nobody else | Chosen header (`X-Forwarded-For` by default), read from the right |
+| `internal` | Private networks, or the networks given | Connection address |
+| `direct` | Everyone, or the networks given | Connection address |
+
+```bash
+sudo portunia-gate portal expose proxy --trusted 10.0.5.10,10.0.5.11 --header X-Forwarded-For
+```
+
+Modes other than `cloudflare` use the HTTPS listener: set `PORTUNIA_GATE_PORTAL_TLS_LISTEN=0.0.0.0:8446` as described below and open the port. The web socket must pass through the proxy or WAF. `cloudflared` on another machine than the Gate: list its network in `PORTUNIA_GATE_PORTAL_TUNNEL_PEERS`, otherwise its header is ignored.
+
 Cloudflare proxy instead of the tunnel: in `/etc/portunia-gate/portunia-gate.env`, `PORTUNIA_GATE_PORTAL_TLS_LISTEN=0.0.0.0:8446` (package), or `PORTUNIA_GATE_PORTAL_PORT=0.0.0.0:8446` in `.env` (Docker), then restart; in Cloudflare, the proxied address points to that port over HTTPS ("Full" SSL mode).
 
 ## Remote assistance

@@ -19,6 +19,9 @@ pub struct Config {
     /// Portail web en HTTPS derrière le proxy Cloudflare (adresses de Cloudflare seulement) :
     /// PORTUNIA_GATE_PORTAL_TLS_LISTEN, ex. 0.0.0.0:8446 ; absent = pas d'écoute HTTPS.
     pub portal_tls_listen: Option<String>,
+    /// Mode Cloudflare : réseaux d'où cloudflared peut venir s'il n'est pas sur la machine
+    /// (conteneur) : PORTUNIA_GATE_PORTAL_TUNNEL_PEERS, séparés par des virgules.
+    pub portal_tunnel_peers: Vec<String>,
     /// État du tunnel Cloudflare (cloudflared) : PORTUNIA_GATE_TUNNEL_METRICS (par défaut 127.0.0.1:20241).
     pub tunnel_metrics: String,
     /// Espace libre minimal pour ouvrir une session enregistrée : PORTUNIA_GATE_MIN_FREE_MB
@@ -46,6 +49,8 @@ impl Config {
             ssh_public_port: port("PORTUNIA_GATE_SSH_PUBLIC_PORT").unwrap_or(ssh_port),
             portal_listen: text("PORTUNIA_GATE_PORTAL_LISTEN").unwrap_or_else(|| "127.0.0.1:8445".into()),
             portal_tls_listen: text("PORTUNIA_GATE_PORTAL_TLS_LISTEN"),
+            portal_tunnel_peers: crate::portal::parse_networks(&[text("PORTUNIA_GATE_PORTAL_TUNNEL_PEERS").unwrap_or_default()])
+                .map_err(|bad| anyhow::anyhow!("PORTUNIA_GATE_PORTAL_TUNNEL_PEERS : {bad}"))?,
             tunnel_metrics: text("PORTUNIA_GATE_TUNNEL_METRICS").unwrap_or_else(|| "127.0.0.1:20241".into()),
             min_free_mb: text("PORTUNIA_GATE_MIN_FREE_MB").and_then(|v| v.parse().ok()).unwrap_or(512),
         })
