@@ -17,6 +17,7 @@ mod limits;
 mod live;
 mod model;
 mod portal;
+mod relay;
 mod rdp;
 mod rdpcap;
 mod recording;
@@ -48,6 +49,8 @@ pub struct State {
     pub live: live::Registry,
     /// Mode d'exposition du portail web.
     pub exposure: std::sync::RwLock<portal::Exposure>,
+    /// Liaisons avec les relais dédiés.
+    pub relays: relay::Links,
 }
 
 #[derive(Parser)]
@@ -107,6 +110,9 @@ enum Command {
     /// Web portal.
     #[command(subcommand)]
     Portal(PortalCmd),
+    /// Dedicated relay: this machine publishes the web portal of a Gate.
+    #[command(subcommand)]
+    Edge(EdgeCmd),
     /// General settings: auth_policy, banner (banniere), name (nom), language (langue: en or fr).
     Setting {
         /// auth_policy, banner, name or language.
@@ -122,7 +128,7 @@ enum PortalCmd {
     Show,
     /// Changes how browsers reach the portal; what is not given stays as it is.
     Expose {
-        /// cloudflare, internal, direct or proxy.
+        /// cloudflare, internal, direct, proxy or relay.
         mode: Option<String>,
         /// Proxy mode: trusted proxies, comma-separated addresses or networks.
         #[arg(long)]
@@ -134,6 +140,44 @@ enum PortalCmd {
         #[arg(long)]
         networks: Option<String>,
     },
+    /// Declares a dedicated relay and gives its pairing code.
+    RelayAdd {
+        name: String,
+        /// Address the Gate reaches the relay at, e.g. 10.0.5.20:8447.
+        address: String,
+    },
+    /// Lists the dedicated relays.
+    RelayList,
+    /// Revokes a dedicated relay.
+    RelayRemove { name: String },
+}
+
+#[derive(Subcommand)]
+enum EdgeCmd {
+    /// Makes this machine a relay. Nothing is sent to the Gate: it is the Gate that calls.
+    Enroll {
+        /// Pairing code given by the Gate.
+        code: String,
+        /// Address open to browsers.
+        #[arg(long, default_value = "0.0.0.0:443")]
+        public: String,
+        /// Address open to the Gate only.
+        #[arg(long, default_value = "0.0.0.0:8447")]
+        tunnel: String,
+        /// Public name, for the self-signed certificate.
+        #[arg(long, default_value = "portunia-gate-relais")]
+        name: String,
+        /// Certificate shown to browsers (PEM); self-signed without it.
+        #[arg(long, requires = "key")]
+        cert: Option<std::path::PathBuf>,
+        /// Key of that certificate (PEM).
+        #[arg(long, requires = "cert")]
+        key: Option<std::path::PathBuf>,
+    },
+    /// Replaces the certificate shown to browsers; then restart the service.
+    Certificate { cert: std::path::PathBuf, key: std::path::PathBuf },
+    /// Runs the relay.
+    Serve,
 }
 
 #[derive(Subcommand)]
@@ -380,7 +424,7 @@ async fn main() {
     lang::set_process(lang::from_env());
     let cli = Cli::parse();
     // Le service trace son activité ; les commandes d'administration n'affichent que les avertissements.
-    let default_filter = if matches!(cli.command, Command::Serve) {
+    let default_filter = if matches!(cli.command, Command::Serve | Command::Edge(EdgeCmd::Serve)) {
         "portunia_gate=info,russh=warn"
     } else {
         "portunia_gate=warn,russh=warn"
@@ -400,6 +444,18 @@ async fn main() {
 }
 
 async fn run(cli: Cli) -> Result<()> {
+    // Le relais n'a pas de base : il ne lit pas la configuration de la Gate.
+    if let Command::Edge(cmd) = &cli.command {
+        return match cmd {
+            EdgeCmd::Enroll { code, public, tunnel, name, cert, key } => {
+                relay::enroll(code, public, tunnel, name, cert.as_deref(), key.as_deref())?;
+                println!("✓ {}", t!("Relay ready: it now waits for the Gate", "Relais prêt : il attend maintenant la Gate"));
+                Ok(())
+            }
+            EdgeCmd::Certificate { cert, key } => relay::set_certificate(cert, key),
+            EdgeCmd::Serve => relay::serve_edge().await,
+        };
+    }
     let config = Config::from_env()?;
 
     if let Command::Init {
@@ -420,10 +476,10 @@ async fn run(cli: Cli) -> Result<()> {
         }
     }
     let keys = Keys::load(&config.data_dir)?;
-    let state = Arc::new(State { db, keys, config, web: portal::Live::default(), assist: assist::Rooms::default(), limits: Default::default(), live: Default::default(), exposure: Default::default() });
+    let state = Arc::new(State { db, keys, config, web: portal::Live::default(), assist: assist::Rooms::default(), limits: Default::default(), live: Default::default(), exposure: Default::default(), relays: Default::default() });
 
     match cli.command {
-        Command::Init { .. } => unreachable!(),
+        Command::Init { .. } | Command::Edge(_) => unreachable!(),
         Command::Info => {
             let nom = model::setting(&state.db, "nom")
                 .await?
@@ -468,7 +524,7 @@ async fn run(cli: Cli) -> Result<()> {
                     tokio::time::sleep(std::time::Duration::from_secs(24 * 3600)).await;
                 }
             });
-            tokio::try_join!(sshd::run(state.clone()), api::run(state.clone()), portal::run(state.clone()), health::run(state.clone()), live::run(state.clone()))?;
+            tokio::try_join!(sshd::run(state.clone()), api::run(state.clone()), portal::run(state.clone()), relay::run(state.clone()), health::run(state.clone()), live::run(state.clone()))?;
             Ok(())
         }
         Command::User(cmd) => user_cmd(&state, cmd).await,
@@ -582,7 +638,7 @@ async fn init(config: Config, admin: &str, no_admin: bool, provisional: bool, no
     let db = connect_db(&config).await?;
     println!("✓ {}", t!("PostgreSQL database ready", "Base PostgreSQL prête"));
     let keys = Keys::load(&config.data_dir)?;
-    let state = State { db, keys, config, web: portal::Live::default(), assist: assist::Rooms::default(), limits: Default::default(), live: Default::default(), exposure: Default::default() };
+    let state = State { db, keys, config, web: portal::Live::default(), assist: assist::Rooms::default(), limits: Default::default(), live: Default::default(), exposure: Default::default(), relays: Default::default() };
     if model::setting(&state.db, "site_id").await?.is_none() {
         model::set_setting(&state.db, "site_id", json!(uuid::Uuid::new_v4())).await?;
     }
@@ -887,6 +943,26 @@ async fn target_cmd(state: &State, cmd: TargetCmd) -> Result<()> {
 
 async fn portal_cmd(state: &State, cmd: PortalCmd) -> Result<()> {
     let e = match cmd {
+        PortalCmd::RelayAdd { name, address } => {
+            let (entry, code) = relay::add(state, &name, &address).await?;
+            audit::log(&state.db, "console", "relais.ajoute", json!({ "nom": entry.nom, "adresse": entry.adresse })).await?;
+            println!("{}", t!("On the relay machine:", "Sur la machine du relais :"));
+            println!("  sudo bash installer.sh relay {code}");
+            return Ok(());
+        }
+        PortalCmd::RelayList => {
+            for r in relay::list(state).await? {
+                println!("{}  {}", r.nom, r.adresse);
+            }
+            return Ok(());
+        }
+        PortalCmd::RelayRemove { name } => {
+            portal::reload_exposure(state).await?;
+            let Some(gone) = relay::remove(state, &name).await? else { bail!(t!("unknown relay", "relais inconnu")) };
+            audit::log(&state.db, "console", "relais.revoque", json!({ "nom": gone })).await?;
+            println!("✓ {gone}");
+            return Ok(());
+        }
         PortalCmd::Show => {
             portal::reload_exposure(state).await?;
             portal::exposure(state)

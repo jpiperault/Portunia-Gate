@@ -50,7 +50,7 @@ async fn refuse(socket: &mut WebSocket, pdu: RDCleanPathPdu) {
 /// Accepte tout certificat pendant la négociation (le serveur Windows en a souvent un
 /// auto-signé) ; la chaîne est contrôlée juste après par son empreinte.
 #[derive(Debug)]
-struct Capture(Arc<CryptoProvider>);
+pub struct Capture(pub Arc<CryptoProvider>);
 
 impl ServerCertVerifier for Capture {
     fn verify_server_cert(&self, _: &CertificateDer<'_>, _: &[CertificateDer<'_>], _: &ServerName<'_>, _: &[u8], _: UnixTime) -> Result<ServerCertVerified, rustls::Error> {

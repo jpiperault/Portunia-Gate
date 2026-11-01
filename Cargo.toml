@@ -1,6 +1,6 @@
 [package]
 name = "portunia-gate"
-version = "0.17.0"
+version = "0.18.0"
 description = "Passerelle SSH et Bureau à distance de Portunia : accès contrôlés, coffre, enregistrement et journal d'audit"
 edition = "2021"
 publish = false
@@ -9,7 +9,9 @@ publish = false
 anyhow = "1"
 axum = { version = "0.8", features = ["ws"] }
 axum-server = { version = "0.7", features = ["tls-rustls-no-provider"] }
+hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
+tower = { version = "0.5", default-features = false, features = ["util"] }
 ironrdp-rdcleanpath = "0.3"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 ureq = { version = "2", default-features = false, features = ["tls"] }
@@ -53,6 +55,7 @@ assets = [
     ["target/release/portunia-gate", "usr/lib/portunia-gate/portunia-gate", "755"],
     ["debian/portunia-gate.sh", "usr/bin/portunia-gate", "755"],
     ["debian/portunia-gate.service", "usr/lib/systemd/system/portunia-gate.service", "644"],
+    ["debian/portunia-gate-relais.service", "usr/lib/systemd/system/portunia-gate-relais.service", "644"],
     ["README.md", "usr/share/doc/portunia-gate/README.md", "644"],
     ["README.fr.md", "usr/share/doc/portunia-gate/README.fr.md", "644"],
     ["docs/operations.md", "usr/share/doc/portunia-gate/operations.md", "644"],

@@ -9,6 +9,7 @@
 #   ./installer.sh update              installs the latest version and restarts the Gate
 #   ./installer.sh admin LOGIN         creates a backup administrator (temporary password)
 #   ./installer.sh portal              installs Cloudflare Tunnel for the web portal (token asked)
+#   ./installer.sh relay CODE [NAME]   makes this machine a dedicated web portal relay (code from the Gate)
 #   ./installer.sh --harden            first install, then hardens this server (dedicated to the Gate)
 #   ./installer.sh harden [plan|status|undo]   hardens this server, shows the plan or the state, or undoes it
 #
@@ -66,7 +67,7 @@ confirm() {
 # ---------- Arguments ----------
 
 ARGS=("$@")
-MODE='' PACKAGE='' ACTION='' ACTION_ARG='' HARDEN=''
+MODE='' PACKAGE='' ACTION='' ACTION_ARG='' HARDEN='' RELAY_NAME=''
 while [ $# -gt 0 ]; do
   case $1 in
     --docker) MODE=docker ;;
@@ -76,6 +77,7 @@ while [ $# -gt 0 ]; do
     harden | durcir) ACTION=harden; ACTION_ARG=${2:-}; [ -z "$ACTION_ARG" ] || shift ;;
     update | mise-a-jour) ACTION=update ;;
     portal | portail) ACTION=portal ;;
+    relay | relais) ACTION=relay; ACTION_ARG=${2:-}; RELAY_NAME=${3:-portunia-gate-relais}; [ -z "${2:-}" ] || shift; [ -z "${3:-}" ] || shift ;;
     *) die "$(t "Usage: $0 [--docker] [--package FILE.deb] [--harden] [info | update | admin LOGIN | portal | harden]" "Usage : $0 [--docker] [--paquet FICHIER.deb] [info | mise-a-jour | admin IDENTIFIANT | portail]")" ;;
   esac
   shift
@@ -187,6 +189,9 @@ fetch() {
 
 # Installe (ou met à jour) le paquet : fichier fourni, ou dernière version publiée.
 install_package() {
+  # Un relais n'a pas de base de données.
+  local database=postgresql
+  [ "${1:-}" != relay ] || database=''
   [ "$(dpkg --print-architecture)" = amd64 ] || die "$(t "Package available for amd64 only: use --docker." "Paquet disponible pour amd64 uniquement : utilisez --docker.")"
   local work deb
   work=$(mktemp -d)
@@ -205,11 +210,12 @@ install_package() {
     ok "$(t "Package downloaded and checked" "Paquet téléchargé et vérifié")"
   fi
   chmod 644 "$deb"
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$deb" postgresql >/dev/null 2>"$work/apt.log" ||
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$deb" $database >/dev/null 2>"$work/apt.log" ||
     { cat "$work/apt.log" >&2; die "$(t "Cannot install the package." "Installation du paquet impossible.")"; }
   rm -rf "$work"
   local v pgv
   v=$(dpkg-query -W -f '${Version}' portunia-gate)
+  if [ -z "$database" ]; then ok "$(t "Portunia Gate $v installed" "Portunia Gate $v installée")"; return; fi
   pgv=$(pg_lsclusters -h 2>/dev/null | awk 'NR==1{print $1}')
   ok "$(t "Portunia Gate $v and PostgreSQL $pgv installed" "Portunia Gate $v et PostgreSQL $pgv installés")"
 }
@@ -548,6 +554,25 @@ install_cloudflared() {
     >/etc/apt/sources.list.d/cloudflared.list
   { apt-get update -qq && apt-get install -y -qq cloudflared; } >/dev/null || die "$(t "Cannot install cloudflared." "Installation de cloudflared impossible.")"
   ok "$(t "cloudflared installed (Cloudflare repository)" "cloudflared installé (dépôt Cloudflare)")"
+}
+
+# Relais dédié : cette machine publie le portail d'une Gate. Sans base, sans coffre et sans
+# aucun appel vers la Gate : c'est elle qui se connecte ici.
+setup_relay() {
+  [ -n "$ACTION_ARG" ] || die "$(t "Usage: $0 relay CODE [PUBLIC_NAME] (code given in Portunia › Administer › Web portal)" "Usage : $0 relais CODE [NOM_PUBLIC] (code donné dans Portunia › Administrer › Portail web)")"
+  ! installed_native || die "$(t "A Gate runs on this machine: a relay goes on another one." "Une Gate tourne sur cette machine : un relais se place sur une autre.")"
+  install_package relay
+  runuser -u _portunia_gate -- /usr/lib/portunia-gate/portunia-gate edge enroll "$ACTION_ARG" --name "$RELAY_NAME" ||
+    die "$(t "The relay could not be prepared." "Préparation du relais impossible.")"
+  systemctl enable --now portunia-gate-relais >/dev/null 2>&1 ||
+    { journalctl -u portunia-gate-relais -n 20 --no-pager >&2; die "$(t "The relay does not start." "Le relais ne démarre pas.")"; }
+  ok "$(t "Relay started" "Relais démarré")"
+  echo
+  echo "  $(t "Allow on the firewall:" "À autoriser sur le pare-feu :")"
+  echo "    $(t "port 443 from browsers" "port 443 depuis les navigateurs")"
+  echo "    $(t "port 8447 from the Gate only" "port 8447 depuis la Gate seulement")"
+  echo "  $(t "No flow is needed from this machine to the internal network." "Aucun flux n'est nécessaire de cette machine vers le réseau interne.")"
+  echo "  $(t "The certificate is self-signed. Your own: sudo -u _portunia_gate /usr/lib/portunia-gate/portunia-gate edge certificate CERT KEY, then restart portunia-gate-relais." "Le certificat est auto-signé. Le vôtre : sudo -u _portunia_gate /usr/lib/portunia-gate/portunia-gate edge certificate CERT CLE, puis redémarrez portunia-gate-relais.")"
 }
 
 # Tunnel sortant vers Cloudflare pour le portail web : aucun port entrant à ouvrir.
@@ -1055,6 +1080,15 @@ menu() {
     *) exit 0 ;;
   esac
 }
+
+if systemctl is-enabled --quiet portunia-gate-relais 2>/dev/null && [ "$ACTION" = update ]; then
+  install_package relay
+  exit 0
+fi
+if [ "$ACTION" = relay ]; then
+  setup_relay
+  exit 0
+fi
 
 if installed_native; then
   [ "$MODE" != docker ] || die "$(t "Portunia Gate is already installed as a Debian package on this server." "Portunia Gate est déjà installé en paquet Debian sur ce serveur.")"

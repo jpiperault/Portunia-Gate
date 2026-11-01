@@ -103,6 +103,8 @@ pub async fn run(state: Arc<State>) -> anyhow::Result<()> {
         .route("/api/v1/rdp", get(rdp_passage))
         .route("/api/v1/admin/portail", get(admin_portal).put(admin_portal_update))
         .route("/api/v1/admin/portail/fermer-sessions", post(admin_portal_close))
+        .route("/api/v1/admin/portail/relais", post(admin_relay_add))
+        .route("/api/v1/admin/portail/relais/{id}", delete(admin_relay_remove))
         .route("/api/v1/audit/sessions", get(audit_sessions))
         .route("/api/v1/audit/sessions/{id}/enregistrement", get(audit_recording))
         .route("/api/v1/audit/sessions/{id}/flux", get(audit_rdp_stream))
@@ -1799,6 +1801,7 @@ async fn admin_portal(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
         "proxys": exposed.proxies,
         "entete": exposed.header,
         "reseaux": exposed.networks,
+        "relais": crate::relay::report(state).await?,
         "actif": s.enabled,
         "url": s.url,
         "groupe": s.group,
@@ -1902,6 +1905,33 @@ async fn admin_portal_update(AxState(api): Ctx, headers: HeaderMap, Json(body): 
     if !changed.is_empty() {
         audit::note(db, &actor.login, "portail.modifie", Value::Object(changed)).await;
     }
+    Ok(Json(json!({ "etat": "ok" })))
+}
+
+#[derive(Deserialize)]
+struct RelayBody {
+    nom: String,
+    adresse: String,
+}
+
+async fn admin_relay_add(AxState(api): Ctx, headers: HeaderMap, Json(body): Json<RelayBody>) -> ApiResult {
+    let actor = admin(&api, &headers).await?;
+    let state = &api.state;
+    let (entry, code) = crate::relay::add(state, &body.nom, &body.adresse).await.map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
+    audit::note(&state.db, &actor.login, "relais.ajoute", json!({ "nom": entry.nom, "adresse": entry.adresse })).await;
+    Ok(Json(json!({ "id": entry.id, "code": code })))
+}
+
+async fn admin_relay_remove(AxState(api): Ctx, headers: HeaderMap, Path(id): Path<String>) -> ApiResult {
+    let actor = admin(&api, &headers).await?;
+    let state = &api.state;
+    let gone = crate::relay::remove(state, &id).await.map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
+    let Some(name) = gone else {
+        return Err(err(StatusCode::NOT_FOUND, t!("Unknown relay", "Relais inconnu")));
+    };
+    // Les terminaux web passés par ce relais ne doivent pas lui survivre.
+    state.web.close_all();
+    audit::note(&state.db, &actor.login, "relais.revoque", json!({ "nom": name })).await;
     Ok(Json(json!({ "etat": "ok" })))
 }
 

@@ -1,5 +1,5 @@
 //! Portail web : accès aux serveurs depuis un navigateur, sans Portunia. Le mode d'exposition
-//! (Cloudflare, interne, HTTPS direct, proxy ou WAF) décide qui peut joindre le portail et d'où
+//! (Cloudflare, interne, HTTPS direct, proxy ou WAF, relais dédié) décide qui peut joindre le portail et d'où
 //! vient l'adresse réelle du visiteur ; un en-tête n'est cru que venant d'une source déclarée.
 //!
 //! - Écoute HTTP locale pour Cloudflare Tunnel (PORTUNIA_GATE_PORTAL_LISTEN, 127.0.0.1:8445), et
@@ -149,6 +149,8 @@ pub enum Mode {
     Internal,
     Direct,
     Proxy,
+    /// Seul un relais dédié peut joindre le portail (voir relay.rs).
+    Relay,
 }
 
 impl Mode {
@@ -158,6 +160,7 @@ impl Mode {
             "interne" | "internal" => Some(Self::Internal),
             "direct" => Some(Self::Direct),
             "proxy" => Some(Self::Proxy),
+            "relais" | "relay" => Some(Self::Relay),
             _ => None,
         }
     }
@@ -168,6 +171,7 @@ impl Mode {
             Self::Internal => "interne",
             Self::Direct => "direct",
             Self::Proxy => "proxy",
+            Self::Relay => "relais",
         }
     }
 }
@@ -205,6 +209,7 @@ impl Exposure {
         match self.mode {
             Mode::Cloudflare => !tls || from_cloudflare(ip),
             Mode::Proxy => listed(&self.proxies, ip),
+            Mode::Relay => false,
             Mode::Direct => self.networks.is_empty() || listed(&self.networks, ip),
             Mode::Internal if self.networks.is_empty() => is_private(ip),
             Mode::Internal => listed(&self.networks, ip),
@@ -291,7 +296,7 @@ pub fn exposure(state: &State) -> Exposure {
 pub async fn set_exposure(state: &State, mode: Option<&str>, proxies: Option<&[String]>, header: Option<&str>, networks: Option<&[String]>) -> Result<Exposure> {
     let mut next = read_exposure(state).await?;
     if let Some(text) = mode {
-        next.mode = Mode::parse(text).ok_or_else(|| anyhow!(t!("Mode: cloudflare, internal, direct or proxy", "Mode : cloudflare, interne, direct ou proxy")))?;
+        next.mode = Mode::parse(text).ok_or_else(|| anyhow!(t!("Mode: cloudflare, internal, direct, proxy or relay", "Mode : cloudflare, interne, direct, proxy ou relais")))?;
     }
     if let Some(items) = proxies {
         next.proxies = parse_networks(items).map_err(|bad| anyhow!(t!(format!("Invalid address: {bad}"), format!("Adresse invalide : {bad}"))))?;
@@ -304,6 +309,9 @@ pub async fn set_exposure(state: &State, mode: Option<&str>, proxies: Option<&[S
     }
     if axum::http::HeaderName::from_bytes(next.header.as_bytes()).is_err() {
         bail!(t!("Invalid header name", "Nom d'en-tête invalide"));
+    }
+    if next.mode == Mode::Relay && crate::relay::list(state).await?.is_empty() {
+        bail!(t!("Relay mode: first add a relay", "Mode relais : ajoutez d'abord un relais"));
     }
     if next.mode == Mode::Proxy && next.proxies.is_empty() {
         bail!(t!("Proxy mode: give at least one trusted proxy address", "Mode proxy : indiquez au moins une adresse de proxy de confiance"));
@@ -322,6 +330,8 @@ struct Portal {
     state: Arc<State>,
     /// Écoute HTTPS, celle qui peut être ouverte au réseau.
     tls: bool,
+    /// Connexion passée par un relais dédié : ConnectInfo porte déjà l'adresse du visiteur.
+    relayed: bool,
 }
 
 type Ctx = AxState<Arc<Portal>>;
@@ -369,8 +379,17 @@ pub async fn run(state: Arc<State>) -> Result<()> {
     }
 }
 
+/// Portail servi sur les connexions d'un relais dédié.
+pub fn relayed_router(state: Arc<State>) -> Router {
+    build_router(Portal { state, tls: false, relayed: true })
+}
+
 fn router(state: Arc<State>, tls: bool) -> Router {
-    let portal = Arc::new(Portal { state, tls });
+    build_router(Portal { state, tls, relayed: false })
+}
+
+fn build_router(portal: Portal) -> Router {
+    let portal = Arc::new(portal);
     Router::new()
         .route("/", get(page_index))
         .route("/session/{nom}", get(page_session))
@@ -426,12 +445,15 @@ fn from_cloudflare(ip: IpAddr) -> bool {
 
 /// Adresse réelle du navigateur, selon le mode d'exposition.
 fn client_ip(portal: &Portal, peer: SocketAddr, headers: &HeaderMap) -> String {
+    if portal.relayed {
+        return peer.ip().to_string();
+    }
     exposure(&portal.state).real_ip(portal.tls, peer.ip().to_canonical(), headers).to_string()
 }
 
 /// En-têtes de sécurité sur toutes les réponses ; ce que le mode d'exposition n'admet pas est refusé.
 async fn guard(AxState(portal): Ctx, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: axum::extract::Request, next: Next) -> Response {
-    if !exposure(&portal.state).admits(portal.tls, peer.ip().to_canonical()) {
+    if !portal.relayed && !exposure(&portal.state).admits(portal.tls, peer.ip().to_canonical()) {
         return (StatusCode::FORBIDDEN, t!("Access restricted", "Accès restreint")).into_response();
     }
     let mut res = next.run(req).await;
@@ -1155,6 +1177,7 @@ mod tests {
         assert!(!internal.admits(true, ip("8.8.8.8")));
         let restricted = Exposure { mode: Mode::Internal, networks: vec!["10.0.0.0/8".into()], ..Default::default() };
         assert!(!restricted.admits(true, ip("192.168.1.2")));
+        assert!(!Exposure { mode: Mode::Relay, ..Default::default() }.admits(false, ip("127.0.0.1")), "mode relais : aucun accès direct");
         assert!(Exposure { mode: Mode::Direct, ..Default::default() }.admits(true, ip("8.8.8.8")));
         assert!(!Exposure { mode: Mode::Direct, networks: vec!["203.0.113.0/24".into()], ..Default::default() }.admits(true, ip("8.8.8.8")));
     }

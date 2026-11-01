@@ -254,12 +254,22 @@ Turning the portal off (switch) shows "Portal closed" and immediately closes ope
 | `proxy` | The declared trusted proxies, nobody else | Chosen header (`X-Forwarded-For` by default), read from the right |
 | `internal` | Private networks, or the networks given | Connection address |
 | `direct` | Everyone, or the networks given | Connection address |
+| `relay` | The dedicated relays only | Given by the relay |
 
 ```bash
 sudo portunia-gate portal expose proxy --trusted 10.0.5.10,10.0.5.11 --header X-Forwarded-For
 ```
 
-Modes other than `cloudflare` use the HTTPS listener: set `PORTUNIA_GATE_PORTAL_TLS_LISTEN=0.0.0.0:8446` as described below and open the port. The web socket must pass through the proxy or WAF. `cloudflared` on another machine than the Gate: list its network in `PORTUNIA_GATE_PORTAL_TUNNEL_PEERS`, otherwise its header is ignored.
+**Dedicated relay** (Portunia 0.53 and Portunia Gate 0.18 and later): a separate machine, typically in a DMZ, publishes the portal while the Gate stays on the internal network. The Gate opens the connections towards the relay, so no flow goes from the DMZ to the internal network. The relay holds no vault, account or database, only a secret shared with the Gate and its certificates. Its HTTPS ends on the relay: if it is compromised, what passes through while the attacker is there can be read (passwords, codes, terminals), so revoke it at once.
+
+1. In Portunia, Administer › Web portal › Dedicated relay, give a name and the address the Gate reaches it at (e.g. `10.0.5.20:8447`), then **Add a relay**. The command is shown once. Or `sudo portunia-gate portal relay-add dmz-01 10.0.5.20:8447`.
+2. On the relay machine (Debian amd64): `sudo bash installer.sh relay CODE access.your-domain.com`.
+3. Firewall: port 443 from browsers to the relay, port 8447 from the Gate to the relay, nothing from the relay to the internal network.
+4. In Portunia, select **Dedicated relay** and save: the Gate then refuses any direct access to the portal.
+
+The relay presents a self-signed certificate. For your own: `portunia-gate edge certificate CERT KEY` run as `_portunia_gate`, then `systemctl restart portunia-gate-relais`. Update: `sudo bash installer.sh update` on the relay. Several relays can sit behind a load balancer. Audit log: `relais.ajoute`, `relais.revoque`.
+
+Modes `proxy`, `internal` and `direct` use the HTTPS listener: set `PORTUNIA_GATE_PORTAL_TLS_LISTEN=0.0.0.0:8446` as described below and open the port. The web socket must pass through the proxy or WAF. `cloudflared` on another machine than the Gate: list its network in `PORTUNIA_GATE_PORTAL_TUNNEL_PEERS`, otherwise its header is ignored.
 
 Cloudflare proxy instead of the tunnel: in `/etc/portunia-gate/portunia-gate.env`, `PORTUNIA_GATE_PORTAL_TLS_LISTEN=0.0.0.0:8446` (package), or `PORTUNIA_GATE_PORTAL_PORT=0.0.0.0:8446` in `.env` (Docker), then restart; in Cloudflare, the proxied address points to that port over HTTPS ("Full" SSL mode).
 

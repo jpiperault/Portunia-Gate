@@ -15,7 +15,7 @@ if [ "$1" = configure ]; then
   if [ -d /run/systemd/system ]; then
     systemctl daemon-reload
     # Mise à jour : redémarre la Gate si elle tournait ; le schéma de la base suit au démarrage.
-    if [ -n "$2" ]; then systemctl try-restart portunia-gate.service || true; fi
+    if [ -n "$2" ]; then systemctl try-restart portunia-gate.service portunia-gate-relais.service || true; fi
   fi
 fi
 

@@ -31,15 +31,21 @@ pub fn create_missing(data_dir: &Path, names: &[String]) -> Result<bool> {
     if f.cert.exists() {
         return Ok(false);
     }
+    write_self_signed(names, "Portunia Gate", &f.cert, &f.key)?;
+    Ok(true)
+}
+
+/// Crée un certificat auto-signé et sa clé.
+pub fn write_self_signed(names: &[String], common_name: &str, cert_path: &Path, key_path: &Path) -> Result<()> {
     let mut params = rcgen::CertificateParams::new(names.to_vec()).map_err(|e| anyhow!("certificat : {e}"))?;
-    params.distinguished_name.push(rcgen::DnType::CommonName, "Portunia Gate");
+    params.distinguished_name.push(rcgen::DnType::CommonName, common_name);
     params.not_before = rcgen::date_time_ymd(2025, 1, 1);
     params.not_after = rcgen::date_time_ymd(2045, 1, 1);
     let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).map_err(|e| anyhow!("clé du certificat : {e}"))?;
     let cert = params.self_signed(&key).map_err(|e| anyhow!("certificat : {e}"))?;
-    crate::keys::write_private(&f.key, key.serialize_pem().as_bytes())?;
-    std::fs::write(&f.cert, cert.pem())?;
-    Ok(true)
+    crate::keys::write_private(key_path, key.serialize_pem().as_bytes())?;
+    std::fs::write(cert_path, cert.pem())?;
+    Ok(())
 }
 
 /// Empreinte SHA-256 du certificat (DER), telle que Portunia l'affiche : « AB:CD:… ».
