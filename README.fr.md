@@ -101,11 +101,11 @@ La Gate redémarre seul avec le serveur.
 
 ### Sauvegarder la clé du coffre, tout de suite
 
-La **clé du coffre** chiffre les mots de passe des serveurs et les codes TOTP. Sans elle, une restauration perd tous ces secrets. L'assistant en dépose une copie dans votre dossier personnel (`~/portunia-gate-coffre.key`) : copiez-la hors du serveur (gestionnaire de mots de passe, coffre de l'entreprise), puis effacez cette copie. L'assistant affiche les commandes exactes, par exemple :
+La **clé du coffre** chiffre les mots de passe des serveurs et les codes TOTP. Sans elle, une restauration perd tous ces secrets. L'assistant en dépose une copie dans votre dossier personnel (`~/portunia-gate-vault.key`) : copiez-la hors du serveur (gestionnaire de mots de passe, coffre de l'entreprise), puis effacez cette copie. L'assistant affiche les commandes exactes, par exemple :
 
 ```bash
-scp julien@192.168.1.20:/home/julien/portunia-gate-coffre.key .   # depuis votre poste
-rm ~/portunia-gate-coffre.key                                      # sur le serveur
+scp julien@192.168.1.20:/home/julien/portunia-gate-vault.key .   # depuis votre poste
+rm ~/portunia-gate-vault.key                                      # sur le serveur
 ```
 
 ### Relancer l'assistant

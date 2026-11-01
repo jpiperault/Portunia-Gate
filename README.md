@@ -87,11 +87,11 @@ The Gate restarts on its own with the server.
 
 ### Back up the vault key, right away
 
-The **vault key** encrypts server passwords and TOTP secrets. Without it, a restore loses all those secrets. The wizard puts a copy in your home folder (`~/portunia-gate-coffre.key`): copy it off the server (password manager, company vault), then delete that copy. The wizard shows the exact commands, for example:
+The **vault key** encrypts server passwords and TOTP secrets. Without it, a restore loses all those secrets. The wizard puts a copy in your home folder (`~/portunia-gate-vault.key`): copy it off the server (password manager, company vault), then delete that copy. The wizard shows the exact commands, for example:
 
 ```bash
-scp julien@192.168.1.20:/home/julien/portunia-gate-coffre.key .   # from your computer
-rm ~/portunia-gate-coffre.key                                      # on the server
+scp julien@192.168.1.20:/home/julien/portunia-gate-vault.key .   # from your computer
+rm ~/portunia-gate-vault.key                                      # on the server
 ```
 
 ### Running the wizard again

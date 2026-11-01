@@ -1,9 +1,9 @@
 //! Clés de la Gate, créées à l'installation dans le dossier de données :
-//! - coffre.key : 32 octets, chiffre les secrets des cibles et les secrets TOTP ;
+//! - vault.key : 32 octets, chiffre les secrets des cibles et les secrets TOTP ;
 //! - ssh_host_ed25519_key : identité SSH de la Gate ;
 //! - signature.key : signe les enregistrements (Ed25519, PKCS#8).
 
-use std::{fs, io::Write, path::Path};
+use std::{fs, io::Write, path::{Path, PathBuf}};
 
 use anyhow::{anyhow, Context, Result};
 use ring::{
@@ -50,7 +50,7 @@ impl Keys {
     pub fn create_missing(dir: &Path) -> Result<Vec<String>> {
         fs::create_dir_all(dir)?;
         let mut created = Vec::new();
-        let vault = dir.join("coffre.key");
+        let vault = vault_path(dir)?;
         if !vault.exists() {
             write_private(&vault, &random::<32>()?)?;
             created.push(vault.display().to_string());
@@ -72,7 +72,7 @@ impl Keys {
     }
 
     pub fn load(dir: &Path) -> Result<Self> {
-        let raw = fs::read(dir.join("coffre.key")).context(t!("vault key unreadable (run « portunia-gate init »)", "clé du coffre illisible (lancez « portunia-gate init »)"))?;
+        let raw = fs::read(vault_path(dir)?).context(t!("vault key unreadable (run « portunia-gate init »)", "clé du coffre illisible (lancez « portunia-gate init »)"))?;
         let vault = LessSafeKey::new(UnboundKey::new(&AES_256_GCM, &raw).map_err(|_| anyhow!(t!("invalid vault key", "clé du coffre invalide")))?);
         let host = russh::keys::load_secret_key(dir.join("ssh_host_ed25519_key"), None).context(t!("SSH host key unreadable", "clé d'hôte SSH illisible"))?;
         let signer = Ed25519KeyPair::from_pkcs8(&fs::read(dir.join("signature.key")).context(t!("signing key unreadable", "clé de signature illisible"))?)
@@ -126,6 +126,17 @@ impl Keys {
     }
 }
 
+/// Chemin de la clé du coffre. L'ancien nom coffre.key est repris tel quel : recréer la clé
+/// à sa place rendrait tous les secrets illisibles.
+fn vault_path(dir: &Path) -> Result<PathBuf> {
+    let (path, old) = (dir.join("vault.key"), dir.join("coffre.key"));
+    if !path.exists() && old.exists() {
+        fs::rename(&old, &path).context(t!("vault key cannot be renamed", "clé du coffre impossible à renommer"))?;
+    }
+    Ok(path)
+}
+
+// Libellé d'origine, à ne pas changer : il entre dans le chiffrement des secrets déjà enregistrés.
 fn aad(purpose: &str) -> Vec<u8> {
     format!("portunia-gate-coffre-v1:{purpose}").into_bytes()
 }
@@ -151,6 +162,18 @@ mod tests {
         assert_eq!(keys.open("cible:a", &sealed).unwrap(), b"secret");
         assert!(keys.open("cible:b", &sealed).is_err(), "un secret ne sert qu'à son usage");
         assert!(Keys::create_missing(&dir).unwrap().is_empty(), "rien n'est recréé");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn ancienne_cle_reprise() {
+        let dir = std::env::temp_dir().join(format!("portunia-gate-cles-{}", uuid::Uuid::new_v4()));
+        Keys::create_missing(&dir).unwrap();
+        let sealed = Keys::load(&dir).unwrap().seal("cible:a", b"secret").unwrap();
+        fs::rename(dir.join("vault.key"), dir.join("coffre.key")).unwrap();
+        assert!(Keys::create_missing(&dir).unwrap().is_empty(), "l'ancienne clé n'est pas remplacée");
+        assert!(!dir.join("coffre.key").exists());
+        assert_eq!(Keys::load(&dir).unwrap().open("cible:a", &sealed).unwrap(), b"secret");
         fs::remove_dir_all(dir).unwrap();
     }
 }

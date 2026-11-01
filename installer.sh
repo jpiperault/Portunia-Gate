@@ -261,11 +261,11 @@ BACKUP=''
 save_vault_key() {
   local home
   home=$(getent passwd "$BACKUP_OWNER" | cut -d: -f6)
-  BACKUP=${home:-/root}/portunia-gate-coffre.key
+  BACKUP=${home:-/root}/portunia-gate-vault.key
   if [ "$MODE" = docker ]; then
-    compose cp portunia-gate:/var/lib/portunia-gate/coffre.key "$BACKUP" >/dev/null 2>&1 || die "$(t "Cannot copy the vault key." "Copie de la clé du coffre impossible.")"
+    compose cp portunia-gate:/var/lib/portunia-gate/vault.key "$BACKUP" >/dev/null 2>&1 || die "$(t "Cannot copy the vault key." "Copie de la clé du coffre impossible.")"
   else
-    cp /var/lib/portunia-gate/coffre.key "$BACKUP"
+    cp /var/lib/portunia-gate/vault.key "$BACKUP"
   fi
   chown "$BACKUP_OWNER" "$BACKUP"
   chmod 600 "$BACKUP"

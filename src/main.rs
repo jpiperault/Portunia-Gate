@@ -572,7 +572,7 @@ async fn init(config: Config, admin: &str, no_admin: bool, provisional: bool, no
     println!(
         "  {} {}",
         t!("BACK UP outside the server:", "À SAUVEGARDER hors du serveur :"),
-        state.config.data_dir.join("coffre.key").display()
+        state.config.data_dir.join("vault.key").display()
     );
 
     let has_admin = model::users(&state.db).await?.iter().any(|u| u.role == "admin");

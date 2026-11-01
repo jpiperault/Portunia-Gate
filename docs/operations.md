@@ -8,7 +8,7 @@ The `portunia-gate` command, installed by the wizard, works from any folder, wit
 
 | Item | Where | Why |
 |---|---|---|
-| **Vault key** | `/var/lib/portunia-gate/coffre.key` | Decrypts server secrets and TOTP secrets. **Lost = secrets lost.** Keep it off the server, separate from the database. |
+| **Vault key** | `/var/lib/portunia-gate/vault.key` | Decrypts server secrets and TOTP secrets. **Lost = secrets lost.** Keep it off the server, separate from the database. |
 | SSH host key | `/var/lib/portunia-gate/ssh_host_ed25519_key` | Without it, users see a new fingerprint and must accept it again. |
 | API certificate | `/var/lib/portunia-gate/api.crt` and `api.key` | Without it, Portunia shows a new fingerprint to accept. |
 | Signing key | `/var/lib/portunia-gate/signature.key` | Signs recordings. |
