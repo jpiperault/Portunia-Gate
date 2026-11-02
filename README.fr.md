@@ -241,7 +241,7 @@ Une page web pour ouvrir ses serveurs depuis n'importe quel navigateur, sans Por
 
 | | |
 |---|---|
-| Exposition | **Cloudflare Tunnel** (conseillé) : le service `cloudflared` ouvre une connexion sortante vers Cloudflare, aucun port entrant. Ou **proxy Cloudflare** : HTTPS sur le port 8446, n'accepte que les adresses de Cloudflare. |
+| Exposition | **Cloudflare Tunnel** (conseillé) : la Gate lance elle-même `cloudflared` (connexion sortante vers Cloudflare, aucun port entrant, rien à installer en root). Ou **proxy Cloudflare** : HTTPS sur le port 8446, n'accepte que les adresses de Cloudflare. |
 | Connexion | Mot de passe **et** code toujours exigés, même pour un compte qui s'en passe dans Portunia. Cinq essais par compte et vingt par adresse en dix minutes. Anti-robots **Cloudflare Turnstile** si ses clés sont réglées. |
 | Comptes | Seuls les membres du **groupe choisi** (« Accès web » par défaut). Première connexion et code perdu : pas sur le portail, mais avec Portunia ou l'administrateur. |
 | Session | Cookie « HttpOnly, Secure, SameSite=Strict », 1 heure par défaut ; fermeture après 15 minutes sans frappe (avertissement 90 s avant). |
@@ -251,9 +251,9 @@ Une page web pour ouvrir ses serveurs depuis n'importe quel navigateur, sans Por
 
 **Mise en place**
 
-1. **Créer le tunnel** dans Cloudflare Zero Trust › Networks › Tunnels › *Create a tunnel* (type Cloudflared), et copier son jeton (la longue suite après `--token`).
-2. **L'installer sur la Gate** : `sudo bash installer.sh portail` (paquet) ou `sudo ./installer.sh portail` (Docker), puis coller le jeton.
-3. **Publier l'adresse** : dans l'onglet *Public Hostname* du tunnel, ajouter l'adresse (ex. `acces.votre-domaine.fr`), type **HTTP**, URL `localhost:8445` (paquet) ou `portunia-gate:8445` (Docker).
+1. **Créer le tunnel** dans Cloudflare Zero Trust › Networks › Tunnels › *Create a tunnel* (type Cloudflared), et copier la commande d'installation affichée (elle contient le jeton).
+2. **La donner à la Gate** : dans Portunia, Administrer › Portail web › mode Cloudflare, coller la commande ou le jeton et enregistrer. Ou depuis le serveur : `sudo bash installer.sh portail`, ou `sudo portunia-gate portal tunnel -` (jeton sur l'entrée standard ; `--remove` l'arrête). La Gate télécharge `cloudflared` 2026.9.1 depuis le GitHub de Cloudflare, vérifie son empreinte SHA-256, le lance sous son propre compte et le relance s'il s'arrête. Le jeton est chiffré par le coffre. Serveur sans accès à GitHub : `PORTUNIA_GATE_CLOUDFLARED=/usr/bin/cloudflared`.
+3. **Publier l'adresse** : dans l'onglet *Public Hostname* du tunnel, ajouter l'adresse (ex. `acces.votre-domaine.fr`), type **HTTP**, URL `localhost:8445`. Puis **Tester l'adresse publique** dans l'onglet Portail web : la Gate appelle sa propre adresse publique à travers Cloudflare et vérifie que c'est elle qui répond.
 4. **Conseillé : Cloudflare Access** sur cette adresse (compte de l'entreprise exigé avant même la page de connexion), et **Turnstile** (clés à saisir dans Portunia).
 5. **Activer** dans Portunia : menu **⋯** de la Gate › **Administrer** › **Portail web** : adresse publique, groupe autorisé, durées, copier-coller, puis l'interrupteur. Créer le groupe et y ajouter les comptes concernés.
 

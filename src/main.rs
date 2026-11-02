@@ -25,6 +25,7 @@ mod replay;
 mod sshd;
 mod target;
 mod tls;
+mod tunnel;
 
 use std::{io::IsTerminal, sync::Arc};
 
@@ -145,6 +146,14 @@ enum PortalCmd {
         name: String,
         /// Address the Gate reaches the relay at, e.g. 10.0.5.20:8447.
         address: String,
+    },
+    /// Cloudflare tunnel run by the Gate: token pasted from Cloudflare (alone or with its command).
+    Tunnel {
+        /// Tunnel token (« - »: read on the standard input); without it, shows the tunnel.
+        token: Option<String>,
+        /// Removes the token: the Gate stops its tunnel.
+        #[arg(long, conflicts_with = "token")]
+        remove: bool,
     },
     /// Lists the dedicated relays.
     RelayList,
@@ -524,7 +533,7 @@ async fn run(cli: Cli) -> Result<()> {
                     tokio::time::sleep(std::time::Duration::from_secs(24 * 3600)).await;
                 }
             });
-            tokio::try_join!(sshd::run(state.clone()), api::run(state.clone()), portal::run(state.clone()), relay::run(state.clone()), health::run(state.clone()), live::run(state.clone()))?;
+            tokio::try_join!(sshd::run(state.clone()), api::run(state.clone()), portal::run(state.clone()), relay::run(state.clone()), tunnel::run(state.clone()), health::run(state.clone()), live::run(state.clone()))?;
             Ok(())
         }
         Command::User(cmd) => user_cmd(&state, cmd).await,
@@ -948,6 +957,35 @@ async fn portal_cmd(state: &State, cmd: PortalCmd) -> Result<()> {
             audit::log(&state.db, "console", "relais.ajoute", json!({ "nom": entry.nom, "adresse": entry.adresse })).await?;
             println!("{}", t!("On the relay machine:", "Sur la machine du relais :"));
             println!("  sudo bash installer.sh relay {code}");
+            return Ok(());
+        }
+        PortalCmd::Tunnel { token, remove } => {
+            if remove || token.is_some() {
+                // « - » : le jeton n'apparaît pas dans la liste des processus.
+                let token = match token.as_deref() {
+                    Some("-") => {
+                        let mut line = String::new();
+                        std::io::stdin().read_line(&mut line)?;
+                        anyhow::ensure!(!line.trim().is_empty(), t!("Tunnel token missing.", "Jeton du tunnel manquant."));
+                        line
+                    }
+                    other => other.unwrap_or_default().to_string(),
+                };
+                let info = tunnel::set_token(state, &token).await?;
+                let tunnel_id = info.as_ref().map(|i| i.tunnel.clone());
+                audit::log(&state.db, "console", "portail.tunnel", json!({ "tunnel": tunnel_id })).await?;
+                if let Some(id) = tunnel_id {
+                    println!("✓ {} {id}", t!("Token saved, tunnel", "Jeton enregistré, tunnel"));
+                    println!("  {}", t!("The Gate starts it within seconds in Cloudflare mode (portunia-gate portal expose cloudflare).", "La Gate le démarre sous quelques secondes en mode Cloudflare (portunia-gate portal expose cloudflare)."));
+                } else {
+                    println!("✓ {}", t!("Token removed: the Gate stops its tunnel", "Jeton effacé : la Gate arrête son tunnel"));
+                }
+                return Ok(());
+            }
+            let r = tunnel::report(state).await?;
+            println!("{} {}", t!("Token:", "Jeton :"), if r["jeton_defini"] == json!(true) { r["tunnel_id"].as_str().unwrap_or("?") } else { "—" });
+            println!("{} {}", t!("Public hostname service:", "Service du nom public :"), r["service"].as_str().unwrap_or_default());
+            println!("{}", t!("Live state: Portunia › Administer › Web portal.", "État en direct : Portunia › Administrer › Portail web."));
             return Ok(());
         }
         PortalCmd::RelayList => {

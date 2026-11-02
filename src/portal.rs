@@ -53,6 +53,17 @@ use crate::{
 };
 
 const COOKIE: &str = "portunia_gate_portail";
+/// Réponse propre à ce démarrage de la Gate : l'essai de l'adresse publique vérifie que c'est elle.
+pub const PING_PATH: &str = "/.well-known/portunia-gate";
+static INSTANCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+pub fn instance_id() -> &'static str {
+    INSTANCE.get_or_init(|| Uuid::new_v4().to_string())
+}
+
+async fn ping() -> &'static str {
+    instance_id()
+}
 /// Avertissement avant la fermeture pour inactivité.
 const IDLE_WARNING: Duration = Duration::from_secs(90);
 
@@ -392,6 +403,7 @@ fn build_router(portal: Portal) -> Router {
     let portal = Arc::new(portal);
     Router::new()
         .route("/", get(page_index))
+        .route(PING_PATH, get(ping))
         .route("/session/{nom}", get(page_session))
         .route("/static/{fichier}", get(asset))
         .route("/api/etat", get(status))
@@ -1084,23 +1096,6 @@ async fn bridge(state: &State, mut socket: WebSocket, user: &str, ticket: &str, 
 }
 
 // ---------- Administration (appelée par l'API) ----------
-
-/// État du tunnel Cloudflare : la page « /ready » des métriques de cloudflared.
-pub async fn tunnel_status(state: &State) -> &'static str {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let probe = async {
-        let mut tcp = tokio::net::TcpStream::connect(state.config.tunnel_metrics.as_str()).await?;
-        tcp.write_all(b"GET /ready HTTP/1.0\r\nHost: localhost\r\n\r\n").await?;
-        let mut buf = [0u8; 64];
-        let n = tcp.read(&mut buf).await?;
-        Ok::<_, std::io::Error>(String::from_utf8_lossy(&buf[..n]).contains(" 200 "))
-    };
-    match tokio::time::timeout(Duration::from_secs(2), probe).await {
-        Ok(Ok(true)) => "relie",
-        Ok(Ok(false)) => "deconnecte",
-        _ => "absent",
-    }
-}
 
 /// Clé du secret Turnstile, chiffrée par le coffre de la Gate.
 pub fn seal_turnstile(state: &State, secret: &str) -> Result<String> {

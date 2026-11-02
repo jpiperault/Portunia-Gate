@@ -24,6 +24,9 @@ pub struct Config {
     pub portal_tunnel_peers: Vec<String>,
     /// État du tunnel Cloudflare (cloudflared) : PORTUNIA_GATE_TUNNEL_METRICS (par défaut 127.0.0.1:20241).
     pub tunnel_metrics: String,
+    /// Tunnel géré : cloudflared déjà présent (machine sans accès à GitHub) au lieu de celui que
+    /// la Gate télécharge : PORTUNIA_GATE_CLOUDFLARED.
+    pub cloudflared: Option<PathBuf>,
     /// Espace libre minimal pour ouvrir une session enregistrée : PORTUNIA_GATE_MIN_FREE_MB
     /// (par défaut 512). Sous la moitié, les sessions enregistrées en cours se ferment.
     pub min_free_mb: u64,
@@ -52,6 +55,7 @@ impl Config {
             portal_tunnel_peers: crate::portal::parse_networks(&[text("PORTUNIA_GATE_PORTAL_TUNNEL_PEERS").unwrap_or_default()])
                 .map_err(|bad| anyhow::anyhow!("PORTUNIA_GATE_PORTAL_TUNNEL_PEERS : {bad}"))?,
             tunnel_metrics: text("PORTUNIA_GATE_TUNNEL_METRICS").unwrap_or_else(|| "127.0.0.1:20241".into()),
+            cloudflared: text("PORTUNIA_GATE_CLOUDFLARED").map(PathBuf::from),
             min_free_mb: text("PORTUNIA_GATE_MIN_FREE_MB").and_then(|v| v.parse().ok()).unwrap_or(512),
         })
     }

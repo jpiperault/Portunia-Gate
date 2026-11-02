@@ -103,7 +103,7 @@ rm ~/portunia-gate-vault.key                                      # on the serve
 | Information for Portunia | `sudo bash installer.sh info` | Address and fingerprint to give to users. |
 | Update | `sudo bash installer.sh update` | Installs the latest version and restarts. **Open sessions are cut.** |
 | Create an administrator | `sudo bash installer.sh admin julien` | Backup administrator with a temporary password, for example if the only administrator lost their phone. |
-| Web portal | `sudo bash installer.sh portal` | Installs Cloudflare Tunnel (see [Web portal](#web-portal)). |
+| Web portal | `sudo bash installer.sh portal` | Hands the Cloudflare tunnel token to the Gate (same as Administer › Web portal, see [Web portal](#web-portal)). |
 
 With Docker, run the wizard from the repository folder (`sudo ./installer.sh`).
 
@@ -228,7 +228,7 @@ A web page to open your servers from any browser, without Portunia: sign-in, lis
 
 | | |
 |---|---|
-| Exposure | **Cloudflare Tunnel** (recommended): the `cloudflared` service opens an outbound connection to Cloudflare, no inbound port. Or **Cloudflare proxy**: HTTPS on port 8446, accepting Cloudflare addresses only. |
+| Exposure | **Cloudflare Tunnel** (recommended): the Gate runs `cloudflared` itself (outbound connection to Cloudflare, no inbound port, nothing to install as root). Or **Cloudflare proxy**: HTTPS on port 8446, accepting Cloudflare addresses only. |
 | Sign-in | Password **and** code always required, even for an account that does without in Portunia. Five attempts per account and twenty per address in ten minutes. **Cloudflare Turnstile** anti-bot check when its keys are set. |
 | Accounts | Members of the **chosen group** only ("Accès web" by default). First sign-in and lost code: not on the portal, but with Portunia or the administrator. |
 | Session | "HttpOnly, Secure, SameSite=Strict" cookie, 1 hour by default; closed after 15 minutes without typing (warning 90 s before). |
@@ -238,9 +238,9 @@ A web page to open your servers from any browser, without Portunia: sign-in, lis
 
 **Setup**
 
-1. **Create the tunnel** in Cloudflare Zero Trust › Networks › Tunnels › *Create a tunnel* (Cloudflared type) and copy its token (the long string after `--token`).
-2. **Install it on the Gate**: `sudo bash installer.sh portal` (package) or `sudo ./installer.sh portal` (Docker), then paste the token.
-3. **Publish the address**: in the tunnel's *Public Hostname* tab, add the address (e.g. `access.your-domain.com`), type **HTTP**, URL `localhost:8445` (package) or `portunia-gate:8445` (Docker).
+1. **Create the tunnel** in Cloudflare Zero Trust › Networks › Tunnels › *Create a tunnel* (Cloudflared type) and copy the install command it shows (it holds the token).
+2. **Give it to the Gate**: in Portunia, Administer › Web portal › Cloudflare mode, paste the command or the token and save. Or from the server: `sudo bash installer.sh portal`, or `sudo portunia-gate portal tunnel -` (token on the standard input; `--remove` stops it). The Gate downloads `cloudflared` 2026.9.1 from Cloudflare's GitHub, checks its SHA-256 fingerprint, runs it under its own account and restarts it if it stops. The token is encrypted by the vault. Server without access to GitHub: `PORTUNIA_GATE_CLOUDFLARED=/usr/bin/cloudflared`.
+3. **Publish the address**: in the tunnel's *Public Hostname* tab, add the address (e.g. `access.your-domain.com`), type **HTTP**, URL `localhost:8445`. Then **Test the public address** in the Web portal tab: the Gate calls its own public address through Cloudflare and checks it answers itself.
 4. **Recommended: Cloudflare Access** on that address (company account required before the sign-in page is even shown), and **Turnstile** (keys entered in Portunia).
 5. **Turn it on** in Portunia: Gate **⋯** menu › **Administer** › **Web portal**: public address, allowed group, durations, copy and paste, then the switch. Create the group and add the relevant accounts.
 

@@ -38,6 +38,8 @@ RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallFilter=~@privileged @resources
+# Un appel refusé échoue au lieu de tuer le processus (cloudflared, lancé par la Gate, en essaie).
+SystemCallErrorNumber=EPERM
 CapabilityBoundingSet=
 AmbientCapabilities=
 

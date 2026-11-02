@@ -104,6 +104,7 @@ pub async fn run(state: Arc<State>) -> anyhow::Result<()> {
         .route("/api/v1/admin/portail", get(admin_portal).put(admin_portal_update))
         .route("/api/v1/admin/portail/fermer-sessions", post(admin_portal_close))
         .route("/api/v1/admin/portail/relais", post(admin_relay_add))
+        .route("/api/v1/admin/portail/tester", post(admin_portal_check))
         .route("/api/v1/admin/portail/relais/{id}", delete(admin_relay_remove))
         .route("/api/v1/audit/sessions", get(audit_sessions))
         .route("/api/v1/audit/sessions/{id}/enregistrement", get(audit_recording))
@@ -1812,7 +1813,8 @@ async fn admin_portal(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
         "turnstile_site": s.turnstile_site,
         "turnstile_secret_defini": s.turnstile_secret.is_some(),
         "ecoute": { "tunnel": state.config.portal_listen, "proxy": state.config.portal_tls_listen },
-        "tunnel": crate::portal::tunnel_status(state).await,
+        "tunnel": crate::tunnel::summary(state).await,
+        "tunnel_gere": crate::tunnel::report(state).await?,
         "sessions_en_cours": state.web.active(),
         "connexions_jour": logins,
         "echecs_jour": failures,
@@ -1834,6 +1836,8 @@ struct PortalBody {
     proxys: Option<Vec<String>>,
     entete: Option<String>,
     reseaux: Option<Vec<String>>,
+    /// Jeton du tunnel Cloudflare géré ; vide : l'efface ; absent : le garde.
+    tunnel_jeton: Option<String>,
 }
 
 async fn admin_portal_update(AxState(api): Ctx, headers: HeaderMap, Json(body): Json<PortalBody>) -> ApiResult {
@@ -1879,6 +1883,10 @@ async fn admin_portal_update(AxState(api): Ctx, headers: HeaderMap, Json(body): 
         let sealed = if secret.trim().is_empty() { String::new() } else { crate::portal::seal_turnstile(state, secret.trim())? };
         model::set_setting(db, "portail_turnstile_secret", json!(sealed)).await?;
         changed.insert("turnstile_secret".into(), json!(if sealed.is_empty() { "effacé" } else { "changé" }));
+    }
+    if let Some(token) = body.tunnel_jeton {
+        let info = crate::tunnel::set_token(state, &token).await.map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
+        audit::note(db, &actor.login, "portail.tunnel", json!({ "tunnel": info.map(|i| i.tunnel) })).await;
     }
     if body.mode.is_some() || body.proxys.is_some() || body.entete.is_some() || body.reseaux.is_some() {
         let before = crate::portal::exposure(state);
@@ -1933,6 +1941,11 @@ async fn admin_relay_remove(AxState(api): Ctx, headers: HeaderMap, Path(id): Pat
     state.web.close_all();
     audit::note(&state.db, &actor.login, "relais.revoque", json!({ "nom": name })).await;
     Ok(Json(json!({ "etat": "ok" })))
+}
+
+async fn admin_portal_check(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
+    admin(&api, &headers).await?;
+    Ok(Json(crate::tunnel::check(&api.state).await?))
 }
 
 async fn admin_portal_close(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {

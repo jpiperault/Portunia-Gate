@@ -544,18 +544,6 @@ set_env() {
   if grep -q "^$1=" "$ENV_FILE"; then sed -i "s|^$1=.*|$1=$2|" "$ENV_FILE"; else echo "$1=$2" >>"$ENV_FILE"; fi
 }
 
-# cloudflared depuis le dépôt de Cloudflare (mis à jour avec le système).
-install_cloudflared() {
-  if command -v cloudflared >/dev/null; then ok "$(t "cloudflared already installed" "cloudflared déjà installé")"; return; fi
-  install -d -m 755 /usr/share/keyrings
-  curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg -o /usr/share/keyrings/cloudflare-main.gpg ||
-    die "$(t "Cannot download the Cloudflare repository key." "Téléchargement de la clé du dépôt Cloudflare impossible.")"
-  echo "deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared any main" \
-    >/etc/apt/sources.list.d/cloudflared.list
-  { apt-get update -qq && apt-get install -y -qq cloudflared; } >/dev/null || die "$(t "Cannot install cloudflared." "Installation de cloudflared impossible.")"
-  ok "$(t "cloudflared installed (Cloudflare repository)" "cloudflared installé (dépôt Cloudflare)")"
-}
-
 # Relais dédié : cette machine publie le portail d'une Gate. Sans base, sans coffre et sans
 # aucun appel vers la Gate : c'est elle qui se connecte ici.
 setup_relay() {
@@ -590,19 +578,14 @@ setup_portal() {
   token=$(tr -d '[:space:]' <<<"$token")
   [ -n "$token" ] || die "$(t "Tunnel token missing." "Jeton du tunnel manquant.")"
   [[ "$token" =~ ^[A-Za-z0-9+/=_-]+$ ]] || die "$(t "This does not look like a Cloudflare tunnel token." "Ce jeton ne ressemble pas à un jeton de tunnel Cloudflare.")"
-  if [ "$MODE" = docker ]; then
-    set_env PORTUNIA_GATE_TUNNEL_TOKEN "$token"
-    set_env COMPOSE_PROFILES portail
-    local out
-    out=$(compose up -d 2>&1) || { echo "$out"; die "$(t "The tunnel does not start." "Le tunnel ne démarre pas.")"; }
-    service=portunia-gate:8445
-  else
-    install_cloudflared
-    cloudflared service uninstall >/dev/null 2>&1 || true
-    cloudflared service install "$token" >/dev/null 2>&1 || die "$(t "Cannot install the cloudflared service." "Installation du service cloudflared impossible.")"
-    service=localhost:8445
+  # La Gate lance elle-même cloudflared (sans root) ; le jeton passe par l'entrée standard.
+  printf '%s\n' "$token" | hcmd portal tunnel - >/dev/null || die "$(t "The token was refused." "Le jeton a été refusé.")"
+  hcmd portal expose cloudflare >/dev/null || die "$(t "Cannot switch the portal to Cloudflare mode." "Passage du portail en mode Cloudflare impossible.")"
+  service=localhost:8445
+  if [ "$MODE" != docker ] && systemctl is-active --quiet cloudflared 2>/dev/null; then
+    warn "$(t "A cloudflared service installed earlier is still running. Once the Gate's tunnel is connected (Administer › Web portal), remove it: sudo cloudflared service uninstall" "Un service cloudflared installé auparavant tourne encore. Une fois le tunnel de la Gate relié (Administrer › Portail web), retirez-le : sudo cloudflared service uninstall")"
   fi
-  ok "$(t "Tunnel installed: outgoing connection to Cloudflare, no port to open" "Tunnel installé : connexion sortante vers Cloudflare, aucun port à ouvrir")"
+  ok "$(t "Tunnel handed to the Gate: outgoing connection to Cloudflare, no port to open" "Tunnel confié à la Gate : connexion sortante vers Cloudflare, aucun port à ouvrir")"
   echo
   if [ "$L" = fr ]; then
     echo "  Dans Cloudflare, onglet « Public Hostname » du tunnel : ajoutez votre adresse"

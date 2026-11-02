@@ -47,8 +47,9 @@ services:
     volumes:
       - donnees:/var/lib/portunia-gate
 
-  # Cloudflare Tunnel : connexion sortante vers Cloudflare, aucun port entrant.
-  # Dans Cloudflare Zero Trust, le nom public du tunnel pointe vers http://portunia-gate:8445.
+  # Ancienne façon, gardée pour les installations existantes : la Gate lance désormais elle-même
+  # cloudflared (jeton collé dans Administrer › Portail web, service http://localhost:8445).
+  # Ici, le nom public du tunnel pointe vers http://portunia-gate:8445.
   cloudflared:
     image: cloudflare/cloudflared:2026.9.1
     profiles: ["portail"]
