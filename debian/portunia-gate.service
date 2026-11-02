@@ -12,6 +12,8 @@ EnvironmentFile=/etc/portunia-gate/portunia-gate.env
 ExecStart=/usr/lib/portunia-gate/portunia-gate serve
 Restart=on-failure
 RestartSec=5
+# Un arrêt par signal (SIGPIPE compris) n'est jamais un arrêt voulu : relancer.
+RestartForceExitStatus=SIGPIPE
 UMask=0077
 LimitNOFILE=65536
 LimitCORE=0

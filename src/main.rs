@@ -425,15 +425,20 @@ fn parse_days(text: &str) -> Result<i16> {
 
 #[tokio::main]
 async fn main() {
-    // Sortie lue par « head » ou un pipe fermé : s'arrêter sans erreur, comme les outils Unix.
-    #[cfg(unix)]
-    unsafe {
-        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
-    }
     lang::set_process(lang::from_env());
     let cli = Cli::parse();
+    let service = matches!(cli.command, Command::Serve | Command::Edge(EdgeCmd::Serve));
+    // Commandes d'administration : sortie lue par « head » ou un pipe fermé, s'arrêter sans erreur,
+    // comme les outils Unix. Jamais pour le service : une connexion à la base fermée par PostgreSQL
+    // (socket Unix) le tuerait d'un SIGPIPE, que systemd prend pour un arrêt normal.
+    #[cfg(unix)]
+    if !service {
+        unsafe {
+            libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+        }
+    }
     // Le service trace son activité ; les commandes d'administration n'affichent que les avertissements.
-    let default_filter = if matches!(cli.command, Command::Serve | Command::Edge(EdgeCmd::Serve)) {
+    let default_filter = if service {
         "portunia_gate=info,russh=warn"
     } else {
         "portunia_gate=warn,russh=warn"
