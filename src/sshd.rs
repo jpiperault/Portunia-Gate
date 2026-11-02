@@ -1210,10 +1210,21 @@ where
 async fn relay_tcp(ctx: Arc<Ctx>, target: Target, channel: Channel<Msg>) -> Result<()> {
     let id = Uuid::new_v4();
     let db = &ctx.state.db;
-    let address = crate::target::addresses(&target.host, target.port as u16).await?;
-    let tcp = tokio::time::timeout(Duration::from_secs(10), tokio::net::TcpStream::connect(&address[..]))
-        .await
-        .map_err(|_| anyhow::anyhow!(t!(format!("{} unreachable (timed out)", target.name), format!("{} injoignable (délai dépassé)", target.name))))??;
+    let connect = async {
+        let address = crate::target::addresses(&target.host, target.port as u16).await?;
+        tokio::time::timeout(Duration::from_secs(10), tokio::net::TcpStream::connect(&address[..]))
+            .await
+            .map_err(|_| anyhow::anyhow!(t!(format!("{} unreachable (timed out)", target.name), format!("{} injoignable (délai dépassé)", target.name))))?
+            .map_err(anyhow::Error::from)
+    };
+    // Cible refusée ou injoignable : le canal se ferme tout de suite, le client n'attend pas.
+    let tcp = match connect.await {
+        Ok(tcp) => tcp,
+        Err(e) => {
+            let _ = channel.close().await;
+            return Err(e);
+        }
+    };
     let detail = if target.is_rdp() { "rdp" } else { "ssh -J" };
     model::session_start(db, id, ctx.user.id, target.id, "rebond", detail, &ctx.addr).await?;
     audit::note(
