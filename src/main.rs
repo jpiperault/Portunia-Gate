@@ -984,7 +984,7 @@ async fn portal_cmd(state: &State, cmd: PortalCmd) -> Result<()> {
             }
             let r = tunnel::report(state).await?;
             println!("{} {}", t!("Token:", "Jeton :"), if r["jeton_defini"] == json!(true) { r["tunnel_id"].as_str().unwrap_or("?") } else { "—" });
-            println!("{} {}", t!("Public hostname service:", "Service du nom public :"), r["service"].as_str().unwrap_or_default());
+            println!("{} {}", t!("Route Service URL:", "Service URL de la route :"), r["service"].as_str().unwrap_or_default());
             println!("{}", t!("Live state: Portunia › Administer › Web portal.", "État en direct : Portunia › Administrer › Portail web."));
             return Ok(());
         }

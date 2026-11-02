@@ -338,7 +338,7 @@ pub async fn check(state: &State) -> Result<Value> {
     let (code, location, body) = answer;
     let (ok, message) = match code {
         200 if body.trim() == expected => (true, t!("This Gate answers at the public address.", "Cette Gate répond à l'adresse publique.").to_string()),
-        200 => (false, t!("Another machine answers at this address: check the tunnel's public hostname.", "Une autre machine répond à cette adresse : vérifiez le nom public du tunnel.").to_string()),
+        200 => (false, t!("Another machine answers at this address: check the tunnel's route (Routes tab).", "Une autre machine répond à cette adresse : vérifiez la route du tunnel (onglet Routes).").to_string()),
         301..=308 if location.contains("cloudflareaccess.com") => (
             true,
             t!("The address is protected by Cloudflare Access: the Gate cannot look further, which is expected.", "L'adresse est protégée par Cloudflare Access : la Gate ne peut pas voir au-delà, c'est normal.").to_string(),
@@ -346,8 +346,8 @@ pub async fn check(state: &State) -> Result<Value> {
         530 => (false, t!("Cloudflare does not reach the tunnel: is it connected?", "Cloudflare ne joint pas le tunnel : est-il relié ?").to_string()),
         502 | 503 | 504 => (
             false,
-            t!("Cloudflare reaches the tunnel but not the portal: in the public hostname, the service must be ", "Cloudflare joint le tunnel mais pas le portail : dans le nom public, le service doit être ").to_string()
-                + &format!("HTTP localhost:{}", state.config.portal_listen.rsplit(':').next().unwrap_or("8445")),
+            t!("Cloudflare reaches the tunnel but not the portal: in the tunnel's route, the Service URL must be ", "Cloudflare joint le tunnel mais pas le portail : dans la route du tunnel, la Service URL doit être ").to_string()
+                + &format!("http://localhost:{}", state.config.portal_listen.rsplit(':').next().unwrap_or("8445")),
         ),
         0 => (false, format!("{} {body}", t!("Address unreachable:", "Adresse injoignable :"))),
         c => (false, format!("{} {c}", t!("Unexpected answer:", "Réponse inattendue :"))),

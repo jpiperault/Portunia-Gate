@@ -567,11 +567,11 @@ setup_relay() {
 setup_portal() {
   echo "${B}$(t "Portunia Gate — web portal through Cloudflare Tunnel" "Portunia Gate — portail web par Cloudflare Tunnel")${N}"
   if [ "$L" = fr ]; then
-    echo "  Dans Cloudflare Zero Trust › Networks › Tunnels, créez un tunnel « Cloudflared »,"
-    echo "  puis copiez le jeton de sa commande d'installation (la longue suite après --token)."
+    echo "  Dans Cloudflare : Networking › Tunnels › Create a tunnel, donnez-lui un nom,"
+    echo "  puis copiez le jeton de la commande d'installation (la longue suite après --token)."
   else
-    echo "  In Cloudflare Zero Trust › Networks › Tunnels, create a « Cloudflared » tunnel,"
-    echo "  then copy the token from its install command (the long string after --token)."
+    echo "  In Cloudflare: Networking › Tunnels › Create a tunnel, give it a name,"
+    echo "  then copy the token from the installation command (the long string after --token)."
   fi
   local token=${PORTUNIA_GATE_TUNNEL_TOKEN:-} service
   if [ -z "$token" ] && interactive; then read -r -s -p "  $(t "Tunnel token:" "Jeton du tunnel :") " token; echo; fi
@@ -588,12 +588,12 @@ setup_portal() {
   ok "$(t "Tunnel handed to the Gate: outgoing connection to Cloudflare, no port to open" "Tunnel confié à la Gate : connexion sortante vers Cloudflare, aucun port à ouvrir")"
   echo
   if [ "$L" = fr ]; then
-    echo "  Dans Cloudflare, onglet « Public Hostname » du tunnel : ajoutez votre adresse"
-    echo "  (ex. acces.votre-domaine.fr), type ${B}HTTP${N}, URL ${B}$service${N}."
+    echo "  Dans Cloudflare, onglet Routes du tunnel › Add route › Published application :"
+    echo "  votre adresse (ex. acces.votre-domaine.fr), Service URL ${B}http://$service${N}."
     echo "  Puis dans Portunia : Administrer › Portail web › activez le portail."
   else
-    echo "  In Cloudflare, the tunnel's « Public Hostname » tab: add your address"
-    echo "  (e.g. access.your-domain.com), type ${B}HTTP${N}, URL ${B}$service${N}."
+    echo "  In Cloudflare, the tunnel's Routes tab › Add route › Published application:"
+    echo "  your address (e.g. access.your-domain.com), Service URL ${B}http://$service${N}."
     echo "  Then in Portunia: Administer › Web portal › enable the portal."
   fi
 }

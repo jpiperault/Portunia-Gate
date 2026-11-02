@@ -238,9 +238,9 @@ A web page to open your servers from any browser, without Portunia: sign-in, lis
 
 **Setup**
 
-1. **Create the tunnel** in Cloudflare Zero Trust › Networks › Tunnels › *Create a tunnel* (Cloudflared type) and copy the install command it shows (it holds the token).
+1. **Create the tunnel** in Cloudflare: **Networking › Tunnels › Create a tunnel**, a name, then copy the installation command shown, for any system (it holds the token; no need to run it).
 2. **Give it to the Gate**: in Portunia, Administer › Web portal › Cloudflare mode, paste the command or the token and save. Or from the server: `sudo bash installer.sh portal`, or `sudo portunia-gate portal tunnel -` (token on the standard input; `--remove` stops it). The Gate downloads `cloudflared` 2026.9.1 from Cloudflare's GitHub, checks its SHA-256 fingerprint, runs it under its own account and restarts it if it stops. The token is encrypted by the vault. Server without access to GitHub: `PORTUNIA_GATE_CLOUDFLARED=/usr/bin/cloudflared`.
-3. **Publish the address**: in the tunnel's *Public Hostname* tab, add the address (e.g. `access.your-domain.com`), type **HTTP**, URL `localhost:8445`. Then **Test the public address** in the Web portal tab: the Gate calls its own public address through Cloudflare and checks it answers itself.
+3. **Publish the address**: once the tunnel is *Healthy*, its **Routes** tab › **Add route** › **Published application**: subdomain and domain (e.g. `access.your-domain.com`), **Service URL** `http://localhost:8445`. Then **Test the public address** in the Web portal tab: the Gate calls its own public address through Cloudflare and checks it answers itself.
 4. **Recommended: Cloudflare Access** on that address (company account required before the sign-in page is even shown), and **Turnstile** (keys entered in Portunia).
 5. **Turn it on** in Portunia: Gate **⋯** menu › **Administer** › **Web portal**: public address, allowed group, durations, copy and paste, then the switch. Create the group and add the relevant accounts.
 

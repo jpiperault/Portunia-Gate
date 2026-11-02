@@ -251,9 +251,9 @@ Une page web pour ouvrir ses serveurs depuis n'importe quel navigateur, sans Por
 
 **Mise en place**
 
-1. **Créer le tunnel** dans Cloudflare Zero Trust › Networks › Tunnels › *Create a tunnel* (type Cloudflared), et copier la commande d'installation affichée (elle contient le jeton).
+1. **Créer le tunnel** dans Cloudflare : **Networking › Tunnels › Create a tunnel**, un nom, puis copier la commande d'installation affichée, pour n'importe quel système (elle contient le jeton ; inutile de l'exécuter).
 2. **La donner à la Gate** : dans Portunia, Administrer › Portail web › mode Cloudflare, coller la commande ou le jeton et enregistrer. Ou depuis le serveur : `sudo bash installer.sh portail`, ou `sudo portunia-gate portal tunnel -` (jeton sur l'entrée standard ; `--remove` l'arrête). La Gate télécharge `cloudflared` 2026.9.1 depuis le GitHub de Cloudflare, vérifie son empreinte SHA-256, le lance sous son propre compte et le relance s'il s'arrête. Le jeton est chiffré par le coffre. Serveur sans accès à GitHub : `PORTUNIA_GATE_CLOUDFLARED=/usr/bin/cloudflared`.
-3. **Publier l'adresse** : dans l'onglet *Public Hostname* du tunnel, ajouter l'adresse (ex. `acces.votre-domaine.fr`), type **HTTP**, URL `localhost:8445`. Puis **Tester l'adresse publique** dans l'onglet Portail web : la Gate appelle sa propre adresse publique à travers Cloudflare et vérifie que c'est elle qui répond.
+3. **Publier l'adresse** : une fois le tunnel *Healthy*, son onglet **Routes** › **Add route** › **Published application** : sous-domaine et domaine (ex. `acces.votre-domaine.fr`), **Service URL** `http://localhost:8445`. Puis **Tester l'adresse publique** dans l'onglet Portail web : la Gate appelle sa propre adresse publique à travers Cloudflare et vérifie que c'est elle qui répond.
 4. **Conseillé : Cloudflare Access** sur cette adresse (compte de l'entreprise exigé avant même la page de connexion), et **Turnstile** (clés à saisir dans Portunia).
 5. **Activer** dans Portunia : menu **⋯** de la Gate › **Administrer** › **Portail web** : adresse publique, groupe autorisé, durées, copier-coller, puis l'interrupteur. Créer le groupe et y ajouter les comptes concernés.
 
