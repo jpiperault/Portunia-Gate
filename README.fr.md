@@ -251,11 +251,13 @@ Une page web pour ouvrir ses serveurs depuis n'importe quel navigateur, sans Por
 
 **Mise en place**
 
-1. **Créer le tunnel** dans Cloudflare : **Networking › Tunnels › Create a tunnel**, un nom, puis copier la commande d'installation affichée, pour n'importe quel système (elle contient le jeton ; inutile de l'exécuter).
+1. **Créer le tunnel** dans Cloudflare : **Networking › Tunnels › Create Tunnel**, un nom (ex. `portunia-gate`), puis copier la commande d'installation affichée, pour n'importe quel système. Elle contient le jeton ; ne pas l'exécuter.
 2. **La donner à la Gate** : dans Portunia, Administrer › Portail web › mode Cloudflare, coller la commande ou le jeton et enregistrer. Ou depuis le serveur : `sudo bash installer.sh portail`, ou `sudo portunia-gate portal tunnel -` (jeton sur l'entrée standard ; `--remove` l'arrête). La Gate télécharge `cloudflared` 2026.9.1 depuis le GitHub de Cloudflare, vérifie son empreinte SHA-256, le lance sous son propre compte et le relance s'il s'arrête. Le jeton est chiffré par le coffre. Serveur sans accès à GitHub : `PORTUNIA_GATE_CLOUDFLARED=/usr/bin/cloudflared`.
-3. **Publier l'adresse** : une fois le tunnel *Healthy*, son onglet **Routes** › **Add route** › **Published application** : sous-domaine et domaine (ex. `acces.votre-domaine.fr`), **Service URL** `http://localhost:8445`. Puis **Tester l'adresse publique** dans l'onglet Portail web : la Gate appelle sa propre adresse publique à travers Cloudflare et vérifie que c'est elle qui répond.
-4. **Conseillé : Cloudflare Access** sur cette adresse (compte de l'entreprise exigé avant même la page de connexion), et **Turnstile** (clés à saisir dans Portunia).
-5. **Activer** dans Portunia : menu **⋯** de la Gate › **Administrer** › **Portail web** : adresse publique, groupe autorisé, durées, copier-coller, puis l'interrupteur. Créer le groupe et y ajouter les comptes concernés.
+   Le tunnel passe alors à **Healthy** dans Cloudflare.
+3. **Publier l'adresse** : dans le tunnel, onglet **Routes** › **Add route** › **Published application**. **Subdomain** et **Domain** (le *Full hostname*, ex. `acces.votre-domaine.fr`, est l'adresse publique), **Path** vide, **Service URL** `http://localhost:8445`, puis **Add route** (Cloudflare crée l'enregistrement DNS). Jamais de route `ssh://` ou `rdp://` vers vos serveurs : elle contournerait la Gate (ni contrôle, ni coffre, ni enregistrement, ni journal).
+4. **Vérifier** : dans l'onglet Portail web, adresse publique `https://` + Full hostname, **Enregistrer**, puis **Tester l'adresse publique** : la Gate appelle sa propre adresse publique à travers Cloudflare et vérifie que c'est elle qui répond.
+5. **Conseillé : Cloudflare Access** sur cette adresse (compte de l'entreprise exigé avant même la page de connexion), et **Turnstile** (clés à saisir dans Portunia).
+6. **Activer** dans Portunia : menu **⋯** de la Gate › **Administrer** › **Portail web** : adresse publique, groupe autorisé, durées, copier-coller, puis l'interrupteur. Créer le groupe et y ajouter les comptes concernés.
 
 Couper le portail (interrupteur) affiche « Portail fermé » et ferme aussitôt les sessions web en cours ; **Fermer toutes les sessions web** les ferme sans couper le portail.
 

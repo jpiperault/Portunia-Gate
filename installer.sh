@@ -567,17 +567,15 @@ setup_relay() {
 setup_portal() {
   echo "${B}$(t "Portunia Gate — web portal through Cloudflare Tunnel" "Portunia Gate — portail web par Cloudflare Tunnel")${N}"
   if [ "$L" = fr ]; then
-    echo "  Dans Cloudflare : Networking › Tunnels › Create a tunnel, donnez-lui un nom,"
-    echo "  puis copiez le jeton de la commande d'installation (la longue suite après --token)."
+    echo "  Dans Cloudflare : Networking › Tunnels › Create Tunnel, un nom (ex. portunia-gate),"
+    echo "  puis copiez la commande d'installation affichée (ne l'exécutez pas) : elle contient le jeton."
   else
-    echo "  In Cloudflare: Networking › Tunnels › Create a tunnel, give it a name,"
-    echo "  then copy the token from the installation command (the long string after --token)."
+    echo "  In Cloudflare: Networking › Tunnels › Create Tunnel, a name (e.g. portunia-gate),"
+    echo "  then copy the installation command shown (do not run it): it holds the token."
   fi
   local token=${PORTUNIA_GATE_TUNNEL_TOKEN:-} service
-  if [ -z "$token" ] && interactive; then read -r -s -p "  $(t "Tunnel token:" "Jeton du tunnel :") " token; echo; fi
-  token=$(tr -d '[:space:]' <<<"$token")
-  [ -n "$token" ] || die "$(t "Tunnel token missing." "Jeton du tunnel manquant.")"
-  [[ "$token" =~ ^[A-Za-z0-9+/=_-]+$ ]] || die "$(t "This does not look like a Cloudflare tunnel token." "Ce jeton ne ressemble pas à un jeton de tunnel Cloudflare.")"
+  if [ -z "$token" ] && interactive; then read -r -s -p "  $(t "Command or token:" "Commande ou jeton :") " token; echo; fi
+  [ -n "$(tr -d '[:space:]' <<<"$token")" ] || die "$(t "Tunnel token missing." "Jeton du tunnel manquant.")"
   # La Gate lance elle-même cloudflared (sans root) ; le jeton passe par l'entrée standard.
   printf '%s\n' "$token" | hcmd portal tunnel - >/dev/null || die "$(t "The token was refused." "Le jeton a été refusé.")"
   hcmd portal expose cloudflare >/dev/null || die "$(t "Cannot switch the portal to Cloudflare mode." "Passage du portail en mode Cloudflare impossible.")"
@@ -588,13 +586,15 @@ setup_portal() {
   ok "$(t "Tunnel handed to the Gate: outgoing connection to Cloudflare, no port to open" "Tunnel confié à la Gate : connexion sortante vers Cloudflare, aucun port à ouvrir")"
   echo
   if [ "$L" = fr ]; then
-    echo "  Dans Cloudflare, onglet Routes du tunnel › Add route › Published application :"
-    echo "  votre adresse (ex. acces.votre-domaine.fr), Service URL ${B}http://$service${N}."
-    echo "  Puis dans Portunia : Administrer › Portail web › activez le portail."
+    echo "  Dans le tunnel : onglet Routes › Add route › Published application. Subdomain et Domain"
+    echo "  (ex. acces.votre-domaine.fr), Path vide, Service URL ${B}http://$service${N}, puis Add route."
+    echo "  Puis dans Portunia : Administrer › Portail web : adresse publique https://…, Enregistrer,"
+    echo "  Tester l'adresse publique, et activez le portail."
   else
-    echo "  In Cloudflare, the tunnel's Routes tab › Add route › Published application:"
-    echo "  your address (e.g. access.your-domain.com), Service URL ${B}http://$service${N}."
-    echo "  Then in Portunia: Administer › Web portal › enable the portal."
+    echo "  In the tunnel: Routes tab › Add route › Published application. Subdomain and Domain"
+    echo "  (e.g. access.your-domain.com), Path empty, Service URL ${B}http://$service${N}, then Add route."
+    echo "  Then in Portunia: Administer › Web portal: public address https://…, Save,"
+    echo "  Test the public address, and enable the portal."
   fi
 }
 
