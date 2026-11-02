@@ -143,7 +143,7 @@ sudo PORTUNIA_GATE_ADMIN=julien PORTUNIA_GATE_NOM="Gate ACME" bash installer.sh 
 
 ### Certificat de l'entreprise
 
-Le certificat de l'API est auto-signé : Portunia le reconnaît par son empreinte, ce qui suffit. Pour utiliser plutôt un certificat de l'entreprise (fichiers PEM, certificat suivi de sa chaîne) :
+Le certificat de l'API est auto-signé : Portunia le reconnaît par son empreinte, ce qui suffit. Celui que voient les navigateurs sur le portail est distinct, réglé dans Administrer › Portail web (voir *Certificat du portail*). Pour utiliser un certificat de l'entreprise pour l'API (fichiers PEM, certificat suivi de sa chaîne) :
 
 Paquet Debian :
 
@@ -284,7 +284,15 @@ sudo portunia-gate portal expose proxy --trusted 10.0.5.10,10.0.5.11 --header X-
 
 Le relais présente un certificat auto-signé. Pour le vôtre : `portunia-gate edge certificate CERT CLE` sous le compte `_portunia_gate`, puis `systemctl restart portunia-gate-relais`. Mise à jour : `sudo bash installer.sh update` sur le relais. Plusieurs relais peuvent se placer derrière un répartiteur. Journal d'audit : `relais.ajoute`, `relais.revoque`.
 
-Les modes `proxy`, `interne` et `direct` passent par l'écoute HTTPS : ouvrez-la dans Administrer › Portail web (**Écoute HTTPS**, un port ou `adresse:port`, ex. `8446`), ou `sudo portunia-gate portal https 8446` (`--off` la ferme). La Gate l'ouvre, la déplace ou la ferme sous quelques secondes, sans redémarrer. Les ports sous 1024 sont refusés par le système : redirigez le 443 vers le 8446 sur le pare-feu ou la box. Le pare-feu durci autorise toujours le 8446. `PORTUNIA_GATE_PORTAL_TLS_LISTEN` dans le fichier de configuration, s'il est réglé, l'emporte (l'onglet l'affiche alors sans permettre de la changer). Le WebSocket doit traverser le proxy ou le WAF. `cloudflared` sur une autre machine que la Gate : indiquez son réseau dans `PORTUNIA_GATE_PORTAL_TUNNEL_PEERS`, sinon son en-tête est ignoré.
+Les modes `proxy`, `interne` et `direct` passent par l'écoute HTTPS : ouvrez-la dans Administrer › Portail web (**Écoute HTTPS**, un port ou `adresse:port`, ex. `8446`), ou `sudo portunia-gate portal https 8446` (`--off` la ferme). La Gate l'ouvre, la déplace ou la ferme sous quelques secondes, sans redémarrer. Les ports sous 1024 sont refusés par le système : redirigez le 443 vers le 8446 sur le pare-feu ou la box. Le pare-feu durci autorise toujours le 8446. `PORTUNIA_GATE_PORTAL_TLS_LISTEN` dans le fichier de configuration, s'il est réglé, l'emporte (l'onglet l'affiche alors sans permettre de la changer). Le WebSocket doit traverser le proxy ou le WAF.
+
+**Certificat du portail** (écoute HTTPS), distinct du certificat de l'API que les consoles Portunia épinglent : le changer ne les touche jamais. Dans Administrer › Portail web › **Certificat du portail** :
+
+- **Importer un certificat** d'une PKI interne ou publique : certificat PEM avec sa chaîne et sa clé non chiffrée, ou fichier PFX (.pfx, .p12) et son mot de passe. Appliqué sous quelques secondes, sans redémarrer. En ligne de commande : `sudo portunia-gate portal cert --import cert.pem --key cle.pem` (ou `--import portail.pfx`), `sudo portunia-gate portal cert` l'affiche, `--remove` revient à l'auto-signé.
+- **Let's Encrypt** (Pro) : noms de domaine, e-mail de contact, puis la vérification. *TLS-ALPN-01* : écoute HTTPS ouverte et port 443 de l'adresse publique redirigé vers elle ; rien d'autre à ouvrir. *DNS-01 par Cloudflare* : un jeton d'API avec Zone › DNS › Edit sur la zone (My Profile › API Tokens › Create Token › Edit zone DNS) ; rien à ouvrir, noms génériques (`*.exemple.fr`) permis. La Gate obtient le certificat, puis le renouvelle 30 jours avant son échéance ; après un échec, elle réessaie toutes les 6 heures, ou tout de suite avec **Renouveler maintenant**. Le compte et le jeton sont gardés chiffrés par le coffre. L'autorité d'essai délivre des certificats de test sans entamer les limites de Let's Encrypt.
+- Fichiers gérés hors de la Gate (renouvelés par un autre outil) : `PORTUNIA_GATE_PORTAL_TLS_CERT` et `PORTUNIA_GATE_PORTAL_TLS_KEY` dans le fichier de configuration ; ils l'emportent, et de nouveaux fichiers sont pris sous quelques secondes. Sans rien, le portail prend `PORTUNIA_GATE_TLS_CERT` s'il est réglé (comportement précédent), sinon un certificat auto-signé.
+
+Journal d'audit : `portail.certificat`, `portail.acme`, `portail.acme_obtenu`, `portail.acme_echec`, `portail.acme_renouveler`. `cloudflared` sur une autre machine que la Gate : indiquez son réseau dans `PORTUNIA_GATE_PORTAL_TUNNEL_PEERS`, sinon son en-tête est ignoré.
 
 Proxy Cloudflare au lieu du tunnel : `sudo portunia-gate portal https 8446` (paquet), ou `PORTUNIA_GATE_PORTAL_PORT=0.0.0.0:8446` dans `.env` (Docker), puis redémarrer ; dans Cloudflare, l'adresse proxifiée pointe vers ce port en HTTPS (mode SSL « Full »).
 

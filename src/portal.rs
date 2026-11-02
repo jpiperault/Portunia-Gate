@@ -456,10 +456,9 @@ async fn start_https(state: &Arc<State>, address: &str) -> Result<(axum_server::
     let addr: SocketAddr = address.parse().map_err(|_| anyhow!("{} {address}", t!("invalid HTTPS address:", "adresse HTTPS invalide :")))?;
     // Le port est essayé d'abord : son erreur est plus parlante que celle du serveur.
     drop(std::net::TcpListener::bind(addr).map_err(|e| anyhow!(bind_error(&addr, &e)))?);
-    let files = crate::tls::files(&state.config.data_dir);
-    let config = axum_server::tls_rustls::RustlsConfig::from_pem_file(&files.cert, &files.key)
-        .await
-        .map_err(|e| anyhow!(t!(format!("portal certificate: {e}"), format!("certificat du portail : {e}"))))?;
+    // Certificat choisi à chaque connexion : il change sans rouvrir l'écoute.
+    crate::cert::refresh(state).await?;
+    let config = axum_server::tls_rustls::RustlsConfig::from_config(crate::cert::server_config()?);
     let handle = axum_server::Handle::new();
     let secure = router(state.clone(), true);
     let mut server = axum_server::bind_rustls(addr, config).handle(handle.clone());
@@ -484,6 +483,9 @@ async fn serve_https(state: Arc<State>) -> Result<()> {
     let mut running: Option<(String, axum_server::Handle, tokio::task::JoinHandle<()>)> = None;
     let mut failed: Option<(String, tokio::time::Instant)> = None;
     loop {
+        if let Err(e) = crate::cert::refresh(&state).await {
+            tracing::error!("{} {e:#}", t!("portal certificate:", "certificat du portail :"));
+        }
         let wanted = match https_address(&state).await {
             Ok((a, _)) => a,
             Err(_) => running.as_ref().map(|r| r.0.clone()),

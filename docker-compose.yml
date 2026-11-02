@@ -30,6 +30,9 @@ services:
       # Certificat de l'entreprise (fichiers PEM copiés dans /var/lib/portunia-gate) ; vide = auto-signé.
       PORTUNIA_GATE_TLS_CERT: ${PORTUNIA_GATE_TLS_CERT:-}
       PORTUNIA_GATE_TLS_KEY: ${PORTUNIA_GATE_TLS_KEY:-}
+      # Certificat du portail imposé par fichiers ; vide = réglé dans Administrer › Portail web.
+      PORTUNIA_GATE_PORTAL_TLS_CERT: ${PORTUNIA_GATE_PORTAL_TLS_CERT:-}
+      PORTUNIA_GATE_PORTAL_TLS_KEY: ${PORTUNIA_GATE_PORTAL_TLS_KEY:-}
       # Portail web : HTTP pour cloudflared (réseau interne de Compose, jamais publié),
       # HTTPS pour le proxy Cloudflare (adresses de Cloudflare seulement).
       PORTUNIA_GATE_PORTAL_LISTEN: 0.0.0.0:8445

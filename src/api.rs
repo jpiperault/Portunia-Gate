@@ -105,6 +105,9 @@ pub async fn run(state: Arc<State>) -> anyhow::Result<()> {
         .route("/api/v1/admin/portail/fermer-sessions", post(admin_portal_close))
         .route("/api/v1/admin/portail/relais", post(admin_relay_add))
         .route("/api/v1/admin/portail/tester", post(admin_portal_check))
+        .route("/api/v1/admin/portail/certificat", put(admin_cert_import).delete(admin_cert_remove))
+        .route("/api/v1/admin/portail/acme", put(admin_acme_update))
+        .route("/api/v1/admin/portail/acme/renouveler", post(admin_acme_renew))
         .route("/api/v1/admin/portail/relais/{id}", delete(admin_relay_remove))
         .route("/api/v1/audit/sessions", get(audit_sessions))
         .route("/api/v1/audit/sessions/{id}/enregistrement", get(audit_recording))
@@ -1821,6 +1824,8 @@ async fn admin_portal(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
         },
         "tunnel": crate::tunnel::summary(state).await,
         "tunnel_gere": crate::tunnel::report(state).await?,
+        "certificat": crate::cert::report(),
+        "acme": crate::acme::report(state).await?,
         "sessions_en_cours": state.web.active(),
         "connexions_jour": logins,
         "echecs_jour": failures,
@@ -1958,6 +1963,100 @@ async fn admin_relay_remove(AxState(api): Ctx, headers: HeaderMap, Path(id): Pat
 async fn admin_portal_check(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
     admin(&api, &headers).await?;
     Ok(Json(crate::tunnel::check(&api.state).await?))
+}
+
+#[derive(Deserialize)]
+struct CertBody {
+    /// Certificat PEM avec sa chaîne (et, éventuellement, la clé).
+    certificat: Option<String>,
+    cle: Option<String>,
+    /// Fichier PFX en base64.
+    pfx: Option<String>,
+    mot_de_passe: Option<String>,
+}
+
+async fn admin_cert_import(AxState(api): Ctx, headers: HeaderMap, Json(body): Json<CertBody>) -> ApiResult {
+    let actor = admin(&api, &headers).await?;
+    let state = &api.state;
+    let bad = |e: anyhow::Error| err(StatusCode::BAD_REQUEST, &format!("{e:#}"));
+    let (chain, key) = match (body.pfx, body.certificat) {
+        (Some(pfx), _) => {
+            let der = base64::engine::general_purpose::STANDARD.decode(pfx.trim()).map_err(|_| err(StatusCode::BAD_REQUEST, t!("PFX: unreadable file", "PFX : fichier illisible")))?;
+            crate::cert::from_pfx(&der, body.mot_de_passe.as_deref().unwrap_or("")).map_err(bad)?
+        }
+        (None, Some(chain)) => {
+            let key = body.cle.filter(|k| !k.trim().is_empty()).unwrap_or_else(|| chain.clone());
+            (chain, key)
+        }
+        (None, None) => return Err(err(StatusCode::BAD_REQUEST, t!("Give a certificate (PEM) or a PFX file", "Indiquez un certificat (PEM) ou un fichier PFX"))),
+    };
+    let info = crate::cert::store(state, "importe", &chain, &key).await.map_err(bad)?;
+    crate::acme::disable(state).await?;
+    crate::cert::refresh(state).await?;
+    audit::note(&state.db, &actor.login, "portail.certificat", json!({ "source": "importe", "noms": info.noms, "emetteur": info.emetteur, "expire": info.expire })).await;
+    Ok(Json(json!({ "etat": "ok", "certificat": info })))
+}
+
+async fn admin_cert_remove(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
+    let actor = admin(&api, &headers).await?;
+    let state = &api.state;
+    crate::cert::remove(state).await.map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
+    crate::acme::disable(state).await?;
+    crate::cert::refresh(state).await?;
+    audit::note(&state.db, &actor.login, "portail.certificat", json!({ "source": "auto" })).await;
+    Ok(Json(json!({ "etat": "ok" })))
+}
+
+#[derive(Deserialize)]
+struct AcmeBody {
+    actif: bool,
+    #[serde(default)]
+    domaines: Vec<String>,
+    #[serde(default)]
+    email: String,
+    #[serde(default)]
+    methode: String,
+    #[serde(default)]
+    essai: bool,
+    /// Vide : l'efface ; absent : le garde.
+    cloudflare_jeton: Option<String>,
+    /// Accord aux conditions de Let's Encrypt, donné par l'administrateur.
+    #[serde(default)]
+    conditions: bool,
+}
+
+async fn admin_acme_update(AxState(api): Ctx, headers: HeaderMap, Json(body): Json<AcmeBody>) -> ApiResult {
+    let actor = admin(&api, &headers).await?;
+    let state = &api.state;
+    if body.actif && !body.conditions {
+        return Err(err(StatusCode::BAD_REQUEST, t!("Accept the Let's Encrypt Subscriber Agreement first", "Acceptez d'abord les conditions d'utilisation de Let's Encrypt")));
+    }
+    let token_changed = body.cloudflare_jeton.is_some();
+    let c = crate::acme::update(
+        state,
+        crate::acme::Update { actif: body.actif, domaines: body.domaines, email: body.email, methode: body.methode, essai: body.essai, cloudflare_jeton: body.cloudflare_jeton },
+    )
+    .await
+    .map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
+    audit::note(
+        &state.db,
+        &actor.login,
+        "portail.acme",
+        json!({ "actif": c.actif, "domaines": c.domaines, "methode": c.methode, "essai": c.essai, "jeton_cloudflare_change": token_changed }),
+    )
+    .await;
+    Ok(Json(crate::acme::report(state).await?))
+}
+
+async fn admin_acme_renew(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
+    let actor = admin(&api, &headers).await?;
+    let state = &api.state;
+    if !crate::acme::config(state).await?.actif {
+        return Err(err(StatusCode::BAD_REQUEST, t!("Let's Encrypt is not enabled", "Let's Encrypt n'est pas activé")));
+    }
+    crate::acme::wake(true);
+    audit::note(&state.db, &actor.login, "portail.acme_renouveler", json!({})).await;
+    Ok(Json(json!({ "etat": "ok" })))
 }
 
 async fn admin_portal_close(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {

@@ -5,10 +5,12 @@
 
 #[macro_use]
 mod lang;
+mod acme;
 mod api;
 mod assist;
 mod audit;
 mod auth;
+mod cert;
 mod config;
 mod health;
 mod http;
@@ -27,7 +29,7 @@ mod target;
 mod tls;
 mod tunnel;
 
-use std::{io::IsTerminal, sync::Arc};
+use std::{io::IsTerminal, path::PathBuf, sync::Arc};
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand};
@@ -154,6 +156,18 @@ enum PortalCmd {
         /// Closes the HTTPS listener.
         #[arg(long, conflicts_with = "address")]
         off: bool,
+    },
+    /// Certificate of the portal's HTTPS listener: shows it, imports one (PEM or PFX) or goes back to self-signed.
+    Cert {
+        /// Certificate (PEM, with its chain) or PFX file to import.
+        #[arg(long = "import", value_name = "FILE")]
+        import: Option<PathBuf>,
+        /// Private key (PEM), if not in the certificate file.
+        #[arg(long, requires = "import")]
+        key: Option<PathBuf>,
+        /// Back to the self-signed certificate.
+        #[arg(long, conflicts_with = "import")]
+        remove: bool,
     },
     /// Cloudflare tunnel run by the Gate: token pasted from Cloudflare (alone or with its command).
     Tunnel {
@@ -546,7 +560,7 @@ async fn run(cli: Cli) -> Result<()> {
                     tokio::time::sleep(std::time::Duration::from_secs(24 * 3600)).await;
                 }
             });
-            tokio::try_join!(sshd::run(state.clone()), api::run(state.clone()), portal::run(state.clone()), relay::run(state.clone()), tunnel::run(state.clone()), health::run(state.clone()), live::run(state.clone()))?;
+            tokio::try_join!(sshd::run(state.clone()), api::run(state.clone()), portal::run(state.clone()), relay::run(state.clone()), tunnel::run(state.clone()), acme::run(state.clone()), health::run(state.clone()), live::run(state.clone()))?;
             Ok(())
         }
         Command::User(cmd) => user_cmd(&state, cmd).await,
@@ -984,6 +998,46 @@ async fn portal_cmd(state: &State, cmd: PortalCmd) -> Result<()> {
             }
             let (address, fixed) = portal::https_address(state).await?;
             println!("HTTPS: {}{}", address.as_deref().unwrap_or("—"), if fixed { t!(" (PORTUNIA_GATE_PORTAL_TLS_LISTEN)", " (PORTUNIA_GATE_PORTAL_TLS_LISTEN)") } else { "" });
+            return Ok(());
+        }
+        PortalCmd::Cert { import, key, remove } => {
+            if remove {
+                cert::remove(state).await?;
+                acme::disable(state).await?;
+                audit::log(&state.db, "console", "portail.certificat", json!({ "source": "auto" })).await?;
+                println!("✓ {}", t!("Back to the self-signed certificate (within seconds)", "Retour au certificat auto-signé (sous quelques secondes)"));
+                return Ok(());
+            }
+            if let Some(file) = import {
+                let bytes = std::fs::read(&file)?;
+                let (chain, key_pem) = if bytes.starts_with(b"-----") || std::str::from_utf8(&bytes).is_ok_and(|t| t.contains("-----BEGIN")) {
+                    let text = String::from_utf8(bytes)?;
+                    let key_pem = match &key {
+                        Some(k) => std::fs::read_to_string(k)?,
+                        None => text.clone(),
+                    };
+                    (text, key_pem)
+                } else {
+                    let password = rpassword::prompt_password(t!("PFX password: ", "Mot de passe du PFX : "))?;
+                    cert::from_pfx(&bytes, &password)?
+                };
+                let info = cert::store(state, "importe", &chain, &key_pem).await?;
+                acme::disable(state).await?;
+                audit::log(&state.db, "console", "portail.certificat", json!({ "source": "importe", "noms": info.noms, "emetteur": info.emetteur, "expire": info.expire })).await?;
+                println!("✓ {} {} ({}, {} {})", t!("Certificate imported:", "Certificat importé :"), info.noms.join(", "), info.emetteur, t!("expires", "expire le"), info.expire.format("%Y-%m-%d"));
+                println!("  {}", t!("The portal serves it within seconds.", "Le portail le présente sous quelques secondes."));
+                return Ok(());
+            }
+            let info = cert::inspect(state).await?;
+            println!("{} {}{}", t!("Source:", "Source :"), info.source, if info.fixe { " (PORTUNIA_GATE_PORTAL_TLS_CERT)" } else { "" });
+            println!("{} {}", t!("Names:", "Noms :"), info.noms.join(", "));
+            println!("{} {}", t!("Issuer:", "Émetteur :"), info.emetteur);
+            println!("{} {} ({} {})", t!("Expires:", "Expire le :"), info.expire.format("%Y-%m-%d"), info.days_left(), t!("days", "jours"));
+            println!("{} {}", t!("Fingerprint:", "Empreinte :"), info.empreinte);
+            let a = acme::config(state).await?;
+            if a.actif {
+                println!("Let's Encrypt : {} ({})", a.domaines.join(", "), a.methode);
+            }
             return Ok(());
         }
         PortalCmd::Tunnel { token, remove } => {

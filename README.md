@@ -130,7 +130,7 @@ The plan changes nothing. If a new SSH connection is not confirmed within 5 minu
 
 ### Company certificate
 
-The API certificate is self-signed: Portunia recognises it by its fingerprint, which is enough. To use a company certificate instead (PEM files, certificate followed by its chain):
+The API certificate is self-signed: Portunia recognises it by its fingerprint, which is enough. The certificate browsers see on the portal is a separate one, set in Administer › Web portal (see *Portal certificate*). To use a company certificate for the API (PEM files, certificate followed by its chain):
 
 Debian package:
 
@@ -271,7 +271,15 @@ sudo portunia-gate portal expose proxy --trusted 10.0.5.10,10.0.5.11 --header X-
 
 The relay presents a self-signed certificate. For your own: `portunia-gate edge certificate CERT KEY` run as `_portunia_gate`, then `systemctl restart portunia-gate-relais`. Update: `sudo bash installer.sh update` on the relay. Several relays can sit behind a load balancer. Audit log: `relais.ajoute`, `relais.revoque`.
 
-Modes `proxy`, `internal` and `direct` use the HTTPS listener: open it in Administer › Web portal (**HTTPS listening**, a port or `address:port`, e.g. `8446`), or `sudo portunia-gate portal https 8446` (`--off` closes it). The Gate opens, moves or closes it within seconds, without restarting. Ports under 1024 are refused by the system: redirect 443 to 8446 on the firewall or the box. The hardened firewall always allows 8446. `PORTUNIA_GATE_PORTAL_TLS_LISTEN` in the configuration file, if set, takes precedence (the tab then shows it read-only). The web socket must pass through the proxy or WAF. `cloudflared` on another machine than the Gate: list its network in `PORTUNIA_GATE_PORTAL_TUNNEL_PEERS`, otherwise its header is ignored.
+Modes `proxy`, `internal` and `direct` use the HTTPS listener: open it in Administer › Web portal (**HTTPS listening**, a port or `address:port`, e.g. `8446`), or `sudo portunia-gate portal https 8446` (`--off` closes it). The Gate opens, moves or closes it within seconds, without restarting. Ports under 1024 are refused by the system: redirect 443 to 8446 on the firewall or the box. The hardened firewall always allows 8446. `PORTUNIA_GATE_PORTAL_TLS_LISTEN` in the configuration file, if set, takes precedence (the tab then shows it read-only). The web socket must pass through the proxy or WAF.
+
+**Portal certificate** (HTTPS listener), separate from the API certificate, which Portunia consoles pin: changing it never affects them. In Administer › Web portal › **Portal certificate**:
+
+- **Import a certificate** from an internal or public PKI: PEM certificate with its chain and its unencrypted key, or a PFX file (.pfx, .p12) and its password. Applied within seconds, without restarting. Command line: `sudo portunia-gate portal cert --import cert.pem --key key.pem` (or `--import portail.pfx`), `sudo portunia-gate portal cert` shows it, `--remove` goes back to self-signed.
+- **Let's Encrypt** (Pro): domain names, contact email, then the check. *TLS-ALPN-01*: HTTPS listening open and port 443 of the public address redirected to it; nothing else to open. *DNS-01 through Cloudflare*: an API token with Zone › DNS › Edit on the zone (My Profile › API Tokens › Create Token › Edit zone DNS); nothing to open, wildcard names (`*.example.com`) allowed. The Gate obtains the certificate, then renews it 30 days before it expires; after a failure it tries again every 6 hours, or at once with **Renew now**. The account and the token are kept encrypted by the vault. A staging option issues test certificates without touching Let's Encrypt's limits.
+- Files kept outside the Gate (renewed by another tool): `PORTUNIA_GATE_PORTAL_TLS_CERT` and `PORTUNIA_GATE_PORTAL_TLS_KEY` in the configuration file; they take precedence, and new files are taken within seconds. Without anything, the portal uses `PORTUNIA_GATE_TLS_CERT` if set (former behaviour), otherwise a self-signed certificate.
+
+Audit log: `portail.certificat`, `portail.acme`, `portail.acme_obtenu`, `portail.acme_echec`, `portail.acme_renouveler`. `cloudflared` on another machine than the Gate: list its network in `PORTUNIA_GATE_PORTAL_TUNNEL_PEERS`, otherwise its header is ignored.
 
 Cloudflare proxy instead of the tunnel: `sudo portunia-gate portal https 8446` (package), or `PORTUNIA_GATE_PORTAL_PORT=0.0.0.0:8446` in `.env` (Docker), then restart; in Cloudflare, the proxied address points to that port over HTTPS ("Full" SSL mode).
 
