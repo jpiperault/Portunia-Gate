@@ -57,6 +57,9 @@ async function open(user, password, domain) {
   if (!res.ok) throw new Error(data.erreur || T('Server unavailable', 'Serveur indisponible'));
   await ready;
 
+  // Session ouverte : l'image occupe toute la zone, sans marge (la mise à l'échelle d'IronRDP
+  // se calcule sur la fenêtre, une marge ferait déborder l'image).
+  screen.classList.add('live');
   element = document.createElement('iron-remote-desktop');
   element.setAttribute('scale', 'fit');
   element.setAttribute('flexcenter', 'true');
@@ -69,7 +72,8 @@ async function open(user, password, domain) {
   const etat = await fetch('/api/etat', { credentials: 'same-origin' }).then((r) => r.json()).catch(() => ({}));
   ui.setEnableClipboard(etat.presse_papiers !== false);
   const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
-  const box = screen.getBoundingClientRect();
+  const start = desktopSize();
+  lastSize = `${start.width}x${start.height}`;
   const config = ui.configBuilder()
     .withUsername(user)
     .withPassword(password)
@@ -77,7 +81,7 @@ async function open(user, password, domain) {
     .withDestination(nom)
     .withProxyAddress(`${scheme}://${location.host}/ws-rdp`)
     .withAuthToken(data.jeton)
-    .withDesktopSize({ width: Math.max(800, Math.round(box.width)), height: Math.max(600, Math.round(box.height)) })
+    .withDesktopSize(start)
     .withExtension(displayControl(true))
     .build();
   const session = await ui.connect(config);
@@ -95,22 +99,44 @@ async function open(user, password, domain) {
 let sizeWatch = null;
 let sizeTimer = 0;
 let lastSize = '';
+/** Place réellement disponible pour l'image (zone d'affichage, marges déduites). */
+function area() {
+  const cs = getComputedStyle(screen);
+  return {
+    width: screen.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight),
+    height: screen.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom),
+  };
+}
+/** Taille du bureau Windows : la zone, en largeur paire, 200 à 8192. */
+function desktopSize() {
+  const box = area();
+  return {
+    width: Math.min(8192, Math.max(200, Math.round(box.width) & ~1)),
+    height: Math.min(8192, Math.max(200, Math.round(box.height))),
+  };
+}
 function applySize() {
   if (!ui || !element) return;
-  const full = document.fullscreenElement === element;
-  const box = full ? { width: window.screen.width, height: window.screen.height } : screen.getBoundingClientRect();
-  const width = Math.min(8192, Math.max(200, Math.round(box.width) & ~1));
-  const height = Math.min(8192, Math.max(200, Math.round(box.height)));
+  const { width, height } = desktopSize();
   const key = `${width}x${height}`;
   if (key === lastSize) return;
   lastSize = key;
   ui.resize(width, height);
+  // Le bureau change de taille : l'image est recalée sur la zone.
+  setTimeout(() => ui?.setScale?.(1), 400);
 }
 function followSize() {
   const later = () => { clearTimeout(sizeTimer); sizeTimer = setTimeout(applySize, 250); };
   sizeWatch = new ResizeObserver(later);
   sizeWatch.observe(screen);
-  document.addEventListener('fullscreenchange', later);
+  document.addEventListener('fullscreenchange', () => { fullLabel(); later(); });
+  window.addEventListener('resize', later);
+}
+
+// Plein écran de toute la zone d'affichage (Échap ou le même bouton pour en sortir).
+const fullButton = document.getElementById('plein');
+function fullLabel() {
+  fullButton.textContent = document.fullscreenElement ? T('Exit full screen', 'Quitter le plein écran') : T('Full screen', 'Plein écran');
 }
 
 form.addEventListener('submit', async (e) => {
@@ -128,6 +154,7 @@ form.addEventListener('submit', async (e) => {
     await open(account, password, domain);
   } catch (err) {
     if (element) { element.remove(); element = null; }
+    screen.classList.remove('live');
     form.hidden = false;
     error.textContent = explain(err);
   } finally {
@@ -137,7 +164,11 @@ form.addEventListener('submit', async (e) => {
 });
 
 document.getElementById('cad').addEventListener('click', () => ui?.ctrlAltDel());
-document.getElementById('plein').addEventListener('click', () => element?.requestFullscreen?.().catch(() => {}));
+fullButton.addEventListener('click', () => {
+  if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+  else screen.requestFullscreen?.().catch(() => {});
+  element?.focus?.();
+});
 document.getElementById('fermer').addEventListener('click', () => {
   ui?.shutdown();
   window.close();

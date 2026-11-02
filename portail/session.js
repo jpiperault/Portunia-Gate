@@ -85,6 +85,20 @@ window.addEventListener('resize', () => {
   resizeTimer = setTimeout(() => { fit.fit(); send({ t: 'taille', c: term.cols, r: term.rows }); }, 150);
 });
 
+// Plein écran du terminal seul ; il se redimensionne à l'entrée et à la sortie.
+const termBox = document.getElementById('term');
+const fullButton = document.getElementById('plein');
+fullButton.addEventListener('click', () => {
+  if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+  else termBox.requestFullscreen?.().catch(() => {});
+  term.focus();
+});
+document.addEventListener('fullscreenchange', () => {
+  fullButton.textContent = document.fullscreenElement ? T('Exit full screen', 'Quitter le plein écran') : T('Full screen', 'Plein écran');
+  setTimeout(() => { fit.fit(); send({ t: 'taille', c: term.cols, r: term.rows }); term.focus(); }, 150);
+});
+if (!document.fullscreenEnabled) fullButton.hidden = true;
+
 // Copier-coller selon le réglage de la Gate.
 document.getElementById('copier').addEventListener('click', async () => {
   const text = term.getSelection();
