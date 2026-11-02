@@ -63,7 +63,7 @@ Install a specific package (no Internet access, or an older version): `sudo bash
 
 ```bash
 git clone https://github.com/jpiperault/Portunia-Gate.git
-cd Portunia Gate
+cd Portunia-Gate
 sudo ./installer.sh --docker
 ```
 

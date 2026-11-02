@@ -63,7 +63,7 @@ Installer un paquet précis (sans accès à Internet, ou une version antérieure
 
 ```bash
 git clone https://github.com/jpiperault/Portunia-Gate.git
-cd Portunia Gate
+cd Portunia-Gate
 sudo ./installer.sh --docker
 ```
 
