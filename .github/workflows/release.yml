@@ -27,17 +27,18 @@ jobs:
       RUSTFLAGS: -C target-cpu=x86-64
       CFLAGS_x86_64_unknown_linux_musl: -march=x86-64 -mtune=generic
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
+          toolchain: stable
           targets: x86_64-unknown-linux-musl
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 
       - run: sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools qemu-user
 
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@682ce6c3c696a4cd5168a05f98e51aa02b877941 # v2
         with:
           tool: cargo-deb
 
@@ -64,7 +65,7 @@ jobs:
           cp installer.sh publie/
           cd publie && sha256sum *.deb installer.sh > SHA256SUMS && cat SHA256SUMS
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           token: ${{ secrets.RELEASES_TOKEN }}
           repository: jpiperault/Portunia-Gate-releases
@@ -88,7 +89,7 @@ jobs:
           files: publie/*
 
       # Copie dans ce dépôt privé, avec la liste des changements depuis la version précédente.
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ github.ref_name }}
           name: Portunia Gate ${{ github.ref_name }}

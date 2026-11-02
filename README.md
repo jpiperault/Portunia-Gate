@@ -266,7 +266,7 @@ sudo portunia-gate portal expose proxy --trusted 10.0.5.10,10.0.5.11 --header X-
 
 1. In Portunia, Administer › Web portal › Dedicated relay, give a name and the address the Gate reaches it at (e.g. `10.0.5.20:8447`), then **Add a relay**. The command is shown once. Or `sudo portunia-gate portal relay-add dmz-01 10.0.5.20:8447`.
 2. On the relay machine (Debian amd64): `sudo bash installer.sh relay CODE access.your-domain.com`.
-3. Firewall: port 443 from browsers to the relay, port 8447 from the Gate to the relay, nothing from the relay to the internal network.
+3. Firewall: port 443 from browsers to the relay, port 8447 from the Gate to the relay **and from nowhere else** (the relay limits handshakes per address, but only the firewall keeps strangers away from this port), nothing from the relay to the internal network.
 4. In Portunia, select **Dedicated relay** and save: the Gate then refuses any direct access to the portal.
 
 The relay presents a self-signed certificate. For your own: `portunia-gate edge certificate CERT KEY` run as `_portunia_gate`, then `systemctl restart portunia-gate-relais`. Update: `sudo bash installer.sh update` on the relay. Several relays can sit behind a load balancer. Audit log: `relais.ajoute`, `relais.revoque`.

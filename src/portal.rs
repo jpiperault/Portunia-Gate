@@ -619,6 +619,8 @@ async fn guard(AxState(portal): Ctx, ConnectInfo(peer): ConnectInfo<SocketAddr>,
     h.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
     h.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
     h.insert("permissions-policy", HeaderValue::from_static("camera=(), microphone=(), geolocation=()"));
+    // Le navigateur ne revient plus en HTTP (ignoré tant que la page arrive en HTTP simple).
+    h.insert(header::STRICT_TRANSPORT_SECURITY, HeaderValue::from_static("max-age=31536000"));
     if !h.contains_key(header::CACHE_CONTROL) {
         h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     }
@@ -898,6 +900,7 @@ async fn login(AxState(portal): Ctx, ConnectInfo(peer): ConnectInfo<SocketAddr>,
             }
         }
         let Some(user) = model::user_by_login(&state.db, &login).await?.filter(|u| !u.disabled) else {
+            auth::burn_password(body.mot_de_passe.clone()).await;
             return Ok(failed(&portal, &login, &ip, "compte inconnu ou désactivé").await);
         };
         if !auth::check_password(user.password_hash.clone(), body.mot_de_passe.clone()).await {

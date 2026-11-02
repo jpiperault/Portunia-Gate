@@ -55,6 +55,8 @@ const HEADERS: Duration = Duration::from_secs(10);
 const MAX_BROWSERS: usize = 2048;
 const MAX_PER_ADDRESS: usize = 64;
 const MAX_PENDING_TUNNELS: usize = 64;
+/// Poignées de main en cours depuis une même adresse (la Gate en ouvre au plus `WORKERS`).
+const MAX_PENDING_PER_ADDRESS: usize = 16;
 
 fn proof(secret: &[u8], label: &[u8], gate: &[u8], relay: &[u8], fingerprint: &[u8]) -> hmac::Tag {
     let key = hmac::Key::new(hmac::HMAC_SHA256, secret);
@@ -243,9 +245,13 @@ struct Visit(Visitors, IpAddr);
 
 impl Visitors {
     fn enter(&self, ip: IpAddr) -> Option<Visit> {
+        self.enter_max(ip, MAX_PER_ADDRESS)
+    }
+
+    fn enter_max(&self, ip: IpAddr, max: usize) -> Option<Visit> {
         let mut map = self.0.lock().unwrap_or_else(|e| e.into_inner());
         let count = map.entry(ip).or_insert(0);
-        if *count >= MAX_PER_ADDRESS {
+        if *count >= max {
             return None;
         }
         *count += 1;
@@ -270,12 +276,16 @@ where
     T: AsyncRead + AsyncWrite + Unpin + Send + 'static + From<tokio_rustls::server::TlsStream<TcpStream>>,
 {
     let pending = Arc::new(Semaphore::new(MAX_PENDING_TUNNELS));
+    // Une adresse sans le secret ne doit pas prendre toutes les places de poignée de main :
+    // la Gate n'en occupe que quelques-unes à la fois.
+    let shaking = Visitors::default();
     loop {
         let (tcp, peer) = listener.accept().await?;
+        let Some(visit) = shaking.enter_max(peer.ip().to_canonical(), MAX_PENDING_PER_ADDRESS) else { continue };
         let Ok(permit) = pending.clone().try_acquire_owned() else { continue };
         let (acceptor, secret, fingerprint, pool) = (acceptor.clone(), secret.clone(), fingerprint.clone(), pool.clone());
         tokio::spawn(async move {
-            let _permit = permit;
+            let _permit = (permit, visit);
             let _ = tcp.set_nodelay(true);
             let shake = async {
                 let mut tls = acceptor.accept(tcp).await?;

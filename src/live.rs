@@ -105,6 +105,13 @@ impl Registry {
         (Guard { id, entries: self.entries.clone() }, Cut(rx))
     }
 
+    /// Ferme tout ce que le compte a d'ouvert (mot de passe ou code réinitialisé).
+    pub fn cut_user(&self, user: Uuid, why: &str) {
+        for entry in self.entries.lock().unwrap().values().filter(|e| e.user == user) {
+            entry.cut.send_replace(Some(why.to_string()));
+        }
+    }
+
     /// Un droit vient de changer : revérifie sans attendre.
     pub fn recheck(&self) {
         self.wake.notify_one();

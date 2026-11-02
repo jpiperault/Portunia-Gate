@@ -88,6 +88,28 @@ impl client::Handler for Client {
 
 pub type Handle = client::Handle<Client>;
 
+/// Adresses de métadonnées des hébergeurs (AWS, Azure, GCP, Alibaba) : elles donnent les identifiants
+/// de la machine. Une cible ne doit jamais y mener, même par un nom qui s'y résout.
+fn metadata_address(ip: std::net::IpAddr) -> bool {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    match ip.to_canonical() {
+        IpAddr::V4(v) => v == Ipv4Addr::new(169, 254, 169, 254) || v == Ipv4Addr::new(100, 100, 100, 200),
+        IpAddr::V6(v) => v == Ipv6Addr::new(0xfd00, 0xec2, 0, 0, 0, 0, 0, 0x254),
+    }
+}
+
+/// Adresses d'une cible, résolues une fois : la connexion se fait vers ce qui a été vérifié.
+pub async fn addresses(host: &str, port: u16) -> Result<Vec<std::net::SocketAddr>> {
+    let found: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host, port))
+        .await
+        .map_err(|e| anyhow!("{}", t!(format!("{host}: name not found ({e})"), format!("{host} : nom introuvable ({e})"))))?
+        .collect();
+    if found.iter().any(|a| metadata_address(a.ip())) {
+        anyhow::bail!("{}", t!(format!("{host}: cloud metadata address, refused"), format!("{host} : adresse de métadonnées de l'hébergeur, refusée")));
+    }
+    Ok(found)
+}
+
 pub async fn connect(state: &State, target: &Target, creds: &Credentials, actor: &str) -> Result<Handle, ConnectError> {
     let config = Arc::new(client::Config {
         inactivity_timeout: None,
@@ -99,8 +121,8 @@ pub async fn connect(state: &State, target: &Target, creds: &Credentials, actor:
         pinned: target.host_key.clone(),
         seen: seen.clone(),
     };
-    let address = (target.host.as_str(), target.port as u16);
-    let connected = tokio::time::timeout(std::time::Duration::from_secs(15), client::connect(config, address, client)).await;
+    let address = addresses(&target.host, target.port as u16).await?;
+    let connected = tokio::time::timeout(std::time::Duration::from_secs(15), client::connect(config, &address[..], client)).await;
     let seen = seen.lock().unwrap().clone();
     let mut handle = match connected {
         Err(_) => return Err(anyhow!(t!(format!("{} is not answering ({}:{})", target.name, target.host, target.port), format!("{} ne répond pas ({}:{})", target.name, target.host, target.port))).into()),
@@ -204,4 +226,16 @@ pub async fn install_new_key(state: &State, target: &Target, account: &str, pass
         }
     }
     Ok(key.to_openssh(LineEnding::LF).map_err(|e| anyhow!("clé : {e}"))?.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn metadonnees_refusees() {
+        assert!(addresses("169.254.169.254", 80).await.is_err());
+        assert!(addresses("::ffff:169.254.169.254", 80).await.is_err());
+        assert!(addresses("127.0.0.1", 22).await.is_ok());
+    }
 }

@@ -244,6 +244,7 @@ async fn login(AxState(api): Ctx, ConnectInfo(addr): ConnectInfo<SocketAddr>, Js
     };
 
     let Some(user) = model::user_by_login(&state.db, &body.login).await?.filter(|u| !u.disabled) else {
+        auth::burn_password(body.mot_de_passe.clone()).await;
         return Err(fail("compte inconnu ou désactivé").await);
     };
     if !auth::check_password(user.password_hash.clone(), body.mot_de_passe.clone()).await {
@@ -679,9 +680,17 @@ async fn admin_target_update(AxState(api): Ctx, headers: HeaderMap, Path(id): Pa
     probe.host = body.hote.trim().into();
     probe.port = body.port;
     probe.account = body.compte.clone().filter(|a| !a.trim().is_empty());
-    // Changement d'adresse : l'ancienne empreinte ne vaut plus.
-    if probe.host != current.host || probe.port != current.port {
+    // Changement d'adresse : l'ancienne empreinte ne vaut plus, et le secret du coffre doit être
+    // ressaisi, sinon un jeton volé suffirait à l'envoyer vers un autre serveur.
+    let moved = probe.host != current.host || probe.port != current.port;
+    if moved {
         probe.host_key = None;
+        if body.secret.is_none() && current.secret.is_some() {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                t!("The address changes: type the vault secret again", "L'adresse change : ressaisissez le secret du coffre"),
+            ));
+        }
     }
     let (kind, sealed) = match body.secret {
         Some(s) => {
@@ -723,7 +732,7 @@ async fn admin_target_update(AxState(api): Ctx, headers: HeaderMap, Path(id): Pa
         db,
         &actor.login,
         "cible.modifiee",
-        json!({ "cible": body.nom, "avant": current.name, "mode": body.mode }),
+        json!({ "cible": body.nom, "avant": current.name, "mode": body.mode, "adresse": format!("{}:{}", probe.host, probe.port), "adresse_avant": format!("{}:{}", current.host, current.port) }),
     )
     .await;
     Ok(Json(json!({ "etat": "ok" })))
@@ -893,10 +902,7 @@ async fn admin_user_update(AxState(api): Ctx, headers: HeaderMap, Path(id): Path
         .await?;
     set_groups(db, id, &body.groupes).await?;
     if body.desactive {
-        sqlx::query("DELETE FROM api_sessions WHERE user_id = $1")
-            .bind(id)
-            .execute(db)
-            .await?;
+        model::revoke_logins(db, id).await?;
     }
     api.state.live.recheck();
     audit::note(
@@ -934,10 +940,8 @@ async fn admin_user_reset_totp(AxState(api): Ctx, headers: HeaderMap, Path(id): 
         .bind(id)
         .execute(db)
         .await?;
-    sqlx::query("DELETE FROM api_sessions WHERE user_id = $1")
-        .bind(id)
-        .execute(db)
-        .await?;
+    model::revoke_logins(db, id).await?;
+    api.state.live.cut_user(id, t!("Your sign-in was reset by an administrator", "Votre connexion a été réinitialisée par un administrateur"));
     audit::note(db, &actor.login, "compte.totp_reinitialise", json!({ "compte": user.login })).await;
     Ok(Json(json!({ "etat": "ok" })))
 }
@@ -954,10 +958,8 @@ async fn admin_user_temp_password(AxState(api): Ctx, headers: HeaderMap, Path(id
         .bind(auth::hash_password(&password)?)
         .execute(db)
         .await?;
-    sqlx::query("DELETE FROM api_sessions WHERE user_id = $1")
-        .bind(id)
-        .execute(db)
-        .await?;
+    model::revoke_logins(db, id).await?;
+    api.state.live.cut_user(id, t!("Your sign-in was reset by an administrator", "Votre connexion a été réinitialisée par un administrateur"));
     audit::note(db, &actor.login, "compte.mot_de_passe_provisoire", json!({ "compte": user.login })).await;
     Ok(Json(json!({ "mot_de_passe_provisoire": password })))
 }
@@ -1232,7 +1234,8 @@ async fn journal_rows(api: &Api, query: &JournalQuery) -> Result<Vec<audit::Entr
         .as_deref()
         .map(str::trim)
         .filter(|q| !q.is_empty())
-        .map(|q| format!("%{}%", q.replace('%', "")));
+        // PostgreSQL refuse le caractère nul dans un texte : il ne doit pas devenir une erreur 500.
+        .map(|q| format!("%{}%", q.replace(['%', '\0'], "")));
     let mut rows: Vec<audit::Entry> = sqlx::query_as(
         "SELECT * FROM audit WHERE $2::text IS NULL OR actor ILIKE $2 OR event ILIKE $2 OR detail::text ILIKE $2 ORDER BY seq DESC LIMIT $1",
     )
@@ -1263,8 +1266,9 @@ async fn admin_journal_verify(AxState(api): Ctx, headers: HeaderMap) -> ApiResul
 }
 
 fn csv_field(text: &str) -> String {
-    // Une cellule qui commence par = + - @ serait lue comme une formule par un tableur.
-    let safe = if text.starts_with(['=', '+', '-', '@']) {
+    // Une cellule qui commence par = + - @, une tabulation ou un retour serait lue comme une
+    // formule par un tableur.
+    let safe = if text.starts_with(['=', '+', '-', '@', '\t', '\r']) {
         format!("'{text}")
     } else {
         text.to_string()
@@ -1448,7 +1452,7 @@ struct AuditQuery {
 }
 
 fn nonempty(v: Option<String>) -> Option<String> {
-    v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    v.map(|s| s.replace('\0', "").trim().to_string()).filter(|s| !s.is_empty())
 }
 
 async fn audit_sessions(AxState(api): Ctx, headers: HeaderMap, Query(q): Query<AuditQuery>) -> ApiResult {

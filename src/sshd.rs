@@ -300,6 +300,7 @@ impl server::Handler for Conn {
     async fn auth_password(&mut self, requested: &str, password: &str) -> Result<Auth, Self::Error> {
         let Some(user) = self.load(requested).await? else {
             if self.attempt(requested, "mot de passe").await {
+                crate::auth::burn_password(password.to_string()).await;
                 self.fail("mot de passe", "compte inconnu ou désactivé").await;
             }
             return Ok(Auth::reject());
@@ -1209,7 +1210,8 @@ where
 async fn relay_tcp(ctx: Arc<Ctx>, target: Target, channel: Channel<Msg>) -> Result<()> {
     let id = Uuid::new_v4();
     let db = &ctx.state.db;
-    let tcp = tokio::time::timeout(Duration::from_secs(10), tokio::net::TcpStream::connect((target.host.as_str(), target.port as u16)))
+    let address = crate::target::addresses(&target.host, target.port as u16).await?;
+    let tcp = tokio::time::timeout(Duration::from_secs(10), tokio::net::TcpStream::connect(&address[..]))
         .await
         .map_err(|_| anyhow::anyhow!(t!(format!("{} unreachable (timed out)", target.name), format!("{} injoignable (délai dépassé)", target.name))))??;
     let detail = if target.is_rdp() { "rdp" } else { "ssh -J" };

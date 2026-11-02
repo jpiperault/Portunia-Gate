@@ -44,6 +44,14 @@ pub async fn check_password(hash: Option<String>, password: String) -> bool {
     tokio::task::spawn_blocking(move || verify_password(&hash, &password)).await.unwrap_or(false)
 }
 
+/// Compte inconnu ou désactivé : le même calcul Argon2 qu'un vrai compte, sur une empreinte
+/// factice, pour que le temps de réponse ne révèle pas quels comptes existent.
+pub async fn burn_password(password: String) {
+    static DECOY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let decoy = DECOY.get_or_init(|| hash_password("portunia-gate-leurre").unwrap_or_default()).clone();
+    let _ = check_password(Some(decoy), password).await;
+}
+
 // ---------- TOTP ----------
 
 pub const TOTP_STEP: i64 = 30;

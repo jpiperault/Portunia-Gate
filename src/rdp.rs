@@ -176,7 +176,14 @@ async fn run(state: &Arc<State>, socket: &mut WebSocket, origin: Origin) -> Resu
 
     // Connexion au serveur Windows, début de la négociation RDP.
     let server = format!("{}:{}", target.host, target.port);
-    let mut tcp = match tokio::time::timeout(Duration::from_secs(10), tokio::net::TcpStream::connect(server.as_str())).await {
+    let address = match crate::target::addresses(&target.host, target.port as u16).await {
+        Ok(a) => a,
+        Err(e) => {
+            refuse(socket, RDCleanPathPdu::new_wsa_error(10061)).await;
+            return Err(e);
+        }
+    };
+    let mut tcp = match tokio::time::timeout(Duration::from_secs(10), tokio::net::TcpStream::connect(&address[..])).await {
         Ok(Ok(t)) => t,
         _ => {
             refuse(socket, RDCleanPathPdu::new_wsa_error(10061)).await;

@@ -858,6 +858,8 @@ async fn user_cmd(state: &State, cmd: UserCmd) -> Result<()> {
                 .bind(hash)
                 .execute(db)
                 .await?;
+            // Les connexions ouvertes avec l'ancien mot de passe se ferment.
+            model::revoke_logins(db, user.id).await?;
             audit::log(db, "console", "compte.mot_de_passe", json!({ "compte": user.login })).await?;
             println!("{}", t!("Password changed.", "Mot de passe changé."));
         }
