@@ -1797,6 +1797,8 @@ async fn admin_portal(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
     let groups: Vec<String> = sqlx::query_scalar("SELECT name FROM groups ORDER BY name").fetch_all(&state.db).await?;
     crate::portal::reload_exposure(state).await?;
     let exposed = crate::portal::exposure(state);
+    let (https, fixed) = crate::portal::https_address(state).await?;
+    let listener = crate::portal::https_status();
     Ok(Json(json!({
         "mode": exposed.mode.id(),
         "proxys": exposed.proxies,
@@ -1812,7 +1814,11 @@ async fn admin_portal(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
         "presse_papiers": s.clipboard,
         "turnstile_site": s.turnstile_site,
         "turnstile_secret_defini": s.turnstile_secret.is_some(),
-        "ecoute": { "tunnel": state.config.portal_listen, "proxy": state.config.portal_tls_listen },
+        "ecoute": {
+            "tunnel": state.config.portal_listen,
+            "proxy": https,
+            "https": { "fixe": fixed, "ouverte": listener.listening, "erreur": listener.error },
+        },
         "tunnel": crate::tunnel::summary(state).await,
         "tunnel_gere": crate::tunnel::report(state).await?,
         "sessions_en_cours": state.web.active(),
@@ -1838,6 +1844,8 @@ struct PortalBody {
     reseaux: Option<Vec<String>>,
     /// Jeton du tunnel Cloudflare géré ; vide : l'efface ; absent : le garde.
     tunnel_jeton: Option<String>,
+    /// Écoute HTTPS du portail (« 8446 », « 0.0.0.0:8446 ») ; vide : la ferme ; absent : la garde.
+    https: Option<String>,
 }
 
 async fn admin_portal_update(AxState(api): Ctx, headers: HeaderMap, Json(body): Json<PortalBody>) -> ApiResult {
@@ -1883,6 +1891,10 @@ async fn admin_portal_update(AxState(api): Ctx, headers: HeaderMap, Json(body): 
         let sealed = if secret.trim().is_empty() { String::new() } else { crate::portal::seal_turnstile(state, secret.trim())? };
         model::set_setting(db, "portail_turnstile_secret", json!(sealed)).await?;
         changed.insert("turnstile_secret".into(), json!(if sealed.is_empty() { "effacé" } else { "changé" }));
+    }
+    if let Some(address) = body.https {
+        let set = crate::portal::set_https(state, &address).await.map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
+        audit::note(db, &actor.login, "portail.https", json!({ "ecoute": set })).await;
     }
     if let Some(token) = body.tunnel_jeton {
         let info = crate::tunnel::set_token(state, &token).await.map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;

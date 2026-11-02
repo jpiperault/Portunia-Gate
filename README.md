@@ -271,9 +271,9 @@ sudo portunia-gate portal expose proxy --trusted 10.0.5.10,10.0.5.11 --header X-
 
 The relay presents a self-signed certificate. For your own: `portunia-gate edge certificate CERT KEY` run as `_portunia_gate`, then `systemctl restart portunia-gate-relais`. Update: `sudo bash installer.sh update` on the relay. Several relays can sit behind a load balancer. Audit log: `relais.ajoute`, `relais.revoque`.
 
-Modes `proxy`, `internal` and `direct` use the HTTPS listener: set `PORTUNIA_GATE_PORTAL_TLS_LISTEN=0.0.0.0:8446` as described below and open the port. The web socket must pass through the proxy or WAF. `cloudflared` on another machine than the Gate: list its network in `PORTUNIA_GATE_PORTAL_TUNNEL_PEERS`, otherwise its header is ignored.
+Modes `proxy`, `internal` and `direct` use the HTTPS listener: open it in Administer › Web portal (**HTTPS listening**, a port or `address:port`, e.g. `8446`), or `sudo portunia-gate portal https 8446` (`--off` closes it). The Gate opens, moves or closes it within seconds, without restarting. Ports under 1024 are refused by the system: redirect 443 to 8446 on the firewall or the box. The hardened firewall always allows 8446. `PORTUNIA_GATE_PORTAL_TLS_LISTEN` in the configuration file, if set, takes precedence (the tab then shows it read-only). The web socket must pass through the proxy or WAF. `cloudflared` on another machine than the Gate: list its network in `PORTUNIA_GATE_PORTAL_TUNNEL_PEERS`, otherwise its header is ignored.
 
-Cloudflare proxy instead of the tunnel: in `/etc/portunia-gate/portunia-gate.env`, `PORTUNIA_GATE_PORTAL_TLS_LISTEN=0.0.0.0:8446` (package), or `PORTUNIA_GATE_PORTAL_PORT=0.0.0.0:8446` in `.env` (Docker), then restart; in Cloudflare, the proxied address points to that port over HTTPS ("Full" SSL mode).
+Cloudflare proxy instead of the tunnel: `sudo portunia-gate portal https 8446` (package), or `PORTUNIA_GATE_PORTAL_PORT=0.0.0.0:8446` in `.env` (Docker), then restart; in Cloudflare, the proxied address points to that port over HTTPS ("Full" SSL mode).
 
 ## Remote assistance
 

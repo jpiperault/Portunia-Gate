@@ -147,6 +147,14 @@ enum PortalCmd {
         /// Address the Gate reaches the relay at, e.g. 10.0.5.20:8447.
         address: String,
     },
+    /// HTTPS listening of the portal (internal, direct, proxy modes): a port or address:port.
+    Https {
+        /// e.g. 8446 or 0.0.0.0:8446; without it, shows the current one.
+        address: Option<String>,
+        /// Closes the HTTPS listener.
+        #[arg(long, conflicts_with = "address")]
+        off: bool,
+    },
     /// Cloudflare tunnel run by the Gate: token pasted from Cloudflare (alone or with its command).
     Tunnel {
         /// Tunnel token (« - »: read on the standard input); without it, shows the tunnel.
@@ -962,6 +970,20 @@ async fn portal_cmd(state: &State, cmd: PortalCmd) -> Result<()> {
             audit::log(&state.db, "console", "relais.ajoute", json!({ "nom": entry.nom, "adresse": entry.adresse })).await?;
             println!("{}", t!("On the relay machine:", "Sur la machine du relais :"));
             println!("  sudo bash installer.sh relay {code}");
+            return Ok(());
+        }
+        PortalCmd::Https { address, off } => {
+            if off || address.is_some() {
+                let set = portal::set_https(state, address.as_deref().unwrap_or("")).await?;
+                audit::log(&state.db, "console", "portail.https", json!({ "ecoute": set })).await?;
+                match set {
+                    Some(a) => println!("✓ {} {a}", t!("HTTPS listening (within seconds):", "Écoute HTTPS (sous quelques secondes) :")),
+                    None => println!("✓ {}", t!("HTTPS listening closed", "Écoute HTTPS fermée")),
+                }
+                return Ok(());
+            }
+            let (address, fixed) = portal::https_address(state).await?;
+            println!("HTTPS: {}{}", address.as_deref().unwrap_or("—"), if fixed { t!(" (PORTUNIA_GATE_PORTAL_TLS_LISTEN)", " (PORTUNIA_GATE_PORTAL_TLS_LISTEN)") } else { "" });
             return Ok(());
         }
         PortalCmd::Tunnel { token, remove } => {

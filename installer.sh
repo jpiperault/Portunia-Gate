@@ -753,7 +753,10 @@ harden_gate_ports() {
   ssh=$(env_value PORTUNIA_GATE_SSH_PORT)
   api=$(env_value PORTUNIA_GATE_API_PORT)
   tls=$(env_value PORTUNIA_GATE_PORTAL_TLS_LISTEN)
-  printf '%s\n' "${ssh:-2222}" "${api:-8443}" ${tls:+"${tls##*:}"} | sort -un | paste -sd, -
+  # Réglée depuis Portunia (Administrer › Portail web) : lue auprès de la Gate.
+  [ -n "$tls" ] || tls=$(hcmd portal https 2>/dev/null | sed -n 's/^HTTPS: *\([^ ]*\).*/\1/p' | grep -v '^—$' || true)
+  # 8446, l'écoute HTTPS proposée par défaut, reste ouvert : la démarrer depuis Portunia suffit.
+  printf '%s\n' "${ssh:-2222}" "${api:-8443}" 8446 ${tls:+"${tls##*:}"} | sort -un | paste -sd, -
 }
 
 # Le compte qui administre a-t-il une clé SSH déjà installée ?

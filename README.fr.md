@@ -284,9 +284,9 @@ sudo portunia-gate portal expose proxy --trusted 10.0.5.10,10.0.5.11 --header X-
 
 Le relais présente un certificat auto-signé. Pour le vôtre : `portunia-gate edge certificate CERT CLE` sous le compte `_portunia_gate`, puis `systemctl restart portunia-gate-relais`. Mise à jour : `sudo bash installer.sh update` sur le relais. Plusieurs relais peuvent se placer derrière un répartiteur. Journal d'audit : `relais.ajoute`, `relais.revoque`.
 
-Les modes `proxy`, `interne` et `direct` passent par l'écoute HTTPS : réglez `PORTUNIA_GATE_PORTAL_TLS_LISTEN=0.0.0.0:8446` comme indiqué ci-dessous et ouvrez le port. Le WebSocket doit traverser le proxy ou le WAF. `cloudflared` sur une autre machine que la Gate : indiquez son réseau dans `PORTUNIA_GATE_PORTAL_TUNNEL_PEERS`, sinon son en-tête est ignoré.
+Les modes `proxy`, `interne` et `direct` passent par l'écoute HTTPS : ouvrez-la dans Administrer › Portail web (**Écoute HTTPS**, un port ou `adresse:port`, ex. `8446`), ou `sudo portunia-gate portal https 8446` (`--off` la ferme). La Gate l'ouvre, la déplace ou la ferme sous quelques secondes, sans redémarrer. Les ports sous 1024 sont refusés par le système : redirigez le 443 vers le 8446 sur le pare-feu ou la box. Le pare-feu durci autorise toujours le 8446. `PORTUNIA_GATE_PORTAL_TLS_LISTEN` dans le fichier de configuration, s'il est réglé, l'emporte (l'onglet l'affiche alors sans permettre de la changer). Le WebSocket doit traverser le proxy ou le WAF. `cloudflared` sur une autre machine que la Gate : indiquez son réseau dans `PORTUNIA_GATE_PORTAL_TUNNEL_PEERS`, sinon son en-tête est ignoré.
 
-Proxy Cloudflare au lieu du tunnel : dans `/etc/portunia-gate/portunia-gate.env`, `PORTUNIA_GATE_PORTAL_TLS_LISTEN=0.0.0.0:8446` (paquet), ou `PORTUNIA_GATE_PORTAL_PORT=0.0.0.0:8446` dans `.env` (Docker), puis redémarrer ; dans Cloudflare, l'adresse proxifiée pointe vers ce port en HTTPS (mode SSL « Full »).
+Proxy Cloudflare au lieu du tunnel : `sudo portunia-gate portal https 8446` (paquet), ou `PORTUNIA_GATE_PORTAL_PORT=0.0.0.0:8446` dans `.env` (Docker), puis redémarrer ; dans Cloudflare, l'adresse proxifiée pointe vers ce port en HTTPS (mode SSL « Full »).
 
 ## Assistance à distance
 

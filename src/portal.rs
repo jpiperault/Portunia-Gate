@@ -360,10 +360,6 @@ pub async fn run(state: Arc<State>) -> Result<()> {
         }
     });
     let http = state.config.portal_listen.parse::<SocketAddr>().map_err(|_| anyhow!(t!("invalid PORTUNIA_GATE_PORTAL_LISTEN", "PORTUNIA_GATE_PORTAL_LISTEN invalide")))?;
-    let tls = match &state.config.portal_tls_listen {
-        Some(a) => Some(a.parse::<SocketAddr>().map_err(|_| anyhow!(t!("invalid PORTUNIA_GATE_PORTAL_TLS_LISTEN", "PORTUNIA_GATE_PORTAL_TLS_LISTEN invalide")))?),
-        None => None,
-    };
     let plain = router(state.clone(), false);
     tracing::info!("{} http://{http} (Cloudflare Tunnel)", t!("web portal listening on", "portail web en écoute sur"));
     let plain_task = async move {
@@ -371,22 +367,160 @@ pub async fn run(state: Arc<State>) -> Result<()> {
         crate::http::limit(&mut server);
         server.serve(plain.into_make_service_with_connect_info::<SocketAddr>()).await.map_err(anyhow::Error::from)
     };
-    match tls {
-        None => plain_task.await,
-        Some(addr) => {
-            let files = crate::tls::files(&state.config.data_dir);
-            let config = axum_server::tls_rustls::RustlsConfig::from_pem_file(&files.cert, &files.key)
-                .await
-                .map_err(|e| anyhow!(t!(format!("portal certificate: {e}"), format!("certificat du portail : {e}"))))?;
-            tracing::info!("{} https://{addr} (Cloudflare proxy)", t!("web portal listening on", "portail web en écoute sur"));
-            let secure = router(state, true);
-            let tls_task = async move {
-                let mut server = axum_server::bind_rustls(addr, config);
-                crate::http::limit(&mut server);
-                server.serve(secure.into_make_service_with_connect_info::<SocketAddr>()).await.map_err(anyhow::Error::from)
-            };
-            tokio::try_join!(plain_task, tls_task).map(|_| ())
+    tokio::try_join!(plain_task, serve_https(state)).map(|_| ())
+}
+
+// ---------- Écoute HTTPS ----------
+
+const HTTPS_SETTING: &str = "portail_https";
+/// Nouvel essai d'une adresse qui n'a pas pu être ouverte.
+const HTTPS_RETRY: Duration = Duration::from_secs(60);
+
+/// Adresse de l'écoute HTTPS voulue, et si elle est fixée par le fichier de configuration
+/// (PORTUNIA_GATE_PORTAL_TLS_LISTEN, qui l'emporte alors sur l'administration).
+pub async fn https_address(state: &State) -> Result<(Option<String>, bool)> {
+    if let Some(a) = &state.config.portal_tls_listen {
+        return Ok((Some(a.clone()), true));
+    }
+    let saved = model::setting(&state.db, HTTPS_SETTING).await?.and_then(|v| v.as_str().map(str::to_owned)).filter(|s| !s.is_empty());
+    Ok((saved, false))
+}
+
+/// « 8446 », « :8446 », « 10.0.5.4:8446 » ou « [::]:8446 » ; toutes les interfaces par défaut.
+pub fn parse_listen(input: &str, taken: &[(&str, &str)]) -> Result<String> {
+    let input = input.trim();
+    let text = if input.chars().all(|c| c.is_ascii_digit()) { format!("0.0.0.0:{input}") } else if let Some(port) = input.strip_prefix(':') { format!("0.0.0.0:{port}") } else { input.to_string() };
+    let addr: SocketAddr = text.parse().map_err(|_| anyhow!(t!("HTTPS address: a port, or address:port (e.g. 0.0.0.0:8446)", "Adresse HTTPS : un port, ou adresse:port (ex. 0.0.0.0:8446)")))?;
+    if addr.port() == 0 {
+        bail!(t!("HTTPS address: port missing", "Adresse HTTPS : port manquant"));
+    }
+    for (what, other) in taken {
+        if other.rsplit(':').next().and_then(|p| p.parse::<u16>().ok()) == Some(addr.port()) {
+            bail!("{} {what}", t!("Port already used by", "Port déjà pris par"));
         }
+    }
+    Ok(addr.to_string())
+}
+
+/// Règle (ou coupe, si vide) l'écoute HTTPS. Appliqué sous quelques secondes par le service.
+pub async fn set_https(state: &State, input: &str) -> Result<Option<String>> {
+    if state.config.portal_tls_listen.is_some() {
+        bail!(t!(
+            "HTTPS listening is set by PORTUNIA_GATE_PORTAL_TLS_LISTEN in the configuration file: change it there",
+            "L'écoute HTTPS est fixée par PORTUNIA_GATE_PORTAL_TLS_LISTEN dans le fichier de configuration : changez-la là"
+        ));
+    }
+    let c = &state.config;
+    let value = if input.trim().is_empty() {
+        None
+    } else {
+        Some(parse_listen(input, &[("SSH", c.ssh_listen.as_str()), ("API", c.api_listen.as_str()), (t!("the Cloudflare tunnel", "le tunnel Cloudflare"), c.portal_listen.as_str())])?)
+    };
+    model::set_setting(&state.db, HTTPS_SETTING, json!(value.clone().unwrap_or_default())).await?;
+    Ok(value)
+}
+
+#[derive(Clone, Default)]
+pub struct HttpsStatus {
+    /// Adresse ouverte en ce moment.
+    pub listening: Option<String>,
+    pub error: Option<String>,
+}
+
+static HTTPS: std::sync::Mutex<HttpsStatus> = std::sync::Mutex::new(HttpsStatus { listening: None, error: None });
+
+pub fn https_status() -> HttpsStatus {
+    HTTPS.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+fn set_https_status(listening: Option<String>, error: Option<String>) {
+    *HTTPS.lock().unwrap_or_else(|e| e.into_inner()) = HttpsStatus { listening, error };
+}
+
+/// Message lisible pour une adresse qui ne s'ouvre pas.
+fn bind_error(addr: &SocketAddr, e: &std::io::Error) -> String {
+    match e.kind() {
+        std::io::ErrorKind::PermissionDenied if addr.port() < 1024 => t!(
+            format!("port {} reserved to the system: use a port from 1024 (e.g. 8446) and redirect 443 to it on the firewall or the box", addr.port()),
+            format!("port {} réservé au système : prenez un port à partir de 1024 (ex. 8446) et redirigez-y le 443 sur le pare-feu ou la box", addr.port())
+        )
+        .to_string(),
+        std::io::ErrorKind::AddrInUse => t!(format!("port {} already used on this server", addr.port()), format!("port {} déjà utilisé sur ce serveur", addr.port())).to_string(),
+        std::io::ErrorKind::AddrNotAvailable => t!(format!("{} is not an address of this server", addr.ip()), format!("{} n'est pas une adresse de ce serveur", addr.ip())).to_string(),
+        _ => e.to_string(),
+    }
+}
+
+/// Ouvre l'écoute HTTPS ; rend la main une fois le port ouvert.
+async fn start_https(state: &Arc<State>, address: &str) -> Result<(axum_server::Handle, tokio::task::JoinHandle<()>)> {
+    let addr: SocketAddr = address.parse().map_err(|_| anyhow!("{} {address}", t!("invalid HTTPS address:", "adresse HTTPS invalide :")))?;
+    // Le port est essayé d'abord : son erreur est plus parlante que celle du serveur.
+    drop(std::net::TcpListener::bind(addr).map_err(|e| anyhow!(bind_error(&addr, &e)))?);
+    let files = crate::tls::files(&state.config.data_dir);
+    let config = axum_server::tls_rustls::RustlsConfig::from_pem_file(&files.cert, &files.key)
+        .await
+        .map_err(|e| anyhow!(t!(format!("portal certificate: {e}"), format!("certificat du portail : {e}"))))?;
+    let handle = axum_server::Handle::new();
+    let secure = router(state.clone(), true);
+    let mut server = axum_server::bind_rustls(addr, config).handle(handle.clone());
+    crate::http::limit(&mut server);
+    let task = tokio::spawn(async move {
+        if let Err(e) = server.serve(secure.into_make_service_with_connect_info::<SocketAddr>()).await {
+            tracing::error!("{} {e}", t!("portal HTTPS:", "portail HTTPS :"));
+            set_https_status(None, Some(bind_error(&addr, &e)));
+        }
+    });
+    match tokio::time::timeout(Duration::from_secs(5), handle.listening()).await {
+        Ok(Some(_)) => Ok((handle, task)),
+        _ => {
+            task.abort();
+            bail!(https_status().error.unwrap_or_else(|| t!("the HTTPS listener does not start", "l'écoute HTTPS ne démarre pas").to_string()))
+        }
+    }
+}
+
+/// Garde l'écoute HTTPS conforme au réglage : ouverte, déplacée ou fermée sans redémarrer la Gate.
+async fn serve_https(state: Arc<State>) -> Result<()> {
+    let mut running: Option<(String, axum_server::Handle, tokio::task::JoinHandle<()>)> = None;
+    let mut failed: Option<(String, tokio::time::Instant)> = None;
+    loop {
+        let wanted = match https_address(&state).await {
+            Ok((a, _)) => a,
+            Err(_) => running.as_ref().map(|r| r.0.clone()),
+        };
+        let current = running.as_ref().map(|r| r.0.clone());
+        let stopped = running.as_ref().is_some_and(|r| r.2.is_finished());
+        if wanted != current || stopped {
+            if let Some((old, handle, task)) = running.take() {
+                handle.graceful_shutdown(Some(Duration::from_secs(5)));
+                let _ = task.await;
+                tracing::info!("{} https://{old}", t!("web portal no longer listening on", "portail web plus en écoute sur"));
+            }
+            if !stopped {
+                set_https_status(None, None);
+            }
+            if let Some(addr) = wanted {
+                let retry = failed.as_ref().is_none_or(|(a, at)| *a != addr || at.elapsed() >= HTTPS_RETRY);
+                if retry {
+                    match start_https(&state, &addr).await {
+                        Ok((handle, task)) => {
+                            tracing::info!("{} https://{addr}", t!("web portal listening on", "portail web en écoute sur"));
+                            set_https_status(Some(addr.clone()), None);
+                            failed = None;
+                            running = Some((addr, handle, task));
+                        }
+                        Err(e) => {
+                            tracing::error!("{} {e}", t!("portal HTTPS:", "portail HTTPS :"));
+                            set_https_status(None, Some(e.to_string()));
+                            failed = Some((addr, tokio::time::Instant::now()));
+                        }
+                    }
+                }
+            } else {
+                failed = None;
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(3)).await;
     }
 }
 
@@ -1105,6 +1239,18 @@ pub fn seal_turnstile(state: &State, secret: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn adresse_https() {
+        let taken = [("SSH", "0.0.0.0:2222"), ("API", "0.0.0.0:8443")];
+        assert_eq!(parse_listen("8446", &taken).unwrap(), "0.0.0.0:8446");
+        assert_eq!(parse_listen(":8446", &taken).unwrap(), "0.0.0.0:8446");
+        assert_eq!(parse_listen("10.0.5.4:8446", &taken).unwrap(), "10.0.5.4:8446");
+        assert_eq!(parse_listen("[::]:443", &taken).unwrap(), "[::]:443");
+        assert!(parse_listen("8443", &taken).is_err(), "port de l'API");
+        assert!(parse_listen("bonjour", &taken).is_err());
+        assert!(parse_listen("0.0.0.0:0", &taken).is_err());
+    }
 
     #[test]
     fn adresses_cloudflare() {
