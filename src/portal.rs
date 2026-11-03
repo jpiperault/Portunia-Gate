@@ -751,6 +751,8 @@ async fn asset(Path(fichier): Path<String>) -> Response {
         }
         "iron-remote-desktop.js" => ("text/javascript; charset=utf-8", include_bytes!("../portail/iron-remote-desktop.js")),
         "iron-remote-desktop-rdp.js" => ("text/javascript; charset=utf-8", include_bytes!("../portail/iron-remote-desktop-rdp.js")),
+        "favicon.png" => ("image/png", include_bytes!("../portail/favicon.png")),
+        "icone.png" => ("image/png", include_bytes!("../portail/icone.png")),
         _ => return StatusCode::NOT_FOUND.into_response(),
     };
     // Adresses versionnées : un jour de cache sans risque de garder une ancienne version.
