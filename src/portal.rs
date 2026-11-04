@@ -13,6 +13,7 @@
 //! - Pas d'administration : elle se fait dans Portunia (Administrer › Réglages › Portail web).
 
 use std::{
+    collections::BTreeSet,
     net::{IpAddr, SocketAddr},
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -132,6 +133,8 @@ pub struct Settings {
     pub hours: i64,
     pub idle_min: i64,
     pub clipboard: bool,
+    /// Code toujours exigé, sauf exception posée sur le compte ; sinon, la politique du compte décide.
+    pub code_always: bool,
     pub turnstile_site: String,
     pub turnstile_secret: Option<String>,
 }
@@ -159,6 +162,7 @@ pub async fn settings(state: &State) -> Result<Settings> {
         hours: get("portail_duree_h").await?.and_then(|v| v.as_i64()).unwrap_or(1).clamp(1, 12),
         idle_min: get("portail_inactivite_min").await?.and_then(|v| v.as_i64()).unwrap_or(15).clamp(5, 240),
         clipboard: get("portail_presse_papiers").await?.and_then(|v| v.as_bool()).unwrap_or(true),
+        code_always: get("portail_code_toujours").await?.and_then(|v| v.as_bool()).unwrap_or(true),
         turnstile_site: text_setting(state, "portail_turnstile_site", "").await?,
         turnstile_secret: secret,
     })
@@ -885,6 +889,7 @@ async fn status(AxState(portal): Ctx, headers: HeaderMap) -> Response {
             "banniere": text_setting(state, "banniere", crate::sshd::default_banner()).await?,
             "turnstile": (!s.turnstile_site.is_empty() && s.turnstile_secret.is_some()).then_some(s.turnstile_site.clone()),
             "presse_papiers": s.clipboard,
+            "code_facultatif": !s.code_always,
             "inactivite_min": s.idle_min,
             "connecte": session.map(|w| json!({ "login": w.user.login, "expire": w.expires })),
         }))
@@ -966,21 +971,30 @@ async fn login(AxState(portal): Ctx, ConnectInfo(peer): ConnectInfo<SocketAddr>,
         if !auth::check_password(user.password_hash.clone(), body.mot_de_passe.clone()).await {
             return Ok(failed(&portal, &login, &ip, "mot de passe incorrect").await);
         }
+        // Une politique propre au compte décide (exception sans code, ou code imposé) ;
+        // sans elle, le réglage du portail.
+        let password_only = BTreeSet::from([auth::Factor::Password]);
+        let need_code = match &user.auth_policy {
+            Some(text) => !auth::Policy::parse(text)?.satisfied(&password_only),
+            None => s.code_always,
+        };
         // Première connexion et code perdu : pas depuis Internet.
-        if user.must_change_password || user.totp_secret.is_none() {
+        if user.must_change_password || (need_code && user.totp_secret.is_none()) {
             audit::note(&state.db, &login, "portail.echec", json!({ "raison": "première connexion ou code non enrôlé", "adresse": ip })).await;
             return Ok(err(
                 StatusCode::FORBIDDEN,
                 t!("First sign-in or code not enrolled: sign in with Portunia first, or contact your administrator", "Première connexion ou code non enrôlé : connectez-vous d'abord avec Portunia, ou adressez-vous à votre administrateur"),
             ));
         }
-        let secret = state.keys.open(&format!("totp:{}", user.id), user.totp_secret.as_deref().unwrap_or_default())?;
-        let ok = match auth::totp_check(&secret, body.code.trim(), user.totp_last_step) {
-            Some(step) => model::consume_totp_step(&state.db, user.id, step).await?,
-            None => false,
-        };
-        if !ok {
-            return Ok(failed(&portal, &login, &ip, "code incorrect ou déjà utilisé").await);
+        if need_code {
+            let secret = state.keys.open(&format!("totp:{}", user.id), user.totp_secret.as_deref().unwrap_or_default())?;
+            let ok = match auth::totp_check(&secret, body.code.trim(), user.totp_last_step) {
+                Some(step) => model::consume_totp_step(&state.db, user.id, step).await?,
+                None => false,
+            };
+            if !ok {
+                return Ok(failed(&portal, &login, &ip, "code incorrect ou déjà utilisé").await);
+            }
         }
         if !in_group(&state.db, user.id, &s.group).await? {
             audit::note(&state.db, &login, "portail.echec", json!({ "raison": "hors du groupe du portail", "adresse": ip })).await;
@@ -997,7 +1011,7 @@ async fn login(AxState(portal): Ctx, ConnectInfo(peer): ConnectInfo<SocketAddr>,
             .bind(&ip)
             .execute(&state.db)
             .await?;
-        audit::note(&state.db, &user.login, "portail.connexion", json!({ "facteurs": ["mot de passe", "code"], "adresse": ip })).await;
+        audit::note(&state.db, &user.login, "portail.connexion", json!({ "facteurs": if need_code { json!(["mot de passe", "code"]) } else { json!(["mot de passe"]) }, "adresse": ip })).await;
         let cookie = format!("{COOKIE}={token}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age={}", s.hours * 3600);
         Ok::<_, anyhow::Error>(
             (

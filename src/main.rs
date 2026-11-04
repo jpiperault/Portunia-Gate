@@ -191,6 +191,9 @@ enum PortalCmd {
         /// Copy-paste in the web terminal: on or off.
         #[arg(long, value_parser = parse_switch)]
         clipboard: Option<bool>,
+        /// Authenticator code on the portal: on, or off (still required by accounts whose own combinations demand it).
+        #[arg(long, value_parser = parse_switch)]
+        code: Option<bool>,
         /// Turnstile site key; empty: Turnstile off.
         #[arg(long)]
         turnstile_site: Option<String>,
@@ -1693,7 +1696,7 @@ async fn portal_cmd(state: &State, cmd: PortalCmd) -> Result<()> {
             }
             return Ok(());
         }
-        PortalCmd::Set { url, group, duration, idle, clipboard, turnstile_site, turnstile_secret } => {
+        PortalCmd::Set { url, group, duration, idle, clipboard, code, turnstile_site, turnstile_secret } => {
             let mut changed = serde_json::Map::new();
             if let Some(url) = url {
                 let url = url.trim().trim_end_matches('/').to_string();
@@ -1719,6 +1722,9 @@ async fn portal_cmd(state: &State, cmd: PortalCmd) -> Result<()> {
             }
             if let Some(v) = clipboard {
                 changed.insert("presse_papiers".into(), json!(v));
+            }
+            if let Some(v) = code {
+                changed.insert("code_toujours".into(), json!(v));
             }
             if let Some(site) = turnstile_site {
                 changed.insert("turnstile_site".into(), json!(site.trim()));
@@ -1934,6 +1940,11 @@ async fn portal_cmd(state: &State, cmd: PortalCmd) -> Result<()> {
             println!("{} {}", t!("Allowed group:", "Groupe autorisé :"), s.group);
             println!("{} {} h · {} {} min", t!("Web session:", "Session web :"), s.hours, t!("inactivity", "inactivité"), s.idle_min);
             println!("{} {}", t!("Copy-paste:", "Copier-coller :"), yes_no(s.clipboard));
+            println!(
+                "{} {}",
+                t!("Authenticator code:", "Code d'authentification :"),
+                if s.code_always { t!("required (except accounts exempted by their own combinations)", "exigé (sauf comptes exemptés par leurs combinaisons propres)") } else { t!("not required (except accounts whose own combinations demand it)", "non exigé (sauf comptes dont les combinaisons propres l'imposent)") }
+            );
             println!(
                 "Turnstile : {}{}",
                 if s.turnstile_site.is_empty() { "—" } else { &s.turnstile_site },

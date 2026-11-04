@@ -76,7 +76,8 @@ function loginForm(state) {
   document.title = `${state.nom} · ${T('sign in', 'connexion')}`;
   const login = h('input', { id: 'login', autocomplete: 'username', required: true, spellcheck: 'false', autocapitalize: 'off' });
   const pass = h('input', { id: 'pass', type: 'password', autocomplete: 'current-password', required: true });
-  const code = h('input', { id: 'code', class: 'code', inputmode: 'numeric', autocomplete: 'one-time-code', required: true, maxlength: '8', pattern: '[0-9 ]*' });
+  // Pas obligatoire ici : un compte peut en être dispensé, la Gate décide.
+  const code = h('input', { id: 'code', class: 'code', inputmode: 'numeric', autocomplete: 'one-time-code', maxlength: '8', pattern: '[0-9 ]*' });
   const error = h('p', { class: 'error', role: 'alert' });
   const submit = h('button', { class: 'btn primary', type: 'submit' }, T('Sign in', 'Se connecter'));
   const slot = h('div');
@@ -86,14 +87,14 @@ function loginForm(state) {
     state.banniere ? h('p', { class: 'legal' }, state.banniere.trim()) : null,
     h('label', {}, T('Login', 'Identifiant'), login),
     h('label', {}, T('Password', 'Mot de passe'), pass),
-    h('label', {}, T('Authenticator app code', 'Code de l\'application d\'authentification'), code),
+    h('label', {}, state.code_facultatif ? T('Authenticator app code (if your account requires one)', 'Code de l\'application d\'authentification (si votre compte en demande un)') : T('Authenticator app code', 'Code de l\'application d\'authentification'), code),
     slot, error, submit,
     h('p', { class: 'foot' }, T('First sign-in or lost code: contact your administrator.', 'Première connexion ou code perdu : adressez-vous à votre administrateur.')),
     h('p', { class: 'foot' }, langSwitch()));
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     error.textContent = '';
-    if (!login.value.trim() || !pass.value || !code.value.trim()) { error.textContent = T('Fill in the three fields.', 'Remplissez les trois champs.'); return; }
+    if (!login.value.trim() || !pass.value) { error.textContent = T('Fill in your login and password.', 'Remplissez l\'identifiant et le mot de passe.'); return; }
     if (state.turnstile && !turnstileToken) { error.textContent = T('Wait for the anti-bot check.', 'Patientez pendant la vérification anti-robots.'); return; }
     submit.disabled = true;
     try {

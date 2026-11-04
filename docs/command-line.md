@@ -121,6 +121,8 @@ French names are accepted too: `nom`, `langue`, `banniere`, `duree_session_h`, `
 ```bash
 sudo portunia-gate portal show                            # state, settings, live state, exposure
 sudo portunia-gate portal set --url https://access.acme.com --group "Web access" --duration 4 --idle 30 --clipboard on
+sudo portunia-gate portal set --code off                  # no authenticator code, except accounts whose own combinations demand it
+sudo portunia-gate user policy marc password              # or: this account only signs in without a code
 sudo portunia-gate portal set --turnstile-site 0x4AAA… --turnstile-secret   # secret key asked (empty entry: erases it)
 sudo portunia-gate portal on                              # opens the portal
 sudo portunia-gate portal off                             # closes it; open web sessions close within 30 s

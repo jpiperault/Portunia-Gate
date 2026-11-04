@@ -121,6 +121,8 @@ Les noms français sont acceptés aussi : `nom`, `langue`, `banniere`, `duree_se
 ```bash
 sudo portunia-gate portal show                            # état, réglages, état en direct, exposition
 sudo portunia-gate portal set --url https://acces.acme.fr --group "Accès web" --duration 4 --idle 30 --clipboard on
+sudo portunia-gate portal set --code off                  # plus de code, sauf comptes dont les combinaisons propres l'imposent
+sudo portunia-gate user policy marc password              # ou : ce compte seul se connecte sans code
 sudo portunia-gate portal set --turnstile-site 0x4AAA… --turnstile-secret   # clé secrète demandée (vide : l'efface)
 sudo portunia-gate portal on                              # ouvre le portail
 sudo portunia-gate portal off                             # le ferme ; les sessions web se ferment sous 30 s

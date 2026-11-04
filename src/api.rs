@@ -1820,6 +1820,7 @@ async fn admin_portal(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
         "duree_h": s.hours,
         "inactivite_min": s.idle_min,
         "presse_papiers": s.clipboard,
+        "code_toujours": s.code_always,
         "turnstile_site": s.turnstile_site,
         "turnstile_secret_defini": s.turnstile_secret.is_some(),
         "ecoute": {
@@ -1845,6 +1846,8 @@ struct PortalBody {
     duree_h: Option<i64>,
     inactivite_min: Option<i64>,
     presse_papiers: Option<bool>,
+    /// Faux : plus de code sur le portail, sauf pour les comptes dont la politique propre l'impose.
+    code_toujours: Option<bool>,
     turnstile_site: Option<String>,
     /// Vide : efface le secret ; absent : le garde.
     turnstile_secret: Option<String>,
@@ -1892,6 +1895,10 @@ async fn admin_portal_update(AxState(api): Ctx, headers: HeaderMap, Json(body): 
     if let Some(v) = body.presse_papiers {
         model::set_setting(db, "portail_presse_papiers", json!(v)).await?;
         changed.insert("presse_papiers".into(), json!(v));
+    }
+    if let Some(v) = body.code_toujours {
+        model::set_setting(db, "portail_code_toujours", json!(v)).await?;
+        changed.insert("code_toujours".into(), json!(v));
     }
     if let Some(site) = body.turnstile_site {
         model::set_setting(db, "portail_turnstile_site", json!(site.trim())).await?;
