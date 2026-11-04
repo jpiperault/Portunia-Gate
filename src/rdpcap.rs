@@ -375,11 +375,45 @@ fn write_record(out: &mut impl Write, record: &Record) -> std::io::Result<u64> {
 pub struct Recorder {
     path: PathBuf,
     out: std::io::BufWriter<std::fs::File>,
-    start: Instant,
     tap: Tap,
     bytes: u64,
     /// Une écriture a échoué : l'enregistrement n'est plus complet.
     failed: bool,
+}
+
+/// Morceau de la session à enregistrer, daté à son passage dans le relais.
+struct Chunk {
+    t: f64,
+    from_server: bool,
+    data: Vec<u8>,
+}
+
+/// Enregistrement tenu par son propre fil : le relais lui confie les octets et repart,
+/// sans attendre le disque. Si le disque ne suit plus, le relais attend (jamais de perte).
+pub struct Tape {
+    tx: Option<tokio::sync::mpsc::Sender<Chunk>>,
+    writer: Option<std::thread::JoinHandle<Recorder>>,
+    start: Instant,
+}
+
+impl Tape {
+    /// Octets du serveur (`from_server`) ou du poste. false : l'enregistrement est
+    /// impossible, la session doit s'arrêter.
+    pub async fn push(&self, from_server: bool, data: &[u8]) -> bool {
+        let chunk = Chunk { t: self.start.elapsed().as_secs_f64(), from_server, data: data.to_vec() };
+        match &self.tx {
+            Some(tx) => tx.send(chunk).await.is_ok(),
+            None => false,
+        }
+    }
+
+    /// Termine l'écriture puis ferme et signe.
+    pub async fn finish(mut self, state: &State, session: Uuid) -> Result<(String, String, String, u64)> {
+        drop(self.tx.take());
+        let writer = self.writer.take().ok_or_else(|| anyhow::anyhow!("enregistrement déjà fermé"))?;
+        let recorder = tokio::task::spawn_blocking(move || writer.join()).await?.map_err(|_| anyhow::anyhow!("fil d'enregistrement arrêté"))?;
+        recorder.finish(state, session)
+    }
 }
 
 impl Recorder {
@@ -388,23 +422,29 @@ impl Recorder {
         let dir = dir.join(now.format("%Y/%m").to_string());
         std::fs::create_dir_all(&dir)?;
         let path = dir.join(format!("{session}.rdpcap"));
-        let mut out = std::io::BufWriter::new(std::fs::File::create(&path)?);
+        // Grand tampon : peu d'écritures sur le disque, même quand l'image change beaucoup.
+        let mut out = std::io::BufWriter::with_capacity(1 << 20, std::fs::File::create(&path)?);
         writeln!(out, "{}", json!({ "format": "portunia-gate-rdp-v2", "timestamp": now.timestamp(), "title": title, "frappe": record_input }))?;
-        Ok(Self { path, out, start: Instant::now(), tap: Tap::new(record_input), bytes: 0, failed: false })
+        Ok(Self { path, out, tap: Tap::new(record_input), bytes: 0, failed: false })
     }
 
-    pub fn server(&mut self, data: &[u8]) {
-        let t = self.start.elapsed().as_secs_f64();
-        for r in self.tap.server(t, data) {
-            self.write(&r);
-        }
-    }
-
-    pub fn client(&mut self, data: &[u8]) {
-        let t = self.start.elapsed().as_secs_f64();
-        for r in self.tap.client(t, data) {
-            self.write(&r);
-        }
+    /// Confie l'enregistrement à un fil dédié.
+    pub fn spawn(mut self) -> Result<Tape> {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Chunk>(256);
+        let writer = std::thread::Builder::new().name("rdpcap".into()).spawn(move || {
+            while let Some(chunk) = rx.blocking_recv() {
+                let records = if chunk.from_server { self.tap.server(chunk.t, &chunk.data) } else { self.tap.client(chunk.t, &chunk.data) };
+                for r in records {
+                    self.write(&r);
+                }
+                // Écriture impossible : le canal se ferme, le relais arrête la session.
+                if self.failed {
+                    break;
+                }
+            }
+            self
+        })?;
+        Ok(Tape { tx: Some(tx), writer: Some(writer), start: Instant::now() })
     }
 
     fn write(&mut self, record: &Record) {
@@ -414,13 +454,8 @@ impl Recorder {
         }
     }
 
-    /// La session doit s'arrêter : elle ne serait plus enregistrée.
-    pub fn failed(&self) -> bool {
-        self.failed
-    }
-
     /// Ferme et signe, comme un enregistrement SSH.
-    pub fn finish(mut self, state: &State, session: Uuid) -> Result<(String, String, String, u64)> {
+    fn finish(mut self, state: &State, session: Uuid) -> Result<(String, String, String, u64)> {
         let _ = self.out.flush();
         drop(self.out);
         let content = std::fs::read(&self.path)?;

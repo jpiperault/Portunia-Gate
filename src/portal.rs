@@ -33,6 +33,9 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+// TCP_NODELAY sur chaque connexion : la frappe et la souris (terminal, Bureau à distance)
+// partent sans attendre l'accusé de réception du paquet précédent.
+use axum_server::accept::NoDelayAcceptor;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD as B64URL, Engine};
 use chrono::{DateTime, Utc};
 use russh::{
@@ -363,7 +366,7 @@ pub async fn run(state: Arc<State>) -> Result<()> {
     let plain = router(state.clone(), false);
     tracing::info!("{} http://{http} (Cloudflare Tunnel)", t!("web portal listening on", "portail web en écoute sur"));
     let plain_task = async move {
-        let mut server = axum_server::bind(http);
+        let mut server = axum_server::bind(http).acceptor(NoDelayAcceptor);
         crate::http::limit(&mut server);
         server.serve(plain.into_make_service_with_connect_info::<SocketAddr>()).await.map_err(anyhow::Error::from)
     };
@@ -461,7 +464,7 @@ async fn start_https(state: &Arc<State>, address: &str) -> Result<(axum_server::
     let config = axum_server::tls_rustls::RustlsConfig::from_config(crate::cert::server_config()?);
     let handle = axum_server::Handle::new();
     let secure = router(state.clone(), true);
-    let mut server = axum_server::bind_rustls(addr, config).handle(handle.clone());
+    let mut server = axum_server::bind_rustls(addr, config).handle(handle.clone()).map(|a| a.acceptor(NoDelayAcceptor));
     crate::http::limit(&mut server);
     let task = tokio::spawn(async move {
         if let Err(e) = server.serve(secure.into_make_service_with_connect_info::<SocketAddr>()).await {
@@ -735,7 +738,26 @@ async fn page_desktop(Path(_nom): Path<String>) -> Response {
     page(DESKTOP)
 }
 
-async fn asset(Path(fichier): Path<String>) -> Response {
+/// Version gzip d'une ressource, calculée à la première demande puis gardée.
+async fn gzipped(name: &'static str, body: &'static [u8]) -> Option<&'static [u8]> {
+    static DONE: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<&'static str, &'static [u8]>>> = std::sync::LazyLock::new(Default::default);
+    if let Some(z) = DONE.lock().unwrap().get(name) {
+        return Some(z);
+    }
+    let z = tokio::task::spawn_blocking(move || {
+        use std::io::Write;
+        let mut enc = flate2::write::GzEncoder::new(Vec::with_capacity(body.len() / 3), flate2::Compression::best());
+        enc.write_all(body).ok()?;
+        enc.finish().ok()
+    })
+    .await
+    .ok()??;
+    // Quelques fichiers fixes : gardés pour toute la vie du service.
+    let z: &'static [u8] = DONE.lock().unwrap().entry(name).or_insert_with(|| Box::leak(z.into_boxed_slice()));
+    Some(z)
+}
+
+async fn asset(Path(fichier): Path<String>, headers: HeaderMap) -> Response {
     let (kind, body): (&str, &'static [u8]) = match fichier.as_str() {
         "app.css" => ("text/css; charset=utf-8", include_bytes!("../portail/app.css")),
         "app.js" => ("text/javascript; charset=utf-8", include_bytes!("../portail/app.js")),
@@ -755,8 +777,33 @@ async fn asset(Path(fichier): Path<String>) -> Response {
         "icone.png" => ("image/png", include_bytes!("../portail/icone.png")),
         _ => return StatusCode::NOT_FOUND.into_response(),
     };
-    // Adresses versionnées : un jour de cache sans risque de garder une ancienne version.
-    ([(header::CONTENT_TYPE, kind), (header::CACHE_CONTROL, "public, max-age=86400")], body).into_response()
+    if kind.starts_with("image/") {
+        return ([(header::CONTENT_TYPE, kind), (header::CACHE_CONTROL, "public, max-age=86400")], body).into_response();
+    }
+    // Adresses versionnées (?v=) : la version suivante de la Gate change l'adresse, le
+    // navigateur peut garder celle-ci sans la redemander.
+    let cache = "public, max-age=31536000, immutable";
+    // Scripts et styles compressés (le client Bureau à distance passe de 6 Mo à environ 2).
+    let gzip = headers.get(header::ACCEPT_ENCODING).and_then(|v| v.to_str().ok()).is_some_and(|v| v.split(',').any(|e| e.trim().starts_with("gzip")));
+    if gzip && body.len() > 16 * 1024 {
+        let name: &'static str = match fichier.as_str() {
+            "xterm.js" => "xterm.js",
+            "iron-remote-desktop.js" => "iron-remote-desktop.js",
+            "iron-remote-desktop-rdp.js" => "iron-remote-desktop-rdp.js",
+            "app.css" => "app.css",
+            _ => "",
+        };
+        if !name.is_empty() {
+            if let Some(z) = gzipped(name, body).await {
+                return (
+                    [(header::CONTENT_TYPE, kind), (header::CACHE_CONTROL, cache), (header::CONTENT_ENCODING, "gzip"), (header::VARY, "Accept-Encoding")],
+                    z,
+                )
+                    .into_response();
+            }
+        }
+    }
+    ([(header::CONTENT_TYPE, kind), (header::CACHE_CONTROL, cache), (header::VARY, "Accept-Encoding")], body).into_response()
 }
 
 // ---------- Session du navigateur ----------
@@ -1246,6 +1293,18 @@ pub fn seal_turnstile(state: &State, secret: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn ressource_compressee() {
+        let body: &'static [u8] = include_bytes!("../portail/iron-remote-desktop-rdp.js");
+        let z = gzipped("iron-remote-desktop-rdp.js", body).await.unwrap();
+        assert!(z.len() < body.len() / 2, "{} → {}", body.len(), z.len());
+        let mut back = Vec::new();
+        std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(z), &mut back).unwrap();
+        assert_eq!(back, body);
+        // Deuxième demande : la même version gardée.
+        assert!(std::ptr::eq(z, gzipped("iron-remote-desktop-rdp.js", body).await.unwrap()));
+    }
 
     #[test]
     fn adresse_https() {

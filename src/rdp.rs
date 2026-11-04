@@ -12,13 +12,17 @@
 //! comme les sessions SSH ; voir `rdpcap` pour ce qui est gardé.
 
 use std::{
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 
 use anyhow::{anyhow, bail, Context, Result};
 use axum::extract::ws::{Message, WebSocket};
 use chrono::{DateTime, Utc};
+use futures_util::{SinkExt, StreamExt};
 use ironrdp_rdcleanpath::{DetectionResult, RDCleanPath, RDCleanPathPdu};
 use rustls::{
     client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
@@ -233,7 +237,7 @@ async fn run(state: &Arc<State>, socket: &mut WebSocket, origin: Origin) -> Resu
     }
     // Pas de session sans enregistrement.
     let id = Uuid::new_v4();
-    let mut capture = match crate::rdpcap::Recorder::create(&state.config.recordings_dir(), id, &format!("{} → {}", user.login, target.name), access.record_input) {
+    let capture = match crate::rdpcap::Recorder::create(&state.config.recordings_dir(), id, &format!("{} → {}", user.login, target.name), access.record_input).and_then(crate::rdpcap::Recorder::spawn) {
         Ok(c) => c,
         Err(e) => {
             audit::note(db, &user.login, "enregistrement.echec", json!({ "cible": target.name, "raison": e.to_string(), "adresse": addr })).await;
@@ -257,55 +261,79 @@ async fn run(state: &Arc<State>, socket: &mut WebSocket, origin: Origin) -> Resu
     let web = matches!(origin, Origin::Portal { .. });
     let (_watch, mut cut) = state.live.watch(crate::live::Watched { user: user.id, login: &user.login, target: Some(&target), web, recorded: true });
     let mut tick = tokio::time::interval(Duration::from_secs(5));
-    let mut last_input = Instant::now();
+    // Dernière saisie du poste, en millisecondes depuis le début de la session.
+    let last_input = AtomicU64::new(0);
     let (mut tls_read, mut tls_write) = tokio::io::split(tls);
+    let (mut ws_send, mut ws_recv) = socket.split();
     let mut closing = state.web.subscribe();
-    let mut buf = vec![0u8; 64 * 1024];
-    let reason: String = loop {
-        tokio::select! {
-            n = tls_read.read(&mut buf) => match n {
-                Ok(0) | Err(_) => break "serveur".into(),
-                Ok(n) => {
-                    capture.server(&buf[..n]);
-                    if socket.send(Message::Binary(buf[..n].to_vec().into())).await.is_err() {
-                        break "client".into();
-                    }
-                }
-            },
-            incoming = socket.recv() => match incoming {
-                Some(Ok(Message::Binary(data))) => {
-                    last_input = Instant::now();
-                    capture.client(&data);
-                    if tls_write.write_all(&data).await.is_err() {
-                        break "serveur".into();
-                    }
-                }
-                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break "client".into(),
-                _ => {}
-            },
-            _ = closing.changed(), if web => break "administrateur".into(),
-            why = cut.reason() => break why,
-            _ = tick.tick() => {
-                if let Origin::Portal { expires, idle, .. } = &origin {
-                    if Utc::now() >= *expires {
-                        break "session web expirée".into();
-                    }
-                    if last_input.elapsed() >= *idle {
-                        break "inactivité".into();
+    let reason: String = {
+        // Les deux sens avancent chacun de leur côté : un poste lent à recevoir l'image ne
+        // retarde pas ses propres clics vers le serveur, et inversement.
+        let down = async {
+            let mut buf = vec![0u8; 64 * 1024];
+            loop {
+                match tls_read.read(&mut buf).await {
+                    Ok(0) | Err(_) => return "serveur",
+                    Ok(n) => {
+                        if !capture.push(true, &buf[..n]).await {
+                            return "enregistrement";
+                        }
+                        if ws_send.send(Message::Binary(buf[..n].to_vec().into())).await.is_err() {
+                            return "client";
+                        }
                     }
                 }
             }
-        }
-        if capture.failed() {
-            audit::note(db, &user.login, "enregistrement.echec", json!({ "session": id, "cible": target.name, "raison": "écriture impossible" })).await;
-            break "enregistrement impossible".into();
+        };
+        let up = async {
+            loop {
+                match ws_recv.next().await {
+                    Some(Ok(Message::Binary(data))) => {
+                        last_input.store(started.elapsed().as_millis() as u64, Ordering::Relaxed);
+                        if !capture.push(false, &data).await {
+                            return "enregistrement";
+                        }
+                        if tls_write.write_all(&data).await.is_err() {
+                            return "serveur";
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return "client",
+                    _ => {}
+                }
+            }
+        };
+        tokio::pin!(down, up);
+        loop {
+            let side = tokio::select! {
+                side = &mut down => side,
+                side = &mut up => side,
+                _ = closing.changed(), if web => break "administrateur".into(),
+                why = cut.reason() => break why,
+                _ = tick.tick() => {
+                    if let Origin::Portal { expires, idle, .. } = &origin {
+                        if Utc::now() >= *expires {
+                            break "session web expirée".into();
+                        }
+                        let quiet = started.elapsed().saturating_sub(Duration::from_millis(last_input.load(Ordering::Relaxed)));
+                        if quiet >= *idle {
+                            break "inactivité".into();
+                        }
+                    }
+                    continue;
+                }
+            };
+            if side == "enregistrement" {
+                audit::note(db, &user.login, "enregistrement.echec", json!({ "session": id, "cible": target.name, "raison": "écriture impossible" })).await;
+                break "enregistrement impossible".into();
+            }
+            break side.into();
         }
     };
     let _ = tls_write.shutdown().await;
-    let _ = socket.send(Message::Close(None)).await;
+    let _ = ws_send.send(Message::Close(None)).await;
 
     let mut done = model::Finished { recording: None, sha256: None, signature: None, bytes: 0 };
-    match capture.finish(state, id) {
+    match capture.finish(state, id).await {
         Ok((path, sha, sig, bytes)) => done = model::Finished { recording: Some(path), sha256: Some(sha), signature: Some(sig), bytes: bytes as i64 },
         Err(e) => tracing::error!("{} {id}: {e:#}", t!("RDP recording", "enregistrement RDP")),
     }

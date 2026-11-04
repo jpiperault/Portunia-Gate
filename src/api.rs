@@ -121,7 +121,8 @@ pub async fn run(state: Arc<State>) -> anyhow::Result<()> {
         .layer(axum::middleware::from_fn(crate::lang::middleware))
         .layer(axum::middleware::from_fn(crate::http::deadline));
     tracing::info!("{} https://{listen}", t!("API listening on", "API en écoute sur"));
-    let mut server = axum_server::bind_rustls(listen, tls);
+    // TCP_NODELAY : les petits messages (frappe, souris du Bureau à distance) partent sans attendre.
+    let mut server = axum_server::bind_rustls(listen, tls).map(|a| a.acceptor(axum_server::accept::NoDelayAcceptor));
     crate::http::limit(&mut server);
     server.serve(app.into_make_service_with_connect_info::<SocketAddr>()).await?;
     Ok(())

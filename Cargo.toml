@@ -1,6 +1,6 @@
 [package]
 name = "portunia-gate"
-version = "0.22.2"
+version = "0.23.0"
 description = "Passerelle SSH et Bureau à distance de Portunia : accès contrôlés, coffre, enregistrement et journal d'audit"
 edition = "2021"
 publish = false
@@ -19,6 +19,9 @@ argon2 = { version = "0.5", default-features = false, features = ["alloc", "pass
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 clap = { version = "4", features = ["derive"] }
+# Relais Bureau à distance : la WebSocket séparée en deux sens ; ressources du portail compressées.
+flate2 = "1"
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 qrcode = { version = "0.14", default-features = false }
 rcgen = "0.13"
 ring = "0.17"
