@@ -84,15 +84,6 @@ pub struct Entry {
     pub hash: String,
 }
 
-pub async fn last(db: &PgPool, count: i64) -> Result<Vec<Entry>> {
-    let mut rows: Vec<Entry> = sqlx::query_as("SELECT * FROM audit ORDER BY seq DESC LIMIT $1")
-        .bind(count)
-        .fetch_all(db)
-        .await?;
-    rows.reverse();
-    Ok(rows)
-}
-
 /// Vérifie toute la chaîne. Renvoie le nombre d'événements, ou le premier maillon cassé.
 pub async fn verify(db: &PgPool) -> Result<std::result::Result<i64, String>> {
     let rows: Vec<Entry> = sqlx::query_as("SELECT * FROM audit ORDER BY seq").fetch_all(db).await?;

@@ -311,7 +311,7 @@ The TOTP code must have been enrolled first, in Portunia or with `sudo portunia-
 
 ## Command-line administration
 
-Everything is done either from Portunia or here, except replaying sessions and Let's Encrypt (Portunia only). On the server, the wizard installs the `portunia-gate` command, used with sudo from any folder:
+Everything is done either from Portunia or here; only replaying sessions stays in Portunia. On the server, the wizard installs the `portunia-gate` command, used with sudo from any folder:
 
 ```bash
 # Information
@@ -324,6 +324,7 @@ sudo portunia-gate user add contractor --policy "key+totp"         # SSH key and
 sudo portunia-gate user key marc "ssh-ed25519 AAAA… marc@pc"
 sudo portunia-gate user role marc auditor                          # user, auditor (replay and log) or admin
 sudo portunia-gate user list | passwd marc | totp marc | disable marc | delete marc
+sudo portunia-gate user policy marc "key+totp" | reset-password marc | reset-code marc
 
 # Groups
 sudo portunia-gate group add "Linux admins"
@@ -365,9 +366,11 @@ sudo portunia-gate setting language fr                           # en, fr, or ""
 # Checks
 sudo portunia-gate audit --verify --last 50
 sudo portunia-gate sessions --last 20
+sudo portunia-gate audit --search marc --csv journal.csv
+sudo portunia-gate sessions --user marc --since 2026-11-01   # sessions show ID: recording and signature
 ```
 
-`sudo portunia-gate --help` and `sudo portunia-gate user --help` list every option.
+Full reference, with every command and option: [docs/command-line.md](docs/command-line.md). `sudo portunia-gate --help` and `sudo portunia-gate user --help` list them on the server.
 
 See also [docs/operations.md](docs/operations.md): backups, updates, logs, troubleshooting.
 

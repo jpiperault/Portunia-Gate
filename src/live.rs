@@ -28,6 +28,13 @@ const SWEEP: Duration = Duration::from_secs(30);
 /// les terminaux web ouverts.
 pub const PORTAL_CLOSE: &str = "portail_fermeture";
 
+/// Compteur que `portal acme` fait avancer : le service vérifie alors le certificat Let's Encrypt.
+pub const ACME_WAKE: &str = "acme_reveil";
+
+/// État en direct du service (tunnel, écoute HTTPS, Let's Encrypt…), écrit à chaque tour pour
+/// les commandes d'administration, qui ne le voient pas autrement.
+pub const SNAPSHOT: &str = "etat_service";
+
 struct Entry {
     user: Uuid,
     login: String,
@@ -47,6 +54,9 @@ pub struct Registry {
     /// (0 : pas encore lu), assistance ouverte (0 : pas encore lue, 1 : fermée, 2 : ouverte).
     portal_close: AtomicI64,
     assist_on: AtomicU8,
+    /// Derniers ordres de fermeture de comptes et de réveil de Let's Encrypt vus, + 1.
+    cut_seen: AtomicI64,
+    acme_seen: AtomicI64,
 }
 
 /// Ce que l'on inscrit : une connexion (sans serveur) ou une session vers un serveur.
@@ -247,6 +257,37 @@ async fn console_orders(state: &Arc<State>) -> Result<()> {
             state.assist.close_all();
         }
     }
+    // Langue choisie avec « setting language » : le serveur SSH et les journaux la suivent.
+    let tag = model::setting(&state.db, "langue").await?.and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default();
+    crate::lang::set_process(crate::lang::Lang::from_tag(&tag).unwrap_or_else(crate::lang::from_env));
+    // Mot de passe ou code réinitialisé : les sessions ouvertes du compte se ferment.
+    let cuts = model::setting(&state.db, model::ORDER_CUT).await?.unwrap_or(serde_json::Value::Null);
+    let n = cuts["n"].as_i64().unwrap_or(0) + 1;
+    let seen = state.live.cut_seen.swap(n, Ordering::Relaxed);
+    if seen != 0 {
+        for order in cuts["comptes"].as_array().into_iter().flatten() {
+            let id = order["compte"].as_str().and_then(|s| Uuid::parse_str(s).ok());
+            if let (Some(id), true) = (id, order["n"].as_i64().unwrap_or(0) + 1 > seen) {
+                state.live.cut_user(id, t!("Your sign-in was reset by an administrator", "Votre connexion a été réinitialisée par un administrateur"));
+            }
+        }
+    }
+    let wake = model::setting(&state.db, ACME_WAKE).await?.and_then(|v| v.as_i64()).unwrap_or(0) + 1;
+    let seen = state.live.acme_seen.swap(wake, Ordering::Relaxed);
+    if seen != 0 && seen != wake {
+        crate::acme::wake(true);
+    }
+    let https = crate::portal::https_status();
+    let snapshot = json!({
+        "date": chrono::Utc::now(),
+        "instance": crate::portal::instance_id(),
+        "tunnel": crate::tunnel::report(state).await?,
+        "https": { "ouverte": https.listening, "erreur": https.error },
+        "acme": crate::acme::report(state).await?,
+        "terminaux_web": state.web.active(),
+        "assistance_en_attente": state.assist.waiting_count(),
+    });
+    model::set_setting(&state.db, SNAPSHOT, snapshot).await?;
     Ok(())
 }
 

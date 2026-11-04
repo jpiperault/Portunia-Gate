@@ -324,7 +324,7 @@ Le code TOTP doit avoir été enrôlé avant, dans Portunia ou avec `sudo portun
 
 ## Administrer en ligne de commande
 
-Tout se fait au choix dans Portunia ou ici, sauf la relecture des sessions et Let's Encrypt (Portunia seulement). Sur le serveur, l'assistant installe la commande `portunia-gate`, qui s'utilise avec sudo depuis n'importe quel dossier :
+Tout se fait au choix dans Portunia ou ici ; seule la relecture des sessions reste dans Portunia. Sur le serveur, l'assistant installe la commande `portunia-gate`, qui s'utilise avec sudo depuis n'importe quel dossier :
 
 ```bash
 # Informations
@@ -337,6 +337,7 @@ sudo portunia-gate user add presta --policy "key+totp"             # clé SSH et
 sudo portunia-gate user key marc "ssh-ed25519 AAAA… marc@pc"
 sudo portunia-gate user role marc auditor                          # user, auditor (relecture et journal) ou admin
 sudo portunia-gate user list | passwd marc | totp marc | disable marc | delete marc
+sudo portunia-gate user policy marc "key+totp" | reset-password marc | reset-code marc
 
 # Groupes
 sudo portunia-gate group add "Admins Linux"
@@ -378,9 +379,11 @@ sudo portunia-gate setting langue fr                             # en, fr, ou ""
 # Contrôle
 sudo portunia-gate audit --verify --last 50
 sudo portunia-gate sessions --last 20
+sudo portunia-gate audit --search marc --csv journal.csv
+sudo portunia-gate sessions --user marc --since 2026-11-01   # sessions show ID : enregistrement et signature
 ```
 
-`sudo portunia-gate --help` et `sudo portunia-gate user --help` listent toutes les options.
+Référence complète, avec toutes les commandes et options : [docs/ligne-de-commande.md](docs/ligne-de-commande.md). `sudo portunia-gate --help` et `sudo portunia-gate user --help` les listent sur le serveur.
 
 Voir aussi [docs/exploitation.fr.md](docs/exploitation.fr.md) : sauvegardes, mise à jour, journaux, dépannage.
 

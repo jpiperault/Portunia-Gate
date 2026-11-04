@@ -244,7 +244,19 @@ async fn supervise(state: &State, token: &str) -> Result<()> {
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-        .with_context(|| format!("{} {}", t!("cannot start", "démarrage impossible de"), bin.display()))?;
+        .map_err(|e| {
+            // Dossier de données monté « noexec » (certains LXC, durcissements) : le programme
+            // téléchargé ne peut pas s'y lancer. Le cloudflared du système, lui, le peut.
+            let hint = if e.kind() == std::io::ErrorKind::PermissionDenied {
+                t!(
+                    " (folder mounted noexec? install cloudflared in /usr/bin and set PORTUNIA_GATE_CLOUDFLARED=/usr/bin/cloudflared in the configuration file)",
+                    " (dossier monté noexec ? installez cloudflared dans /usr/bin et ajoutez PORTUNIA_GATE_CLOUDFLARED=/usr/bin/cloudflared au fichier de configuration)"
+                )
+            } else {
+                ""
+            };
+            anyhow!("{} {}: {e}{hint}", t!("cannot start", "démarrage impossible de"), bin.display())
+        })?;
     let last = Arc::new(Mutex::new(None::<String>));
     if let Some(err) = child.stderr.take() {
         let last = last.clone();
@@ -321,7 +333,12 @@ pub async fn check(state: &State) -> Result<Value> {
         return Ok(json!({ "ok": false, "message": t!("Fill in the public address first.", "Renseignez d'abord l'adresse publique.") }));
     }
     let target = format!("{url}{}", portal::PING_PATH);
-    let expected = portal::instance_id().to_string();
+    // Lancée en ligne de commande, la vérification attend l'identifiant du service, pas le sien.
+    let expected = crate::model::setting(&state.db, crate::live::SNAPSHOT)
+        .await?
+        .and_then(|s| s["instance"].as_str().map(str::to_owned))
+        .filter(|_| !crate::portal::is_service())
+        .unwrap_or_else(|| portal::instance_id().to_string());
     let answer = tokio::task::spawn_blocking(move || {
         let agent = ureq::AgentBuilder::new().redirects(0).timeout(Duration::from_secs(15)).build();
         match agent.get(&target).call() {

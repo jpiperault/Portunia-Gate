@@ -64,6 +64,17 @@ pub fn instance_id() -> &'static str {
     INSTANCE.get_or_init(|| Uuid::new_v4().to_string())
 }
 
+static SERVICE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Ce processus est le service, et non une commande d'administration.
+pub fn set_service() {
+    SERVICE.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn is_service() -> bool {
+    SERVICE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 async fn ping() -> &'static str {
     instance_id()
 }

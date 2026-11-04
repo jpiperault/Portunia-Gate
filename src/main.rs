@@ -104,12 +104,41 @@ enum Command {
         /// Number of events shown.
         #[arg(long, default_value_t = 30)]
         last: i64,
+        /// Only events whose account, name or detail contains this text.
+        #[arg(long)]
+        search: Option<String>,
+        /// Writes the events to a CSV file (spreadsheet), up to 5000 with --last.
+        #[arg(long, value_name = "FILE")]
+        csv: Option<PathBuf>,
     },
-    /// Latest sessions.
+    /// Sessions, newest first; « sessions show ID » for one session and its recording.
+    #[command(args_conflicts_with_subcommands = true)]
     Sessions {
+        #[command(subcommand)]
+        cmd: Option<SessionsCmd>,
         #[arg(long, default_value_t = 30)]
         last: i64,
+        /// Account.
+        #[arg(long)]
+        user: Option<String>,
+        /// Server.
+        #[arg(long)]
+        server: Option<String>,
+        /// From this day (YYYY-MM-DD).
+        #[arg(long)]
+        since: Option<String>,
+        /// Up to this day included (YYYY-MM-DD).
+        #[arg(long)]
+        until: Option<String>,
+        /// Text shown on screen or typed during the session.
+        #[arg(long)]
+        text: Option<String>,
+        /// Only sessions whose keystrokes are recorded.
+        #[arg(long)]
+        input: bool,
     },
+    /// Server hardening state, as noted by the installer every 15 minutes.
+    Hardening,
     /// Web portal.
     #[command(subcommand)]
     Portal(PortalCmd),
@@ -119,12 +148,21 @@ enum Command {
     /// Dedicated relay: this machine publishes the web portal of a Gate.
     #[command(subcommand)]
     Edge(EdgeCmd),
-    /// General settings: auth_policy, banner (banniere), name (nom), language (langue: en or fr).
+    /// General settings; without a name, lists them all.
     Setting {
-        /// auth_policy, banner, name or language.
-        key: String,
+        /// auth_policy, banner, name, language, session_hours, remember_password, own_replay or sensitive_commands.
+        key: Option<String>,
         /// New value; without a value, shows the current one.
         value: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum SessionsCmd {
+    /// One session: account, server, times, recording file and its signature check.
+    Show {
+        /// Identifier, or its first characters as listed by « sessions ».
+        id: String,
     },
 }
 
@@ -162,6 +200,35 @@ enum PortalCmd {
     },
     /// Closes all web sessions without closing the portal (within 30 seconds).
     CloseSessions,
+    /// Checks that this Gate answers at the portal's public address.
+    Test,
+    /// Let's Encrypt certificate of the HTTPS listener; without options, shows its state.
+    Acme {
+        /// Domain names, comma-separated.
+        #[arg(long, value_delimiter = ',')]
+        domains: Option<Vec<String>>,
+        /// Contact address for Let's Encrypt (expiry notices).
+        #[arg(long)]
+        email: Option<String>,
+        /// tls-alpn (HTTPS listener reachable on 443) or dns-cloudflare (Cloudflare API token).
+        #[arg(long)]
+        method: Option<String>,
+        /// Test authority (certificates not trusted by browsers): on or off.
+        #[arg(long, value_parser = parse_switch)]
+        staging: Option<bool>,
+        /// Asks the Cloudflare API token (Zone › DNS › Edit) for dns-cloudflare; empty entry: erases it.
+        #[arg(long)]
+        cloudflare_token: bool,
+        /// Accepts the Let's Encrypt Subscriber Agreement (needed to turn it on).
+        #[arg(long)]
+        accept_terms: bool,
+        /// Turns Let's Encrypt off (the current certificate stays until replaced).
+        #[arg(long, conflicts_with_all = ["domains", "renew"])]
+        off: bool,
+        /// Renews the certificate now.
+        #[arg(long)]
+        renew: bool,
+    },
     /// Changes how browsers reach the portal; what is not given stays as it is.
     Expose {
         /// cloudflare, internal, direct, proxy or relay.
@@ -280,6 +347,12 @@ enum UserCmd {
         #[arg(long)]
         undo: bool,
     },
+    /// Accepted sign-in combinations, e.g. "key+totp"; "" goes back to the global setting.
+    Policy { login: String, policy: String },
+    /// New temporary password, shown once: the user chooses theirs at the next sign-in in Portunia. Closes their sessions.
+    ResetPassword { login: String },
+    /// Erases the TOTP code: a new one is enrolled at the next sign-in in Portunia, or with « user totp ». Closes their sessions.
+    ResetCode { login: String },
 }
 
 #[derive(Subcommand)]
@@ -724,6 +797,7 @@ async fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Command::Serve => {
+            portal::set_service();
             audit::log(
                 &state.db,
                 "systeme",
@@ -756,14 +830,44 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Rule(cmd) => rule_cmd(&state, cmd).await,
         Command::Portal(cmd) => portal_cmd(&state, cmd).await,
         Command::Assist(cmd) => assist_cmd(&state, cmd).await,
-        Command::Audit { verify, last } => {
+        Command::Audit { verify, last, search, csv } => {
             if verify {
                 match audit::verify(&state.db).await? {
                     Ok(n) => println!("{}", t!(format!("Log intact: {n} chained events."), format!("Journal intact : {n} événements chaînés."))),
                     Err(broken) => bail!(t!(format!("LOG TAMPERED WITH: {broken}"), format!("JOURNAL ALTÉRÉ : {broken}"))),
                 }
             }
-            for e in audit::last(&state.db, last).await? {
+            let filter = search
+                .as_deref()
+                .map(str::trim)
+                .filter(|q| !q.is_empty())
+                .map(|q| format!("%{}%", q.replace(['%', '\0'], "")));
+            let mut rows: Vec<audit::Entry> = sqlx::query_as(
+                "SELECT * FROM audit WHERE $2::text IS NULL OR actor ILIKE $2 OR event ILIKE $2 OR detail::text ILIKE $2 ORDER BY seq DESC LIMIT $1",
+            )
+            .bind(last.clamp(1, 5000))
+            .bind(filter)
+            .fetch_all(&state.db)
+            .await?;
+            rows.reverse();
+            if let Some(path) = csv {
+                // Même format que l'export de Portunia : séparateur « ; », lisible par un tableur.
+                let mut out = String::from("\u{feff}numero;date;qui;evenement;detail\n");
+                for e in &rows {
+                    out.push_str(&format!(
+                        "{};{};{};{};{}\n",
+                        e.seq,
+                        api::csv_field(&e.at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S").to_string()),
+                        api::csv_field(&e.actor),
+                        api::csv_field(&e.event),
+                        api::csv_field(&e.detail.to_string())
+                    ));
+                }
+                std::fs::write(&path, out).with_context(|| t!(format!("writing {}", path.display()), format!("écriture de {}", path.display())))?;
+                println!("✓ {} {} ({})", rows.len(), t!("events written to", "événements écrits dans"), path.display());
+                return Ok(());
+            }
+            for e in rows {
                 println!(
                     "{:>6}  {}  {:<14} {:<26} {}",
                     e.seq,
@@ -775,64 +879,221 @@ async fn run(cli: Cli) -> Result<()> {
             }
             Ok(())
         }
-        Command::Sessions { last } => {
-            for s in model::last_sessions(&state.db, last).await? {
+        Command::Sessions { cmd: Some(SessionsCmd::Show { id }), .. } => session_show(&state, &id).await,
+        Command::Sessions { cmd: None, last, user, server, since, until, text, input } => {
+            let filter = model::AuditFilter {
+                login: user,
+                target: server,
+                since: since.as_deref().map(|d| parse_day(d, false)).transpose()?,
+                until: until.as_deref().map(|d| parse_day(d, true)).transpose()?,
+                text,
+                with_input: input,
+                limit: last.clamp(1, 2000),
+            };
+            for s in model::audit_sessions(&state.db, &filter).await? {
                 let end = s
                     .ended_at
                     .map(|e| e.with_timezone(&chrono::Local).format("%H:%M:%S").to_string())
                     .unwrap_or_else(|| t!("ongoing", "en cours").into());
+                let mut marks = Vec::new();
+                if s.recording.is_some() {
+                    marks.push(t!("recorded", "enregistrée"));
+                }
+                if s.frappe {
+                    marks.push(t!("keystrokes", "frappe"));
+                }
                 println!(
-                    "{}  {}  {:<12} {:<12} {:<7} {:<30} {:>9} o  {}",
+                    "{}  {}  {:<8} {:<12} {:<5} {:<10} {:<30} {:<16} {:>10} o  {}",
                     &s.id.to_string()[..8],
                     s.started_at.with_timezone(&chrono::Local).format("%d/%m %H:%M:%S"),
                     end,
                     s.login,
                     s.kind,
-                    format!("{} {}", s.target, s.detail),
+                    s.mode,
+                    format!("{} {}", s.target, s.detail).trim(),
+                    s.client_addr,
                     s.bytes,
-                    s.recording.unwrap_or_default()
+                    marks.join(", ")
                 );
             }
             Ok(())
         }
-        Command::Setting { key, value } => {
-            // Noms anglais acceptés ; les réglages restent rangés sous leur nom français.
-            let key = match key.as_str() {
-                "banner" => "banniere".to_string(),
-                "name" => "nom".to_string(),
-                "language" => "langue".to_string(),
-                _ => key,
-            };
-            if !["auth_policy", "banniere", "nom", "langue"].contains(&key.as_str()) {
-                bail!(t!("unknown setting: auth_policy, banner, name or language", "réglage inconnu : auth_policy, banniere, nom ou langue"));
+        Command::Hardening => {
+            let text = std::fs::read_to_string(state.config.data_dir.join("durcissement.json")).ok();
+            let r = api::hardening_report(text.as_deref().filter(|t| t.len() < 64 * 1024), chrono::Utc::now());
+            if r["actif"] != json!(true) {
+                println!("{}", t!("Not hardened: sudo bash installer.sh harden (« harden simulation » shows the plan).", "Pas durci : sudo bash installer.sh durcir (« durcir simulation » montre le plan)."));
+                return Ok(());
             }
-            if key == "langue" {
-                if let Some(v) = &value {
-                    if !["en", "fr", ""].contains(&v.as_str()) {
-                        bail!(t!("language: en, fr, or empty for the system's language", "langue : en, fr, ou vide pour la langue du système"));
+            let e = &r["etat"];
+            let yes_no = |v: &serde_json::Value| if *v == json!(true) { t!("yes", "oui") } else { t!("no", "non") };
+            println!("{} {} ({} {} min)", t!("Noted:", "Relevé :"), e["date"].as_str().unwrap_or("?"), t!("age", "il y a"), r["age_min"]);
+            println!("{} {}", t!("Firewall:", "Pare-feu :"), yes_no(&e["pare_feu"]));
+            println!("{} {}", t!("System SSH tightened:", "SSH du système resserré :"), yes_no(&e["ssh"]));
+            println!("{} {}", t!("Kernel settings:", "Réglages du noyau :"), yes_no(&e["noyau"]));
+            println!("{} {}", t!("Automatic security updates:", "Mises à jour de sécurité automatiques :"), yes_no(&e["mises_a_jour"]));
+            println!("{} {}", t!("Services stopped:", "Services arrêtés :"), e["services_arretes"]);
+            let alerts: Vec<&str> = r["alertes"].as_array().into_iter().flatten().filter_map(|a| a.as_str()).collect();
+            for a in &alerts {
+                println!(
+                    "⚠ {}",
+                    match *a {
+                        "ancien" => t!("State not noted for over an hour: is the hardening timer running?", "État non relevé depuis plus d'une heure : la minuterie du durcissement tourne-t-elle ?"),
+                        "pare_feu" => t!("The firewall is stopped although planned.", "Le pare-feu est arrêté alors qu'il est prévu."),
+                        "services" => t!("Stopped services were started again.", "Des services arrêtés ont été relancés."),
+                        _ => t!("Unreadable state.", "État illisible."),
                     }
-                }
+                );
             }
-            match value {
-                None => println!(
-                    "{}",
-                    model::setting(&state.db, &key)
-                        .await?
-                        .map(|v| v.to_string())
-                        .unwrap_or_else(|| t!("(default)", "(défaut)").into())
-                ),
-                Some(v) => {
-                    if key == "auth_policy" {
-                        auth::Policy::parse(&v)?;
-                    }
-                    model::set_setting(&state.db, &key, json!(v)).await?;
-                    audit::log(&state.db, "console", "reglage.modifie", json!({ "reglage": key, "valeur": v })).await?;
-                    println!("{}", t!("Setting saved.", "Réglage enregistré."));
-                }
+            if alerts.is_empty() {
+                println!("✓ {}", t!("No alert.", "Aucune alerte."));
             }
             Ok(())
         }
+        Command::Setting { key: None, .. } => {
+            for (name, value) in all_settings(&state).await? {
+                println!("{name:<20} {value}");
+            }
+            Ok(())
+        }
+        Command::Setting { key: Some(key), value } => setting_cmd(&state, &key, value).await,
     }
+}
+
+/// Réglages généraux, sous leur nom anglais, avec leur valeur effective.
+async fn all_settings(state: &State) -> Result<Vec<(&'static str, String)>> {
+    let on_off = |b: bool| if b { "on" } else { "off" }.to_string();
+    Ok(vec![
+        ("name", api::setting_str(state, "nom", "Portunia Gate").await?),
+        ("language", api::setting_str(state, "langue", "").await?),
+        ("auth_policy", model::default_policy(&state.db).await?.to_string()),
+        ("session_hours", api::session_hours(state).await?.to_string()),
+        ("remember_password", on_off(api::remember_allowed(state).await?)),
+        ("own_replay", on_off(api::own_sessions_allowed(state).await?)),
+        ("sensitive_commands", api::sensitive_commands(state).await?.join(", ")),
+        ("banner", api::setting_str(state, "banniere", sshd::default_banner()).await?.replace('\n', "\\n")),
+    ])
+}
+
+async fn setting_cmd(state: &State, key: &str, value: Option<String>) -> Result<()> {
+    // Noms anglais ou français ; les réglages restent rangés sous leur nom français.
+    let key = match key {
+        "banner" | "banniere" => "banniere",
+        "name" | "nom" => "nom",
+        "language" | "langue" => "langue",
+        "auth_policy" | "politique" => "auth_policy",
+        "session_hours" | "duree_session_h" => "duree_session_h",
+        "remember_password" | "memo_mot_de_passe" => "memo_mot_de_passe",
+        "own_replay" | "relecture_propres" => "relecture_propres",
+        "sensitive_commands" | "commandes_sensibles" => "commandes_sensibles",
+        _ => bail!(t!(
+            "unknown setting: auth_policy, banner, name, language, session_hours, remember_password, own_replay or sensitive_commands",
+            "réglage inconnu : auth_policy, banner, name, language, session_hours, remember_password, own_replay ou sensitive_commands"
+        )),
+    };
+    let Some(v) = value else {
+        let shown = all_settings(state).await?;
+        let english = match key {
+            "banniere" => "banner",
+            "nom" => "name",
+            "langue" => "language",
+            "duree_session_h" => "session_hours",
+            "memo_mot_de_passe" => "remember_password",
+            "relecture_propres" => "own_replay",
+            "commandes_sensibles" => "sensitive_commands",
+            other => other,
+        };
+        println!("{}", shown.into_iter().find(|(n, _)| *n == english).map(|(_, v)| v).unwrap_or_default());
+        return Ok(());
+    };
+    let stored = match key {
+        "langue" => {
+            let v = v.trim().to_lowercase();
+            if !["en", "fr", ""].contains(&v.as_str()) {
+                bail!(t!("language: en, fr, or empty for the system's language", "langue : en, fr, ou vide pour la langue du système"));
+            }
+            json!(v)
+        }
+        "nom" => {
+            anyhow::ensure!(!v.trim().is_empty(), t!("name: give a name", "nom : indiquez un nom"));
+            json!(v.trim())
+        }
+        "auth_policy" => json!(auth::Policy::parse(&v)?.to_string()),
+        "duree_session_h" => {
+            let h: i64 = v.trim().parse().map_err(|_| anyhow!(t!("session_hours: a number of hours", "session_hours : un nombre d'heures")))?;
+            if !(1..=168).contains(&h) {
+                bail!(t!("Session duration: 1 to 168 hours", "Durée de session : 1 à 168 heures"));
+            }
+            json!(h)
+        }
+        "memo_mot_de_passe" | "relecture_propres" => json!(parse_switch(&v).map_err(|e| anyhow!(e))?),
+        "commandes_sensibles" => {
+            let list: Vec<String> = v.split(',').map(|c| c.trim().to_string()).filter(|c| !c.is_empty()).collect();
+            json!(list)
+        }
+        _ => json!(v),
+    };
+    model::set_setting(&state.db, key, stored.clone()).await?;
+    audit::log(&state.db, "console", "reglage.modifie", json!({ "reglage": key, "valeur": stored })).await?;
+    println!("{}", t!("Setting saved.", "Réglage enregistré."));
+    if key == "langue" {
+        println!("  {}", t!("The service follows it within 30 seconds.", "Le service la suit sous 30 secondes."));
+    }
+    Ok(())
+}
+
+/// Date « AAAA-MM-JJ » à minuit, heure de la Gate ; `end` : fin de ce jour (minuit suivant).
+fn parse_day(text: &str, end: bool) -> Result<chrono::DateTime<chrono::Utc>> {
+    let day = chrono::NaiveDate::parse_from_str(text.trim(), "%Y-%m-%d").map_err(|_| anyhow!(t!("Date: YYYY-MM-DD", "Date : AAAA-MM-JJ")))?;
+    let day = if end { day.succ_opt().unwrap_or(day) } else { day };
+    let local = day
+        .and_hms_opt(0, 0, 0)
+        .and_then(|d| d.and_local_timezone(chrono::Local).earliest())
+        .ok_or_else(|| anyhow!(t!("Invalid date", "Date invalide")))?;
+    Ok(local.with_timezone(&chrono::Utc))
+}
+
+/// Une session : compte, serveur, horaires, fichier d'enregistrement et contrôle de sa signature.
+async fn session_show(state: &State, id: &str) -> Result<()> {
+    let found = model::audit_sessions_by_prefix(&state.db, id).await?;
+    let s = match found.as_slice() {
+        [one] => one,
+        [] => bail!(t!("Session not found", "Session introuvable")),
+        _ => bail!(t!("Several sessions start this way: give more characters", "Plusieurs sessions commencent ainsi : donnez plus de caractères")),
+    };
+    let local = |d: chrono::DateTime<chrono::Utc>| d.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S").to_string();
+    println!("{} {}", t!("Session:", "Session :"), s.id);
+    println!("{} {}", t!("Account:", "Compte :"), s.login);
+    println!("{} {} {} ({}, {})", t!("Server:", "Serveur :"), s.target, s.detail, s.kind, s.mode);
+    println!("{} {}", t!("From:", "Depuis :"), s.client_addr);
+    println!("{} {} → {}", t!("Times:", "Horaires :"), local(s.started_at), s.ended_at.map(local).unwrap_or_else(|| t!("ongoing", "en cours").into()));
+    println!("{} {} o", t!("Volume:", "Volume :"), s.bytes);
+    println!("{} {}", t!("Keystrokes recorded:", "Frappe enregistrée :"), if s.frappe { t!("yes", "oui") } else { t!("no", "non") });
+    let Some(path) = &s.recording else {
+        println!("{}", t!("Not recorded (jump mode or no recording).", "Non enregistrée (mode rebond ou sans enregistrement)."));
+        return Ok(());
+    };
+    println!("{} {path}", t!("Recording:", "Enregistrement :"));
+    let raw = std::fs::read(path).map_err(|e| anyhow!(t!(format!("unreadable recording file: {e}"), format!("fichier d'enregistrement illisible : {e}"))))?;
+    let sha = keys::sha256_hex(&raw);
+    match (&s.recording_sha256, &s.signature) {
+        (Some(expected), Some(sig)) => {
+            use base64::Engine;
+            let sig = base64::engine::general_purpose::STANDARD.decode(sig).unwrap_or_default();
+            if *expected == sha && state.keys.verify(recording::signature_message(s.id, &sha).as_bytes(), &sig) {
+                println!("✓ {}", t!("Signature verified: the file is as the Gate wrote it.", "Signature vérifiée : le fichier est tel que la Gate l'a écrit."));
+            } else {
+                println!("⚠ {}", t!("ALTERED FILE: its fingerprint or signature does not match.", "FICHIER ALTÉRÉ : son empreinte ou sa signature ne correspond pas."));
+            }
+        }
+        _ => println!("{}", t!("No signature yet (session ongoing or interrupted).", "Pas encore de signature (session en cours ou interrompue).")),
+    }
+    if s.kind == "rdp" {
+        println!("{}", t!("Replay: Portunia › Audit (Remote Desktop recordings are read by Portunia only).", "Relecture : Portunia › Audit (les enregistrements Bureau à distance ne se lisent que dans Portunia)."));
+    } else {
+        println!("{} sudo asciinema play {path}", t!("Replay in a terminal (not logged, masked input shown):", "Relecture dans un terminal (non journalisée, saisies masquées visibles) :"));
+    }
+    Ok(())
 }
 
 /// Noms du certificat de l'API : PORTUNIA_GATE_TLS_NAMES (séparés par des virgules), sinon « portunia-gate ».
@@ -1004,16 +1265,79 @@ async fn user_cmd(state: &State, cmd: UserCmd) -> Result<()> {
             println!("{}", t!(format!("{} is now {role}.", user.login), format!("{} est maintenant {role}.", user.login)));
         }
         UserCmd::List => {
+            let extra: Vec<(uuid::Uuid, Vec<String>, i64)> = sqlx::query_as(
+                "SELECT u.id,
+                        COALESCE((SELECT array_agg(g.name ORDER BY g.name) FROM group_members m JOIN groups g ON g.id = m.group_id WHERE m.user_id = u.id), '{}'),
+                        (SELECT count(*) FROM user_keys k WHERE k.user_id = u.id)
+                 FROM users u",
+            )
+            .fetch_all(db)
+            .await?;
             for u in model::users(db).await? {
+                let (groups, keys) = extra.iter().find(|e| e.0 == u.id).map(|e| (e.1.join(","), e.2)).unwrap_or_default();
+                let mut marks = Vec::new();
+                if u.must_change_password {
+                    marks.push(t!("TEMPORARY PASSWORD", "MOT DE PASSE PROVISOIRE"));
+                }
+                if u.disabled {
+                    marks.push(t!("DISABLED", "DÉSACTIVÉ"));
+                }
                 println!(
-                    "{:<20} {:<8} code {:<9} {}{}",
+                    "{:<20} {:<8} code {:<9} {} {:<3} {:<26} {:<30} {}",
                     u.login,
                     u.role,
                     if u.totp_secret.is_some() { t!("enrolled", "enrôlé") } else { t!("missing", "absent") },
+                    t!("keys", "clés"),
+                    keys,
                     u.auth_policy.unwrap_or_else(|| t!("(global)", "(général)").into()),
-                    if u.disabled { t!("  DISABLED", "  DÉSACTIVÉ") } else { "" }
+                    groups,
+                    marks.join("  ")
                 );
             }
+        }
+        UserCmd::Policy { login, policy } => {
+            let user = find(login).await?;
+            let policy = Some(policy.trim().to_string()).filter(|p| !p.is_empty()).map(|p| auth::Policy::parse(&p).map(|p| p.to_string())).transpose()?;
+            sqlx::query("UPDATE users SET auth_policy = $2 WHERE id = $1").bind(user.id).bind(&policy).execute(db).await?;
+            audit::log(db, "console", "compte.modifie", json!({ "compte": user.login, "politique": policy })).await?;
+            println!("{} {}", t!("Sign-in combinations:", "Combinaisons de connexion :"), policy.unwrap_or_else(|| t!("global setting", "réglage général").into()));
+        }
+        UserCmd::ResetPassword { login } => {
+            let user = find(login).await?;
+            let password = auth::temp_password()?;
+            sqlx::query("UPDATE users SET password_hash = $2, must_change_password = true WHERE id = $1")
+                .bind(user.id)
+                .bind(auth::hash_password(&password)?)
+                .execute(db)
+                .await?;
+            model::revoke_logins(db, user.id).await?;
+            model::order_cut(db, user.id).await?;
+            audit::log(db, "console", "compte.mot_de_passe_provisoire", json!({ "compte": user.login })).await?;
+            println!("{} {password}", t!("Temporary password:", "Mot de passe provisoire :"));
+            println!(
+                "  {}",
+                t!(
+                    "At the next sign-in in Portunia, the user chooses theirs. Without Portunia: sudo portunia-gate user passwd. Their open sessions close within 30 seconds.",
+                    "À la prochaine connexion dans Portunia, l'utilisateur choisit le sien. Sans Portunia : sudo portunia-gate user passwd. Ses sessions ouvertes se ferment sous 30 secondes."
+                )
+            );
+        }
+        UserCmd::ResetCode { login } => {
+            let user = find(login).await?;
+            sqlx::query("UPDATE users SET totp_secret = NULL, totp_pending = NULL, totp_last_step = 0 WHERE id = $1")
+                .bind(user.id)
+                .execute(db)
+                .await?;
+            model::revoke_logins(db, user.id).await?;
+            model::order_cut(db, user.id).await?;
+            audit::log(db, "console", "compte.totp_reinitialise", json!({ "compte": user.login })).await?;
+            println!(
+                "{}",
+                t!(
+                    "Code erased: a new one is enrolled at the next sign-in in Portunia, or with « sudo portunia-gate user totp ». Open sessions close within 30 seconds.",
+                    "Code effacé : un nouveau s'enrôle à la prochaine connexion dans Portunia, ou avec « sudo portunia-gate user totp ». Les sessions ouvertes se ferment sous 30 secondes."
+                )
+            );
         }
         UserCmd::Key { login, key } => {
             let user = find(login).await?;
@@ -1059,6 +1383,10 @@ async fn user_cmd(state: &State, cmd: UserCmd) -> Result<()> {
                 .bind(!undo)
                 .execute(db)
                 .await?;
+            if !undo {
+                // Plus de connexion ; ses sessions ouvertes se ferment au tour suivant du service.
+                model::revoke_logins(db, user.id).await?;
+            }
             audit::log(
                 db,
                 "console",
@@ -1416,6 +1744,85 @@ async fn portal_cmd(state: &State, cmd: PortalCmd) -> Result<()> {
             println!("✓ {}", t!(format!("{open} web sign-in(s) ended; open web terminals close within 30 seconds."), format!("{open} connexion(s) web terminée(s) ; les terminaux web ouverts se ferment sous 30 secondes.")));
             return Ok(());
         }
+        PortalCmd::Test => {
+            let r = tunnel::check(state).await?;
+            let ok = r["ok"] == json!(true);
+            println!("{} {}", if ok { "✓" } else { "✗" }, r["message"].as_str().unwrap_or_default());
+            if !ok {
+                std::process::exit(1);
+            }
+            return Ok(());
+        }
+        PortalCmd::Acme { domains, email, method, staging, cloudflare_token, accept_terms, off, renew } => {
+            let current = acme::config(state).await?;
+            let changing = off || domains.is_some() || email.is_some() || method.is_some() || staging.is_some() || cloudflare_token;
+            if changing {
+                let turn_on = !off && (current.actif || domains.is_some());
+                if turn_on && !current.actif && !accept_terms {
+                    bail!(t!(
+                        format!("Read the Let's Encrypt Subscriber Agreement ({}), then add --accept-terms", acme::TERMS),
+                        format!("Lisez les conditions d'utilisation de Let's Encrypt ({}), puis ajoutez --accept-terms", acme::TERMS)
+                    ));
+                }
+                let token = if cloudflare_token {
+                    Some(prompt_secret(t!("Cloudflare API token (empty: erase): ", "Jeton d'API Cloudflare (vide : l'effacer) : "))?)
+                } else {
+                    None
+                };
+                let c = acme::update(
+                    state,
+                    acme::Update {
+                        actif: turn_on,
+                        domaines: domains.unwrap_or_else(|| current.domaines.clone()),
+                        email: email.unwrap_or_else(|| current.email.clone()),
+                        methode: method.unwrap_or_else(|| if current.methode.is_empty() { "tls-alpn".into() } else { current.methode.clone() }),
+                        essai: staging.unwrap_or(current.essai),
+                        cloudflare_jeton: token.clone(),
+                    },
+                )
+                .await?;
+                model::bump_setting(db, live::ACME_WAKE).await?;
+                audit::log(
+                    db,
+                    "console",
+                    "portail.acme",
+                    json!({ "actif": c.actif, "domaines": c.domaines, "methode": c.methode, "essai": c.essai, "jeton_cloudflare_change": token.is_some() }),
+                )
+                .await?;
+                println!(
+                    "✓ {}",
+                    if c.actif {
+                        t!("Let's Encrypt on: the service requests the certificate within 30 seconds (portal acme to follow).", "Let's Encrypt activé : le service demande le certificat sous 30 secondes (portal acme pour suivre).")
+                    } else {
+                        t!("Let's Encrypt off.", "Let's Encrypt désactivé.")
+                    }
+                );
+            }
+            if renew {
+                anyhow::ensure!(acme::config(state).await?.actif, t!("Let's Encrypt is not enabled", "Let's Encrypt n'est pas activé"));
+                model::bump_setting(db, live::ACME_WAKE).await?;
+                audit::log(db, "console", "portail.acme_renouveler", json!({})).await?;
+                println!("✓ {}", t!("Renewal requested: done by the service within 30 seconds.", "Renouvellement demandé : fait par le service sous 30 secondes."));
+            }
+            if !changing && !renew {
+                let c = acme::config(state).await?;
+                println!("Let's Encrypt : {}", if c.actif { t!("on", "activé") } else { t!("off", "désactivé") });
+                if c.actif || !c.domaines.is_empty() {
+                    println!("{} {}", t!("Domains:", "Domaines :"), c.domaines.join(", "));
+                    println!("{} {}", t!("Email:", "E-mail :"), if c.email.is_empty() { "—" } else { &c.email });
+                    println!("{} {}{}", t!("Check:", "Vérification :"), if c.methode.is_empty() { "tls-alpn" } else { &c.methode }, if c.essai { t!(" (test authority)", " (autorité d'essai)") } else { "" });
+                }
+                if let Some(live) = service_snapshot(state).await? {
+                    let a = &live["acme"];
+                    for (label, key) in [(t!("State:", "État :"), "etat"), (t!("Step:", "Étape :"), "etape"), (t!("Error:", "Erreur :"), "erreur"), (t!("Last:", "Dernier :"), "derniere"), (t!("Next:", "Prochain :"), "prochaine")] {
+                        if let Some(v) = a[key].as_str() {
+                            println!("{label} {v}");
+                        }
+                    }
+                }
+            }
+            return Ok(());
+        }
         PortalCmd::RelayAdd { name, address } => {
             let (entry, code) = relay::add(state, &name, &address).await?;
             audit::log(&state.db, "console", "relais.ajoute", json!({ "nom": entry.nom, "adresse": entry.adresse })).await?;
@@ -1534,6 +1941,27 @@ async fn portal_cmd(state: &State, cmd: PortalCmd) -> Result<()> {
             );
             let open: i64 = sqlx::query_scalar("SELECT count(*) FROM web_sessions WHERE expires_at > now()").fetch_one(db).await?;
             println!("{} {open}", t!("Web sign-ins under way:", "Connexions web en cours :"));
+            if let Some(live) = service_snapshot(state).await? {
+                let t = &live["tunnel"];
+                if t["jeton_defini"] == json!(true) {
+                    println!(
+                        "{} {}{}",
+                        t!("Managed Cloudflare tunnel:", "Tunnel Cloudflare géré :"),
+                        t["etat"].as_str().unwrap_or("?"),
+                        t["erreur"].as_str().map(|e| format!(" — {e}")).unwrap_or_default()
+                    );
+                } else if t["externe"] == json!(true) {
+                    println!("{} {}", t!("Separate cloudflared:", "cloudflared à part :"), if t["externe_relie"] == json!(true) { t!("connected", "relié") } else { t!("not connected", "non relié") });
+                }
+                let h = &live["https"];
+                println!(
+                    "{} {}{}",
+                    t!("HTTPS listener:", "Écoute HTTPS :"),
+                    h["ouverte"].as_str().unwrap_or("—"),
+                    h["erreur"].as_str().map(|e| format!(" — {e}")).unwrap_or_default()
+                );
+                println!("{} {}", t!("Open web terminals:", "Terminaux web ouverts :"), live["terminaux_web"]);
+            }
             portal::reload_exposure(state).await?;
             portal::exposure(state)
         }
@@ -1559,6 +1987,25 @@ async fn close_web_sessions(db: &PgPool) -> Result<u64> {
     Ok(done.rows_affected())
 }
 
+/// État en direct écrit par le service à chaque tour (live.rs) ; prévient s'il est ancien.
+async fn service_snapshot(state: &State) -> Result<Option<serde_json::Value>> {
+    let Some(live) = model::setting(&state.db, live::SNAPSHOT).await? else {
+        println!("{}", t!("(No live state: the service has not run since version 0.26.)", "(Pas d'état en direct : le service n'a pas tourné depuis la version 0.26.)"));
+        return Ok(None);
+    };
+    let age = live["date"]
+        .as_str()
+        .and_then(|d| chrono::DateTime::parse_from_rfc3339(d).ok())
+        .map(|d| (chrono::Utc::now() - d.with_timezone(&chrono::Utc)).num_seconds());
+    if age.is_none_or(|a| a > 120) {
+        println!(
+            "⚠ {}",
+            t!("Live state older than 2 minutes: is the service running? (systemctl status portunia-gate)", "État en direct vieux de plus de 2 minutes : le service tourne-t-il ? (systemctl status portunia-gate)")
+        );
+    }
+    Ok(Some(live))
+}
+
 async fn assist_cmd(state: &State, cmd: AssistCmd) -> Result<()> {
     let db = &state.db;
     match cmd {
@@ -1568,6 +2015,10 @@ async fn assist_cmd(state: &State, cmd: AssistCmd) -> Result<()> {
             println!("{} {}", t!("Assistance:", "Assistance :"), if s.enabled { t!("open", "ouverte") } else { t!("closed", "fermée") });
             println!("{} {}", t!("Technicians' group:", "Groupe des dépanneurs :"), s.group);
             println!("{} {} h", t!("Maximum duration:", "Durée maximale :"), s.hours);
+            println!("{} {}", t!("Portunia Assistance program:", "Programme Portunia Assistance :"), if assist::agent_file(state).exists() { t!("ready", "prêt") } else { t!("not downloaded yet", "pas encore téléchargé") });
+            if let Some(live) = service_snapshot(state).await? {
+                println!("{} {}", t!("People waiting for a technician:", "Personnes en attente d'un dépanneur :"), live["assistance_en_attente"]);
+            }
             println!(
                 "{} {}",
                 t!("Page for the person helped:", "Page de la personne aidée :"),

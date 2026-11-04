@@ -27,6 +27,21 @@ pub async fn set_setting(db: &PgPool, key: &str, value: Value) -> Result<()> {
     Ok(())
 }
 
+/// Comptes dont les sessions ouvertes doivent se fermer (mot de passe ou code réinitialisé en
+/// ligne de commande) : le service les ferme à sa prochaine vérification.
+pub const ORDER_CUT: &str = "console_coupures";
+
+pub async fn order_cut(db: &PgPool, user: Uuid) -> Result<()> {
+    let current = setting(db, ORDER_CUT).await?.unwrap_or(Value::Null);
+    let n = current["n"].as_i64().unwrap_or(0) + 1;
+    let mut list = current["comptes"].as_array().cloned().unwrap_or_default();
+    list.push(serde_json::json!({ "n": n, "compte": user }));
+    // Les 50 derniers suffisent : le service passe toutes les 30 secondes.
+    let excess = list.len().saturating_sub(50);
+    list.drain(..excess);
+    set_setting(db, ORDER_CUT, serde_json::json!({ "n": n, "comptes": list })).await
+}
+
 /// Fait avancer un compteur rangé dans les réglages (ordre passé d'un processus à l'autre).
 pub async fn bump_setting(db: &PgPool, key: &str) -> Result<()> {
     sqlx::query(
@@ -611,6 +626,15 @@ pub async fn audit_session(db: &PgPool, id: Uuid) -> Result<Option<AuditSession>
     Ok(sqlx::query_as(&format!("SELECT {AUDIT_COLUMNS} FROM sessions s WHERE s.id = $1"))
         .bind(id)
         .fetch_optional(db)
+        .await?)
+}
+
+/// Sessions dont l'identifiant commence par ce début (8 caractères affichés par « sessions »).
+pub async fn audit_sessions_by_prefix(db: &PgPool, prefix: &str) -> Result<Vec<AuditSession>> {
+    let prefix: String = prefix.chars().filter(|c| c.is_ascii_hexdigit() || *c == '-').collect::<String>().to_lowercase();
+    Ok(sqlx::query_as(&format!("SELECT {AUDIT_COLUMNS} FROM sessions s WHERE s.id::text LIKE $1 ORDER BY s.started_at DESC LIMIT 2"))
+        .bind(format!("{prefix}%"))
+        .fetch_all(db)
         .await?)
 }
 

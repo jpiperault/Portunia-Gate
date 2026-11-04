@@ -132,14 +132,14 @@ fn token() -> anyhow::Result<String> {
     Ok(B64URL.encode(random::<32>()?))
 }
 
-async fn setting_str(state: &State, key: &str, default: &str) -> anyhow::Result<String> {
+pub(crate) async fn setting_str(state: &State, key: &str, default: &str) -> anyhow::Result<String> {
     Ok(model::setting(&state.db, key)
         .await?
         .and_then(|v| v.as_str().map(str::to_owned))
         .unwrap_or_else(|| default.into()))
 }
 
-async fn session_hours(state: &State) -> anyhow::Result<i64> {
+pub(crate) async fn session_hours(state: &State) -> anyhow::Result<i64> {
     Ok(model::setting(&state.db, "duree_session_h")
         .await?
         .and_then(|v| v.as_i64())
@@ -147,7 +147,7 @@ async fn session_hours(state: &State) -> anyhow::Result<i64> {
         .clamp(1, 24 * 7))
 }
 
-async fn remember_allowed(state: &State) -> anyhow::Result<bool> {
+pub(crate) async fn remember_allowed(state: &State) -> anyhow::Result<bool> {
     Ok(model::setting(&state.db, "memo_mot_de_passe")
         .await?
         .and_then(|v| v.as_bool())
@@ -1266,7 +1266,7 @@ async fn admin_journal_verify(AxState(api): Ctx, headers: HeaderMap) -> ApiResul
     }))
 }
 
-fn csv_field(text: &str) -> String {
+pub(crate) fn csv_field(text: &str) -> String {
     // Une cellule qui commence par = + - @, une tabulation ou un retour serait lue comme une
     // formule par un tableur.
     let safe = if text.starts_with(['=', '+', '-', '@', '\t', '\r']) {
@@ -1402,11 +1402,11 @@ const SENSITIVE_DEFAULT: &[&str] = &[
     "rm -rf", "rm -fr", "mkfs", "dd if=", "chmod -R 777", "shutdown", "reboot", "iptables -F", "userdel", "DROP TABLE", "DROP DATABASE",
 ];
 
-async fn own_sessions_allowed(state: &State) -> anyhow::Result<bool> {
+pub(crate) async fn own_sessions_allowed(state: &State) -> anyhow::Result<bool> {
     Ok(model::setting(&state.db, "relecture_propres").await?.and_then(|v| v.as_bool()).unwrap_or(false))
 }
 
-async fn sensitive_commands(state: &State) -> anyhow::Result<Vec<String>> {
+pub(crate) async fn sensitive_commands(state: &State) -> anyhow::Result<Vec<String>> {
     Ok(match model::setting(&state.db, "commandes_sensibles").await? {
         Some(Value::Array(list)) => list.into_iter().filter_map(|v| v.as_str().map(str::to_owned)).collect(),
         _ => SENSITIVE_DEFAULT.iter().map(|s| s.to_string()).collect(),
@@ -1766,7 +1766,7 @@ const HARDENING_STALE_MIN: i64 = 60;
 
 /// État écrit par le serveur (voir installer.sh), avec ce qui mérite une alerte. La Gate ne fait
 /// que lire : le durcissement se pilote sur le serveur, avec les droits de root.
-fn hardening_report(text: Option<&str>, now: DateTime<Utc>) -> Value {
+pub(crate) fn hardening_report(text: Option<&str>, now: DateTime<Utc>) -> Value {
     let Some(text) = text else { return json!({ "actif": false }) };
     let Ok(state) = serde_json::from_str::<Value>(text) else {
         return json!({ "actif": true, "alertes": ["illisible"] });
