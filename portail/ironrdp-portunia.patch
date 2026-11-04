@@ -1,0 +1,61 @@
+diff --git a/crates/ironrdp-web/src/session.rs b/crates/ironrdp-web/src/session.rs
+index ac63029..2364eac 100644
+--- a/crates/ironrdp-web/src/session.rs
++++ b/crates/ironrdp-web/src/session.rs
+@@ -101,6 +101,7 @@ struct SessionBuilderInner {
+     enable_server_pointer: bool,
+     legacy_graphics: bool,
+     outbound_message_size_limit: Option<usize>,
++    performance_flags: Option<u32>,
+ }
+ 
+ impl Default for SessionBuilderInner {
+@@ -147,6 +148,7 @@ impl Default for SessionBuilderInner {
+             enable_server_pointer: true,
+             legacy_graphics: false,
+             outbound_message_size_limit: None,
++            performance_flags: None,
+         }
+     }
+ }
+@@ -297,6 +299,13 @@ impl iron_remote_desktop::SessionBuilder for SessionBuilder {
+             };
+             |enable_server_pointer: bool| { self.0.borrow_mut().enable_server_pointer = enable_server_pointer };
+             |legacy_graphics: bool| { self.0.borrow_mut().legacy_graphics = legacy_graphics };
++            // Portunia : effets visuels demandés au serveur (fond d'écran, thèmes, animations…).
++            |performance_flags: f64| {
++                self.0.borrow_mut().performance_flags = (performance_flags >= 0.0 && performance_flags <= f64::from(u32::MAX)).then(|| {
++                    #[expect(clippy::as_conversions, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
++                    { performance_flags as u32 }
++                });
++            };
+             |outbound_message_size_limit: f64| {
+                 let limit = if outbound_message_size_limit >= 0.0 && outbound_message_size_limit <= f64::from(u32::MAX) {
+                     #[expect(clippy::as_conversions, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+@@ -476,6 +485,10 @@ impl iron_remote_desktop::SessionBuilder for SessionBuilder {
+             security,
+         );
+ 
++        if let Some(flags) = self.0.borrow().performance_flags {
++            config.performance_flags = PerformanceFlags::from_bits_truncate(flags);
++        }
++
+         let enable_server_pointer = self.0.borrow().enable_server_pointer;
+         config.enable_server_pointer = enable_server_pointer;
+ 
+diff --git a/web-client/iron-remote-desktop-rdp/src/main.ts b/web-client/iron-remote-desktop-rdp/src/main.ts
+index c3312c9..2b817be 100644
+--- a/web-client/iron-remote-desktop-rdp/src/main.ts
++++ b/web-client/iron-remote-desktop-rdp/src/main.ts
+@@ -53,6 +53,11 @@ export function outboundMessageSizeLimit(limit: number): Extension {
+     return new Extension('outbound_message_size_limit', limit);
+ }
+ 
++// Portunia : effets visuels demandés au serveur (valeurs de PerformanceFlags, MS-RDPBCGR 2.2.1.11.1.1.1).
++export function performanceFlags(flags: number): Extension {
++    return new Extension('performance_flags', flags);
++}
++
+ export function enableCredssp(enable: boolean): Extension {
+     return new Extension('enable_credssp', enable);
+ }

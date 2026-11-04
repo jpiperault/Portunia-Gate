@@ -27,6 +27,11 @@
     <label>{{User|Utilisateur}}<input id="utilisateur" autocomplete="username" spellcheck="false" autocapitalize="off" required></label>
     <label>{{Password|Mot de passe}}<input id="mdp" type="password" autocomplete="current-password" required></label>
     <label>{{Domain (optional)|Domaine (facultatif)}}<input id="domaine" spellcheck="false" autocapitalize="off" placeholder="ACME"></label>
+    <label>{{Display quality|Qualité d'affichage}}<select id="qualite">
+      <option value="balanced">{{Balanced|Équilibrée}}</option>
+      <option value="fast">{{Fast: no wallpaper, themes or animations (slow links)|Rapide : sans fond d'écran, thèmes ni animations (liaisons lentes)}}</option>
+      <option value="best">{{Best: all visual effects|Maximale : tous les effets visuels}}</option>
+    </select></label>
     <p class="error" id="erreur" role="alert"></p>
     <button class="btn primary" type="submit" id="ouvrir">{{Open the session|Ouvrir la session}}</button>
   </form>

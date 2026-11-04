@@ -33,7 +33,7 @@ a { color: var(--accent); }
 .mark { width: 28px; height: 28px; border-radius: 7px; background: var(--accent); color: var(--accent-ink); display: grid; place-items: center; font-weight: 700; }
 .legal { font-size: 12px; color: var(--muted); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; margin: 0; white-space: pre-line; }
 label { display: flex; flex-direction: column; gap: 5px; font-size: 13px; }
-input { padding: 9px 11px; border-radius: 8px; border: 1px solid var(--line); background: var(--field); font-size: 14px; }
+input, select { padding: 9px 11px; border-radius: 8px; border: 1px solid var(--line); background: var(--field); font-size: 14px; }
 input.code { letter-spacing: .3em; font-family: var(--mono); }
 .btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 1px solid var(--line); background: var(--card); border-radius: 8px; padding: 7px 12px; font-size: 13px; text-decoration: none; color: var(--text); }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; padding: 9px 12px; }

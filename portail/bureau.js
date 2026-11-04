@@ -1,7 +1,7 @@
 // Portail web de Portunia Gate : Bureau à distance dans le navigateur (client IronRDP), à travers
 // le passage RDCleanPath de la Gate.
 import '/static/iron-remote-desktop.js?v=__V__';
-import { Backend, init, displayControl } from '/static/iron-remote-desktop-rdp.js?v=__V__';
+import { Backend, init, displayControl, performanceFlags } from '/static/iron-remote-desktop-rdp.js?v=__V__';
 
 const FR = document.documentElement.lang === 'fr';
 const T = (en, fr) => (FR ? fr : en);
@@ -49,6 +49,14 @@ function explain(err) {
 
 const ready = init('WARN').catch(() => {});
 
+// Qualité d'affichage : effets visuels demandés au serveur Windows (mêmes choix que Portunia).
+// Rapide = sans fond d'écran, glisser de fenêtre, animations, thèmes ni ombre du curseur ;
+// Maximale = lissage des polices et composition du bureau ; Équilibrée = réglage d'IronRDP.
+const QUALITY_FLAGS = { fast: 0x2f, best: 0x180 };
+const quality = document.getElementById('qualite');
+try { quality.value = QUALITY_FLAGS[localStorage.getItem('qualite-rdp')] ? localStorage.getItem('qualite-rdp') : 'balanced'; } catch {}
+quality.addEventListener('change', () => { try { localStorage.setItem('qualite-rdp', quality.value); } catch {} });
+
 async function open(user, password, domain) {
   // Jeton à usage unique pour ce serveur, demandé avec la session du portail.
   const res = await fetch(`/api/rdp/${encodeURIComponent(nom)}`, { method: 'POST', credentials: 'same-origin', headers: { 'X-Portunia-Gate': 'portail' } });
@@ -74,7 +82,7 @@ async function open(user, password, domain) {
   const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
   const start = desktopSize();
   lastSize = `${start.width}x${start.height}`;
-  const config = ui.configBuilder()
+  const builder = ui.configBuilder()
     .withUsername(user)
     .withPassword(password)
     .withServerDomain(domain)
@@ -82,8 +90,10 @@ async function open(user, password, domain) {
     .withProxyAddress(`${scheme}://${location.host}/ws-rdp`)
     .withAuthToken(data.jeton)
     .withDesktopSize(start)
-    .withExtension(displayControl(true))
-    .build();
+    .withExtension(displayControl(true));
+  const flags = QUALITY_FLAGS[quality.value];
+  if (flags !== undefined) builder.withExtension(performanceFlags(flags));
+  const config = builder.build();
   const session = await ui.connect(config);
   ui.setVisibility(true);
   document.getElementById('cad').disabled = false;
