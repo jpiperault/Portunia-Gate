@@ -323,7 +323,10 @@ summary() {
       echo "  │ avec votre application d'authentification. Laissez le champ Code vide."
     fi
     echo "  │"
-    echo "  │ Accès SSH direct : ssh -p ${ssh_port:-2222} <identifiant>@$(address)"
+    if [ -n "$login" ]; then
+      echo "  │ Sans Portunia : sudo portunia-gate user totp $login, puis user passwd $login"
+    fi
+    echo "  │ Accès SSH direct (code enrôlé) : ssh -p ${ssh_port:-2222} <identifiant>@$(address)"
   else
     echo "  │ ${B}In Portunia${N}: Extensions › enable Portunia Gate, then Gates › Add a Gate"
     echo "  │"
@@ -337,7 +340,10 @@ summary() {
       echo "  │ with your authenticator app. Leave the Code field empty."
     fi
     echo "  │"
-    echo "  │ Direct SSH access: ssh -p ${ssh_port:-2222} <login>@$(address)"
+    if [ -n "$login" ]; then
+      echo "  │ Without Portunia: sudo portunia-gate user totp $login, then user passwd $login"
+    fi
+    echo "  │ Direct SSH access (code enrolled): ssh -p ${ssh_port:-2222} <login>@$(address)"
   fi
   echo "  └──────────────────────────────────────────────────────────────────────────"
 }

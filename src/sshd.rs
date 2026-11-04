@@ -344,6 +344,10 @@ impl server::Handler for Conn {
             self.fail("mot de passe", "mot de passe incorrect").await;
             return Ok(Auth::reject());
         }
+        if user.must_change_password {
+            self.fail("mot de passe", "mot de passe provisoire à changer (Portunia ou portunia-gate user passwd)").await;
+            return Ok(Auth::reject());
+        }
         self.forgive(requested);
         self.factors.insert(Factor::Password);
         self.decide(&user).await
@@ -410,6 +414,12 @@ impl server::Handler for Conn {
                 }
                 if !check_password(user.password_hash.clone(), password).await {
                     self.fail("mot de passe", "mot de passe incorrect").await;
+                    self.ki = KiStage::Start;
+                    return Ok(Auth::reject());
+                }
+                // Mot de passe provisoire : il se change dans Portunia, pas en SSH.
+                if user.must_change_password {
+                    self.fail("mot de passe", "mot de passe provisoire à changer (Portunia ou portunia-gate user passwd)").await;
                     self.ki = KiStage::Start;
                     return Ok(Auth::reject());
                 }

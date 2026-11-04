@@ -113,6 +113,9 @@ enum Command {
     /// Web portal.
     #[command(subcommand)]
     Portal(PortalCmd),
+    /// Remote assistance (Portunia Assistance relay).
+    #[command(subcommand)]
+    Assist(AssistCmd),
     /// Dedicated relay: this machine publishes the web portal of a Gate.
     #[command(subcommand)]
     Edge(EdgeCmd),
@@ -127,8 +130,38 @@ enum Command {
 
 #[derive(Subcommand)]
 enum PortalCmd {
-    /// Shows how the portal is exposed.
+    /// Shows the portal: state, settings and how it is exposed.
     Show,
+    /// Opens the portal to browsers.
+    On,
+    /// Closes the portal; open web sessions close within 30 seconds.
+    Off,
+    /// Portal settings; what is not given stays as it is.
+    Set {
+        /// Public address (https://…); empty: none (the host asked by the browser).
+        #[arg(long)]
+        url: Option<String>,
+        /// Group whose members may sign in.
+        #[arg(long)]
+        group: Option<String>,
+        /// Web session duration in hours (1 to 12).
+        #[arg(long)]
+        duration: Option<i64>,
+        /// Closing after inactivity, in minutes (5 to 240).
+        #[arg(long)]
+        idle: Option<i64>,
+        /// Copy-paste in the web terminal: on or off.
+        #[arg(long, value_parser = parse_switch)]
+        clipboard: Option<bool>,
+        /// Turnstile site key; empty: Turnstile off.
+        #[arg(long)]
+        turnstile_site: Option<String>,
+        /// Asks the Turnstile secret key (empty entry: erases it).
+        #[arg(long)]
+        turnstile_secret: bool,
+    },
+    /// Closes all web sessions without closing the portal (within 30 seconds).
+    CloseSessions,
     /// Changes how browsers reach the portal; what is not given stays as it is.
     Expose {
         /// cloudflare, internal, direct, proxy or relay.
@@ -260,6 +293,15 @@ enum GroupCmd {
         group: String,
         logins: Vec<String>,
     },
+    /// Removes accounts from a group (their open sessions close if they lose their access).
+    Remove {
+        group: String,
+        logins: Vec<String>,
+    },
+    /// Lists groups and their members.
+    List,
+    /// Deletes a group, and the rules that give it access.
+    Delete { name: String },
 }
 
 #[derive(Subcommand)]
@@ -293,6 +335,68 @@ enum TargetCmd {
     },
     /// Lists servers.
     List,
+    /// Changes a server; what is not given stays as it is.
+    Edit {
+        name: String,
+        /// New name.
+        #[arg(long)]
+        rename: Option<String>,
+        /// New address: the remembered fingerprint is forgotten and the vault secret must be given again.
+        #[arg(long)]
+        host: Option<String>,
+        #[arg(long)]
+        port: Option<i32>,
+        /// coffre (vault), enregistre (recorded) or rebond (jump); also vault, recorded, jump.
+        #[arg(long)]
+        mode: Option<String>,
+        /// Account on the server; empty: none.
+        #[arg(long)]
+        account: Option<String>,
+        #[arg(long)]
+        folder: Option<String>,
+        /// New vault password, asked when typing.
+        #[arg(long)]
+        password: bool,
+        /// New vault private key (OpenSSH file).
+        #[arg(long)]
+        key_file: Option<String>,
+    },
+    /// Replaces the vault secret: --password, --key-file, or --generate (SSH: the Gate creates a key and installs it).
+    Secret {
+        name: String,
+        /// Password, asked when typing.
+        #[arg(long)]
+        password: bool,
+        /// Private key (OpenSSH file).
+        #[arg(long)]
+        key_file: Option<String>,
+        /// Generates a key and installs it on the server with the account's current password (asked once, then forgotten).
+        #[arg(long)]
+        generate: bool,
+    },
+    /// Forgets the remembered fingerprint (server reinstalled); the next one is remembered at the next connection.
+    Forget { name: String },
+    /// Deletes a server: its secret is erased, its sessions and recordings stay.
+    Delete { name: String },
+}
+
+#[derive(Subcommand)]
+enum AssistCmd {
+    /// Shows the assistance state and settings.
+    Show,
+    /// Opens assistance.
+    On,
+    /// Closes assistance; sessions under way stop within 30 seconds.
+    Off,
+    /// Assistance settings; what is not given stays as it is.
+    Set {
+        /// Group of the technicians.
+        #[arg(long)]
+        group: Option<String>,
+        /// Maximum duration of an assistance, in hours (1 to 12).
+        #[arg(long)]
+        duration: Option<i64>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -322,6 +426,89 @@ enum RuleCmd {
         #[arg(long)]
         expires: Option<String>,
     },
+    /// Lists rules, with their state now (active, outside hours, expired).
+    List,
+    /// Changes a rule; what is not given stays as it is.
+    Edit {
+        name: String,
+        /// New name.
+        #[arg(long)]
+        rename: Option<String>,
+        #[arg(long)]
+        group: Option<String>,
+        /// Comma-separated servers (replace the current ones).
+        #[arg(long, value_delimiter = ',')]
+        targets: Option<Vec<String>>,
+        /// on or off.
+        #[arg(long, value_parser = parse_switch)]
+        sftp: Option<bool>,
+        /// on or off.
+        #[arg(long, value_parser = parse_switch)]
+        tunnels: Option<bool>,
+        /// on or off (on: captures typed passwords).
+        #[arg(long, value_parser = parse_switch)]
+        record_input: Option<bool>,
+        /// Days: "mon-fri", "mon,wed,fri"; empty: every day.
+        #[arg(long)]
+        days: Option<String>,
+        /// Hours: "7-20"; empty: all day.
+        #[arg(long)]
+        hours: Option<String>,
+        /// Expiry date: YYYY-MM-DD; empty: none.
+        #[arg(long)]
+        expires: Option<String>,
+    },
+    /// Deletes a rule: sessions it allowed close within 30 seconds.
+    Delete { name: String },
+}
+
+/// Interrupteur en ligne de commande : on/off, en anglais ou en français.
+fn parse_switch(text: &str) -> Result<bool, String> {
+    match text.to_lowercase().as_str() {
+        "on" | "yes" | "true" | "1" | "oui" => Ok(true),
+        "off" | "no" | "false" | "0" | "non" => Ok(false),
+        _ => Err(t!("on or off", "on ou off").to_string()),
+    }
+}
+
+/// Heures « 7-20 » : début de 0 à 23, fin de 1 à 24, différentes.
+fn parse_hours(text: &str) -> Result<(i16, i16)> {
+    let (a, b) = text.split_once('-').ok_or_else(|| anyhow!(t!("Hours: « 7-20 »", "Heures : « 7-20 »")))?;
+    let (a, b) = (a.trim().parse::<i16>()?, b.trim().parse::<i16>()?);
+    if !(0..=23).contains(&a) || !(1..=24).contains(&b) || a == b {
+        bail!(t!("Hours: start from 0 to 23, end from 1 to 24, different", "Heures : début de 0 à 23, fin de 1 à 24, différentes"));
+    }
+    Ok((a, b))
+}
+
+/// Date de fin « AAAA-MM-JJ », incluse : 23:59:59 à l'heure locale.
+fn parse_expiry(text: &str) -> Result<chrono::DateTime<chrono::Utc>> {
+    let date = chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d").map_err(|_| anyhow!(t!("Date: YYYY-MM-DD", "Date : AAAA-MM-JJ")))?;
+    let end = date
+        .and_hms_opt(23, 59, 59)
+        .unwrap()
+        .and_local_timezone(chrono::Local)
+        .single()
+        .ok_or_else(|| anyhow!(t!("ambiguous date", "date ambiguë")))?;
+    Ok(end.with_timezone(&chrono::Utc))
+}
+
+/// Secret du coffre donné en ligne de commande : (type, contenu en clair).
+fn console_secret(password: bool, key_file: Option<&str>) -> Result<Option<(String, Vec<u8>)>> {
+    Ok(match (password, key_file) {
+        (true, Some(_)) => bail!(t!("Choose --password or --key-file, not both", "Choisissez --password ou --key-file, pas les deux")),
+        (true, None) => Some((
+            "password".into(),
+            prompt_secret(t!("Password of the account on the target: ", "Mot de passe du compte sur la cible : "))?.into_bytes(),
+        )),
+        (false, Some(path)) => {
+            let text = std::fs::read_to_string(path).with_context(|| t!(format!("reading {path}"), format!("lecture de {path}")))?;
+            russh::keys::decode_secret_key(&text, None)
+                .map_err(|e| anyhow!(t!(format!("unreadable private key (without passphrase): {e}"), format!("clé privée illisible (sans phrase de passe) : {e}"))))?;
+            Some(("key".into(), text.into_bytes()))
+        }
+        (false, None) => None,
+    })
 }
 
 fn prompt_secret(label: &str) -> Result<String> {
@@ -568,6 +755,7 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Target(cmd) => target_cmd(&state, cmd).await,
         Command::Rule(cmd) => rule_cmd(&state, cmd).await,
         Command::Portal(cmd) => portal_cmd(&state, cmd).await,
+        Command::Assist(cmd) => assist_cmd(&state, cmd).await,
         Command::Audit { verify, last } => {
             if verify {
                 match audit::verify(&state.db).await? {
@@ -853,7 +1041,8 @@ async fn user_cmd(state: &State, cmd: UserCmd) -> Result<()> {
         UserCmd::Passwd { login } => {
             let user = find(login).await?;
             let hash = auth::hash_password(&new_password()?)?;
-            sqlx::query("UPDATE users SET password_hash = $2 WHERE id = $1")
+            // Mot de passe choisi par l'administrateur : il n'est plus provisoire.
+            sqlx::query("UPDATE users SET password_hash = $2, must_change_password = false WHERE id = $1")
                 .bind(user.id)
                 .bind(hash)
                 .execute(db)
@@ -902,6 +1091,46 @@ async fn group_cmd(state: &State, cmd: GroupCmd) -> Result<()> {
             }
             println!("{}", t!("Members added.", "Membres ajoutés."));
         }
+        GroupCmd::Remove { group, logins } => {
+            let gid = model::group_id(db, &group).await?;
+            for login in logins {
+                let user = model::user_by_login(db, &login)
+                    .await?
+                    .ok_or_else(|| anyhow!(t!(format!("Unknown account: {login}"), format!("Compte inconnu : {login}"))))?;
+                let done = sqlx::query("DELETE FROM group_members WHERE group_id = $1 AND user_id = $2")
+                    .bind(gid)
+                    .bind(user.id)
+                    .execute(db)
+                    .await?;
+                if done.rows_affected() == 0 {
+                    println!("{}", t!(format!("{login} was not a member."), format!("{login} n'était pas membre.")));
+                    continue;
+                }
+                audit::log(db, "console", "groupe.membre_retire", json!({ "groupe": group, "compte": login })).await?;
+            }
+            println!("{}", t!("Members removed: sessions they lose close within 30 seconds.", "Membres retirés : les sessions qu'ils perdent se ferment sous 30 secondes."));
+        }
+        GroupCmd::List => {
+            let rows: Vec<(String, Vec<String>)> = sqlx::query_as(
+                "SELECT g.name, COALESCE(array_agg(u.login ORDER BY u.login) FILTER (WHERE u.login IS NOT NULL), '{}')
+                 FROM groups g LEFT JOIN group_members m ON m.group_id = g.id LEFT JOIN users u ON u.id = m.user_id
+                 GROUP BY g.id ORDER BY g.name",
+            )
+            .fetch_all(db)
+            .await?;
+            for (name, members) in rows {
+                println!("{:<24} {}", name, members.join(", "));
+            }
+        }
+        GroupCmd::Delete { name } => {
+            let gone: Option<String> = sqlx::query_scalar("DELETE FROM groups WHERE name = $1 RETURNING name")
+                .bind(&name)
+                .fetch_optional(db)
+                .await?;
+            let gone = gone.ok_or_else(|| anyhow!(t!(format!("Unknown group: {name}"), format!("Groupe inconnu : {name}"))))?;
+            audit::log(db, "console", "groupe.supprime", json!({ "groupe": gone })).await?;
+            println!("{}", t!("Group deleted, with its rules.", "Groupe supprimé, avec ses règles."));
+        }
     }
     Ok(())
 }
@@ -922,20 +1151,7 @@ async fn target_cmd(state: &State, cmd: TargetCmd) -> Result<()> {
         } => {
             let port = port.unwrap_or(if protocol == "rdp" { 3389 } else { 22 });
             let mode = model::mode_alias(&mode).to_string();
-            let secret: Option<(String, Vec<u8>)> = match (password, key_file) {
-                (true, Some(_)) => bail!(t!("Choose --password or --key-file, not both", "Choisissez --password ou --key-file, pas les deux")),
-                (true, None) => Some((
-                    "password".into(),
-                    prompt_secret(t!("Password of the account on the target: ", "Mot de passe du compte sur la cible : "))?.into_bytes(),
-                )),
-                (false, Some(path)) => {
-                    let text = std::fs::read_to_string(&path).with_context(|| t!(format!("reading {path}"), format!("lecture de {path}")))?;
-                    russh::keys::decode_secret_key(&text, None)
-                        .map_err(|e| anyhow!(t!(format!("unreadable private key (without passphrase): {e}"), format!("clé privée illisible (sans phrase de passe) : {e}"))))?;
-                    Some(("key".into(), text.into_bytes()))
-                }
-                (false, None) => None,
-            };
+            let secret = console_secret(password, key_file.as_deref())?;
             let kind = secret.as_ref().map(|s| s.0.clone()).unwrap_or_else(|| "none".into());
             let new = model::NewTarget {
                 name: name.clone(),
@@ -975,12 +1191,231 @@ async fn target_cmd(state: &State, cmd: TargetCmd) -> Result<()> {
                 );
             }
         }
+        TargetCmd::Edit {
+            name,
+            rename,
+            host,
+            port,
+            mode,
+            account,
+            folder,
+            password,
+            key_file,
+        } => {
+            let current = find_target(db, &name).await?;
+            let mut t = current.clone();
+            if let Some(n) = rename {
+                if n.trim().is_empty() || n.contains('%') || n.contains(char::is_whitespace) {
+                    bail!(t!("The name must contain neither spaces nor « % »", "Le nom ne doit contenir ni espace ni « % »"));
+                }
+                t.name = n.trim().into();
+            }
+            if let Some(h) = host {
+                t.host = h.trim().into();
+            }
+            if let Some(p) = port {
+                if !(1..=65535).contains(&p) {
+                    bail!(t!("Port: 1 to 65535", "Port : 1 à 65535"));
+                }
+                t.port = p;
+            }
+            if let Some(m) = mode {
+                t.mode = model::mode_alias(&m).to_string();
+            }
+            if let Some(a) = account {
+                t.account = Some(a.trim().to_string()).filter(|a| !a.is_empty());
+            }
+            if let Some(f) = folder {
+                t.folder = f.trim().into();
+            }
+            model::check_protocol(&t.protocole, &t.mode)?;
+            if !["rebond", "enregistre", "coffre"].contains(&t.mode.as_str()) {
+                bail!(t!("Mode: jump (rebond), recorded (enregistre) or vault (coffre)", "Mode : rebond, enregistre ou coffre"));
+            }
+            let secret = console_secret(password, key_file.as_deref())?;
+            if secret.as_ref().is_some_and(|s| s.0 == "key") && t.is_rdp() {
+                bail!(t!("Remote Desktop: the vault keeps a password, not an SSH key", "Bureau à distance : le coffre garde un mot de passe, pas une clé SSH"));
+            }
+            // Changement d'adresse : l'ancienne empreinte ne vaut plus, et le secret du coffre doit être
+            // ressaisi (comme dans Portunia).
+            let moved = t.host != current.host || t.port != current.port;
+            if moved {
+                t.host_key = None;
+                if secret.is_none() && current.secret.is_some() {
+                    bail!(t!("The address changes: give the vault secret again (--password or --key-file)", "L'adresse change : redonnez le secret du coffre (--password ou --key-file)"));
+                }
+            }
+            if let Some((kind, plain)) = &secret {
+                t.secret_kind = kind.clone();
+                t.secret = Some(state.keys.seal(&current.secret_purpose(), plain)?);
+            }
+            if t.mode == "coffre" && (t.account.is_none() || t.secret.is_none()) {
+                bail!(t!("In vault mode, give the account and its secret", "En mode coffre, indiquez le compte et son secret"));
+            }
+            save_target(db, &t).await?;
+            audit::log(
+                db,
+                "console",
+                "cible.modifiee",
+                json!({ "cible": t.name, "avant": current.name, "mode": t.mode, "adresse": format!("{}:{}", t.host, t.port), "adresse_avant": format!("{}:{}", current.host, current.port) }),
+            )
+            .await?;
+            println!("{}", t!("Server changed: open sessions are rechecked within 30 seconds.", "Serveur modifié : les sessions ouvertes sont revérifiées sous 30 secondes."));
+            if moved {
+                println!("{}", t!("New address: the fingerprint will be remembered at the next connection.", "Nouvelle adresse : l'empreinte sera mémorisée à la prochaine connexion."));
+            }
+        }
+        TargetCmd::Secret { name, password, key_file, generate } => {
+            let mut t = find_target(db, &name).await?;
+            let (kind, plain) = if generate {
+                if password || key_file.is_some() {
+                    bail!(t!("Choose --password, --key-file or --generate", "Choisissez --password, --key-file ou --generate"));
+                }
+                if t.is_rdp() {
+                    bail!(t!("Remote Desktop: the vault keeps a password, not an SSH key", "Bureau à distance : le coffre garde un mot de passe, pas une clé SSH"));
+                }
+                let account = t.account.clone().ok_or_else(|| anyhow!(t!("Give the account on the server first (target edit --account)", "Indiquez d'abord le compte sur le serveur (target edit --account)")))?;
+                let current = prompt_secret(&t!(format!("Current password of {account} on {}: ", t.name), format!("Mot de passe actuel de {account} sur {} : ", t.name)))?;
+                let key = target::install_new_key(state, &t, &account, &current, "console").await?;
+                audit::log(db, "console", "cible.cle_installee", json!({ "cible": t.name, "compte": account })).await?;
+                ("key".to_string(), key.into_bytes())
+            } else {
+                console_secret(password, key_file.as_deref())?
+                    .ok_or_else(|| anyhow!(t!("Give --password, --key-file or --generate", "Indiquez --password, --key-file ou --generate")))?
+            };
+            if kind == "key" && t.is_rdp() {
+                bail!(t!("Remote Desktop: the vault keeps a password, not an SSH key", "Bureau à distance : le coffre garde un mot de passe, pas une clé SSH"));
+            }
+            t.secret = Some(state.keys.seal(&t.secret_purpose(), &plain)?);
+            t.secret_kind = kind.clone();
+            save_target(db, &t).await?;
+            audit::log(db, "console", "cible.secret_change", json!({ "cible": t.name, "secret": kind })).await?;
+            println!("{}", t!("Vault secret replaced.", "Secret du coffre remplacé."));
+        }
+        TargetCmd::Forget { name } => {
+            let t = find_target(db, &name).await?;
+            sqlx::query("UPDATE targets SET host_key = NULL WHERE id = $1").bind(t.id).execute(db).await?;
+            audit::log(db, "console", "cible.empreinte_oubliee", json!({ "cible": t.name, "ancienne": t.host_key })).await?;
+            println!("{}", t!("Fingerprint forgotten: the next one will be remembered at the next connection.", "Empreinte oubliée : la suivante sera mémorisée à la prochaine connexion."));
+        }
+        TargetCmd::Delete { name } => {
+            let t = find_target(db, &name).await?;
+            sqlx::query("DELETE FROM targets WHERE id = $1").bind(t.id).execute(db).await?;
+            audit::log(db, "console", "cible.supprimee", json!({ "cible": t.name })).await?;
+            println!("{}", t!("Server deleted: its sessions close within 30 seconds; recordings stay.", "Serveur supprimé : ses sessions se ferment sous 30 secondes ; les enregistrements restent."));
+        }
     }
     Ok(())
 }
 
+async fn find_target(db: &PgPool, name: &str) -> Result<model::Target> {
+    model::target_by_name(db, name)
+        .await?
+        .ok_or_else(|| anyhow!(t!(format!("Unknown target: {name}"), format!("Cible inconnue : {name}"))))
+}
+
+async fn save_target(db: &PgPool, t: &model::Target) -> Result<()> {
+    sqlx::query(
+        "UPDATE targets SET name = $2, folder = $3, host = $4, port = $5, mode = $6, account = $7, secret_kind = $8, secret = $9, host_key = $10
+         WHERE id = $1",
+    )
+    .bind(t.id)
+    .bind(&t.name)
+    .bind(&t.folder)
+    .bind(&t.host)
+    .bind(t.port)
+    .bind(&t.mode)
+    .bind(&t.account)
+    .bind(&t.secret_kind)
+    .bind(&t.secret)
+    .bind(&t.host_key)
+    .execute(db)
+    .await
+    .map_err(|e| match &e {
+        sqlx::Error::Database(d) if d.code().as_deref() == Some("23505") => anyhow!(t!("This name is already taken", "Ce nom est déjà pris")),
+        _ => e.into(),
+    })?;
+    Ok(())
+}
+
 async fn portal_cmd(state: &State, cmd: PortalCmd) -> Result<()> {
+    let db = &state.db;
     let e = match cmd {
+        PortalCmd::On | PortalCmd::Off => {
+            let on = matches!(cmd, PortalCmd::On);
+            let was = portal::settings(state).await?.enabled;
+            model::set_setting(db, "portail_actif", json!(on)).await?;
+            if was != on {
+                if !on {
+                    close_web_sessions(db).await?;
+                }
+                audit::log(db, "console", if on { "portail.active" } else { "portail.desactive" }, json!({})).await?;
+            }
+            if on {
+                let s = portal::settings(state).await?;
+                println!("✓ {}", t!("Portal open.", "Portail ouvert."));
+                if s.url.is_empty() {
+                    println!("  {}", t!("No public address: set one behind Cloudflare or a proxy (portal set --url https://…).", "Pas d'adresse publique : réglez-la derrière Cloudflare ou un proxy (portal set --url https://…)."));
+                }
+                if model::group_id(db, &s.group).await.is_err() {
+                    println!("  {}", t!(format!("Group « {} » missing: nobody can sign in (group add, group member).", s.group), format!("Groupe « {} » absent : personne ne peut se connecter (group add, group member).", s.group)));
+                }
+            } else {
+                println!("✓ {}", t!("Portal closed: open web sessions close within 30 seconds.", "Portail fermé : les sessions web ouvertes se ferment sous 30 secondes."));
+            }
+            return Ok(());
+        }
+        PortalCmd::Set { url, group, duration, idle, clipboard, turnstile_site, turnstile_secret } => {
+            let mut changed = serde_json::Map::new();
+            if let Some(url) = url {
+                let url = url.trim().trim_end_matches('/').to_string();
+                if !url.is_empty() && !url.starts_with("https://") {
+                    bail!(t!("Public address: https://…", "Adresse publique : https://…"));
+                }
+                changed.insert("url".into(), json!(url));
+            }
+            if let Some(g) = group {
+                changed.insert("groupe".into(), json!(g.trim()));
+            }
+            if let Some(h) = duration {
+                if !(1..=12).contains(&h) {
+                    bail!(t!("Web session duration: 1 to 12 hours", "Durée d'une session web : 1 à 12 heures"));
+                }
+                changed.insert("duree_h".into(), json!(h));
+            }
+            if let Some(m) = idle {
+                if !(5..=240).contains(&m) {
+                    bail!(t!("Inactivity: 5 to 240 minutes", "Inactivité : 5 à 240 minutes"));
+                }
+                changed.insert("inactivite_min".into(), json!(m));
+            }
+            if let Some(v) = clipboard {
+                changed.insert("presse_papiers".into(), json!(v));
+            }
+            if let Some(site) = turnstile_site {
+                changed.insert("turnstile_site".into(), json!(site.trim()));
+            }
+            // Tout est vérifié avant d'écrire : une valeur refusée ne laisse rien à moitié changé.
+            for (key, value) in &changed {
+                model::set_setting(db, &format!("portail_{key}"), value.clone()).await?;
+            }
+            if turnstile_secret {
+                let secret = prompt_secret(t!("Turnstile secret key (empty: erase): ", "Clé secrète Turnstile (vide : l'effacer) : "))?;
+                let sealed = if secret.trim().is_empty() { String::new() } else { portal::seal_turnstile(state, secret.trim())? };
+                model::set_setting(db, "portail_turnstile_secret", json!(sealed)).await?;
+                changed.insert("turnstile_secret".into(), json!(if sealed.is_empty() { "effacé" } else { "changé" }));
+            }
+            anyhow::ensure!(!changed.is_empty(), t!("Nothing to change: see portunia-gate portal set --help", "Rien à changer : voir portunia-gate portal set --help"));
+            audit::log(db, "console", "portail.modifie", serde_json::Value::Object(changed)).await?;
+            println!("✓ {}", t!("Portal settings saved: open sessions are rechecked within 30 seconds.", "Réglages du portail enregistrés : les sessions ouvertes sont revérifiées sous 30 secondes."));
+            return Ok(());
+        }
+        PortalCmd::CloseSessions => {
+            let open = close_web_sessions(db).await?;
+            audit::log(db, "console", "portail.sessions_fermees", json!({ "connexions": open })).await?;
+            println!("✓ {}", t!(format!("{open} web sign-in(s) ended; open web terminals close within 30 seconds."), format!("{open} connexion(s) web terminée(s) ; les terminaux web ouverts se ferment sous 30 secondes.")));
+            return Ok(());
+        }
         PortalCmd::RelayAdd { name, address } => {
             let (entry, code) = relay::add(state, &name, &address).await?;
             audit::log(&state.db, "console", "relais.ajoute", json!({ "nom": entry.nom, "adresse": entry.adresse })).await?;
@@ -1085,6 +1520,20 @@ async fn portal_cmd(state: &State, cmd: PortalCmd) -> Result<()> {
             return Ok(());
         }
         PortalCmd::Show => {
+            let s = portal::settings(state).await?;
+            let yes_no = |b: bool| if b { t!("yes", "oui") } else { t!("no", "non") };
+            println!("{} {}", t!("Portal:", "Portail :"), if s.enabled { t!("open", "ouvert") } else { t!("closed", "fermé") });
+            println!("{} {}", t!("Public address:", "Adresse publique :"), if s.url.is_empty() { "—" } else { &s.url });
+            println!("{} {}", t!("Allowed group:", "Groupe autorisé :"), s.group);
+            println!("{} {} h · {} {} min", t!("Web session:", "Session web :"), s.hours, t!("inactivity", "inactivité"), s.idle_min);
+            println!("{} {}", t!("Copy-paste:", "Copier-coller :"), yes_no(s.clipboard));
+            println!(
+                "Turnstile : {}{}",
+                if s.turnstile_site.is_empty() { "—" } else { &s.turnstile_site },
+                if s.turnstile_secret.is_some() { t!(" (secret key set)", " (clé secrète définie)") } else { "" }
+            );
+            let open: i64 = sqlx::query_scalar("SELECT count(*) FROM web_sessions WHERE expires_at > now()").fetch_one(db).await?;
+            println!("{} {open}", t!("Web sign-ins under way:", "Connexions web en cours :"));
             portal::reload_exposure(state).await?;
             portal::exposure(state)
         }
@@ -1099,6 +1548,65 @@ async fn portal_cmd(state: &State, cmd: PortalCmd) -> Result<()> {
     println!("{} {}", t!("Trusted proxies:", "Proxys de confiance :"), e.proxies.join(", "));
     println!("{} {}", t!("Address header:", "En-tête de l'adresse :"), e.header);
     println!("{} {}", t!("Allowed networks:", "Réseaux autorisés :"), e.networks.join(", "));
+    Ok(())
+}
+
+/// Termine les connexions web et demande au service (autre processus) de fermer les terminaux
+/// web ouverts, au plus tard à sa prochaine vérification (live.rs). Renvoie le nombre de connexions.
+async fn close_web_sessions(db: &PgPool) -> Result<u64> {
+    let done = sqlx::query("DELETE FROM web_sessions").execute(db).await?;
+    model::bump_setting(db, live::PORTAL_CLOSE).await?;
+    Ok(done.rows_affected())
+}
+
+async fn assist_cmd(state: &State, cmd: AssistCmd) -> Result<()> {
+    let db = &state.db;
+    match cmd {
+        AssistCmd::Show => {
+            let s = assist::settings(state).await?;
+            let portal = portal::settings(state).await?;
+            println!("{} {}", t!("Assistance:", "Assistance :"), if s.enabled { t!("open", "ouverte") } else { t!("closed", "fermée") });
+            println!("{} {}", t!("Technicians' group:", "Groupe des dépanneurs :"), s.group);
+            println!("{} {} h", t!("Maximum duration:", "Durée maximale :"), s.hours);
+            println!(
+                "{} {}",
+                t!("Page for the person helped:", "Page de la personne aidée :"),
+                if portal.url.is_empty() { t!("— (set the portal's public address: portal set --url)", "— (réglez l'adresse publique du portail : portal set --url)").to_string() } else { format!("{}/assistance", portal.url) }
+            );
+        }
+        AssistCmd::On | AssistCmd::Off => {
+            let on = matches!(cmd, AssistCmd::On);
+            model::set_setting(db, "assistance_actif", json!(on)).await?;
+            audit::log(db, "console", "assistance.reglage", json!({ "actif": on })).await?;
+            if on {
+                let s = assist::settings(state).await?;
+                println!("✓ {}", t!("Assistance open: the Gate fetches Portunia Assistance within 30 seconds.", "Assistance ouverte : la Gate récupère Portunia Assistance sous 30 secondes."));
+                if model::group_id(db, &s.group).await.is_err() {
+                    println!("  {}", t!(format!("Group « {} » missing: no technician can help (group add, group member).", s.group), format!("Groupe « {} » absent : aucun dépanneur ne peut aider (group add, group member).", s.group)));
+                }
+            } else {
+                println!("✓ {}", t!("Assistance closed: sessions under way stop within 30 seconds.", "Assistance fermée : les sessions en cours s'arrêtent sous 30 secondes."));
+            }
+        }
+        AssistCmd::Set { group, duration } => {
+            let mut changed = serde_json::Map::new();
+            if let Some(h) = duration {
+                if !(1..=12).contains(&h) {
+                    bail!(t!("Session duration: 1 to 12 hours", "Durée d'une assistance : 1 à 12 heures"));
+                }
+                changed.insert("duree_h".into(), json!(h));
+            }
+            if let Some(g) = group {
+                changed.insert("groupe".into(), json!(g.trim()));
+            }
+            anyhow::ensure!(!changed.is_empty(), t!("Nothing to change: --group or --duration", "Rien à changer : --group ou --duration"));
+            for (key, value) in &changed {
+                model::set_setting(db, &format!("assistance_{key}"), value.clone()).await?;
+            }
+            audit::log(db, "console", "assistance.reglage", serde_json::Value::Object(changed)).await?;
+            println!("✓ {}", t!("Assistance settings saved.", "Réglages de l'assistance enregistrés."));
+        }
+    }
     Ok(())
 }
 
@@ -1129,26 +1637,8 @@ async fn rule_cmd(state: &State, cmd: RuleCmd) -> Result<()> {
             if ids.is_empty() {
                 bail!(t!("Give at least one target (--targets a,b)", "Indiquez au moins une cible (--targets a,b)"));
             }
-            let hours = match hours {
-                Some(h) => {
-                    let (a, b) = h.split_once('-').ok_or_else(|| anyhow!(t!("Hours: « 7-20 »", "Heures : « 7-20 »")))?;
-                    Some((a.trim().parse::<i16>()?, b.trim().parse::<i16>()?))
-                }
-                None => None,
-            };
-            let expires_at = match expires {
-                Some(d) => {
-                    let date = chrono::NaiveDate::parse_from_str(&d, "%Y-%m-%d").map_err(|_| anyhow!(t!("Date: YYYY-MM-DD", "Date : AAAA-MM-JJ")))?;
-                    let end = date
-                        .and_hms_opt(23, 59, 59)
-                        .unwrap()
-                        .and_local_timezone(chrono::Local)
-                        .single()
-                        .ok_or_else(|| anyhow!(t!("ambiguous date", "date ambiguë")))?;
-                    Some(end.with_timezone(&chrono::Utc))
-                }
-                None => None,
-            };
+            let hours = hours.as_deref().map(parse_hours).transpose()?;
+            let expires_at = expires.as_deref().map(parse_expiry).transpose()?;
             let days = days.as_deref().map(parse_days).transpose()?.unwrap_or(127);
             model::create_rule(
                 db,
@@ -1174,8 +1664,172 @@ async fn rule_cmd(state: &State, cmd: RuleCmd) -> Result<()> {
             .await?;
             println!("{}", t!("Rule created.", "Règle créée."));
         }
+        RuleCmd::List => {
+            for r in rules(db).await? {
+                let state = match model::rule_state(r.days, r.hour_from, r.hour_to, r.expires_at) {
+                    "active" => t!("active", "active"),
+                    "expiree" => t!("expired", "expirée"),
+                    _ => t!("outside hours", "hors plage"),
+                };
+                let mut options = Vec::new();
+                for (on, label) in [(r.allow_sftp, "sftp"), (r.allow_tunnels, "tunnels"), (r.record_input, t!("keystrokes", "frappe"))] {
+                    if on {
+                        options.push(label);
+                    }
+                }
+                let hours = match (r.hour_from, r.hour_to) {
+                    (Some(a), Some(b)) => format!("{a}-{b}h"),
+                    _ => t!("all day", "toute la journée").into(),
+                };
+                let expires = r.expires_at.map(|e| format!(" {} {}", t!("until", "jusqu'au"), e.with_timezone(&chrono::Local).format("%Y-%m-%d"))).unwrap_or_default();
+                println!(
+                    "{:<20} {:<12} {:<18} {}  {} {}{}  [{}]",
+                    r.name,
+                    state,
+                    r.group_name,
+                    r.targets.join(","),
+                    days_label(r.days),
+                    hours,
+                    expires,
+                    options.join(", ")
+                );
+            }
+        }
+        RuleCmd::Edit {
+            name,
+            rename,
+            group,
+            targets,
+            sftp,
+            tunnels,
+            record_input,
+            days,
+            hours,
+            expires,
+        } => {
+            let r = rules(db).await?
+                .into_iter()
+                .find(|r| r.name == name)
+                .ok_or_else(|| anyhow!(t!(format!("Unknown rule: {name}"), format!("Règle inconnue : {name}"))))?;
+            let new_name = rename.map(|n| n.trim().to_string()).unwrap_or_else(|| r.name.clone());
+            if new_name.is_empty() {
+                bail!(t!("Rule name required", "Nom de la règle obligatoire"));
+            }
+            let group_name = group.unwrap_or_else(|| r.group_name.clone());
+            let group_id = model::group_id(db, &group_name).await?;
+            let target_names = targets.unwrap_or_else(|| r.targets.clone());
+            let mut ids = Vec::new();
+            for t in &target_names {
+                ids.push(find_target(db, t).await?.id);
+            }
+            if ids.is_empty() {
+                bail!(t!("Give at least one target (--targets a,b)", "Indiquez au moins une cible (--targets a,b)"));
+            }
+            let days = match days.as_deref().map(str::trim) {
+                Some("") => 127,
+                Some(d) => parse_days(d)?,
+                None => r.days,
+            };
+            let hours = match hours.as_deref().map(str::trim) {
+                Some("") => None,
+                Some(h) => Some(parse_hours(h)?),
+                None => r.hour_from.zip(r.hour_to),
+            };
+            let expires_at = match expires.as_deref().map(str::trim) {
+                Some("") => None,
+                Some(d) => Some(parse_expiry(d)?),
+                None => r.expires_at,
+            };
+            let (sftp, tunnels, record_input) = (sftp.unwrap_or(r.allow_sftp), tunnels.unwrap_or(r.allow_tunnels), record_input.unwrap_or(r.record_input));
+            let mut tx = db.begin().await?;
+            sqlx::query(
+                "UPDATE rules SET name = $2, group_id = $3, allow_sftp = $4, allow_tunnels = $5, record_input = $6, days = $7,
+                 hour_from = $8, hour_to = $9, expires_at = $10 WHERE id = $1",
+            )
+            .bind(r.id)
+            .bind(&new_name)
+            .bind(group_id)
+            .bind(sftp)
+            .bind(tunnels)
+            .bind(record_input)
+            .bind(days)
+            .bind(hours.map(|h| h.0))
+            .bind(hours.map(|h| h.1))
+            .bind(expires_at)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| match &e {
+                sqlx::Error::Database(d) if d.code().as_deref() == Some("23505") => anyhow!(t!("This name is already taken", "Ce nom est déjà pris")),
+                _ => e.into(),
+            })?;
+            sqlx::query("DELETE FROM rule_targets WHERE rule_id = $1").bind(r.id).execute(&mut *tx).await?;
+            for t in ids {
+                sqlx::query("INSERT INTO rule_targets (rule_id, target_id) VALUES ($1, $2)")
+                    .bind(r.id)
+                    .bind(t)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            tx.commit().await?;
+            audit::log(
+                db,
+                "console",
+                "regle.modifiee",
+                json!({ "regle": new_name, "groupe": group_name, "cibles": target_names, "sftp": sftp, "tunnels": tunnels, "frappe": record_input, "jours": days, "heures": hours, "expire": expires_at }),
+            )
+            .await?;
+            println!("{}", t!("Rule changed: open sessions are rechecked within 30 seconds.", "Règle modifiée : les sessions ouvertes sont revérifiées sous 30 secondes."));
+        }
+        RuleCmd::Delete { name } => {
+            let gone: Option<String> = sqlx::query_scalar("DELETE FROM rules WHERE name = $1 RETURNING name")
+                .bind(&name)
+                .fetch_optional(db)
+                .await?;
+            let gone = gone.ok_or_else(|| anyhow!(t!(format!("Unknown rule: {name}"), format!("Règle inconnue : {name}"))))?;
+            audit::log(db, "console", "regle.supprimee", json!({ "regle": gone })).await?;
+            println!("{}", t!("Rule deleted: sessions it allowed close within 30 seconds.", "Règle supprimée : les sessions qu'elle permettait se ferment sous 30 secondes."));
+        }
     }
     Ok(())
+}
+
+#[derive(sqlx::FromRow)]
+struct RuleRow {
+    id: uuid::Uuid,
+    name: String,
+    group_name: String,
+    allow_sftp: bool,
+    allow_tunnels: bool,
+    record_input: bool,
+    days: i16,
+    hour_from: Option<i16>,
+    hour_to: Option<i16>,
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    targets: Vec<String>,
+}
+
+async fn rules(db: &PgPool) -> Result<Vec<RuleRow>> {
+    Ok(sqlx::query_as(
+        "SELECT r.id, r.name, g.name AS group_name, r.allow_sftp, r.allow_tunnels, r.record_input, r.days, r.hour_from, r.hour_to, r.expires_at,
+                COALESCE(array_agg(t.name ORDER BY t.name) FILTER (WHERE t.name IS NOT NULL), '{}') AS targets
+         FROM rules r JOIN groups g ON g.id = r.group_id
+         LEFT JOIN rule_targets rt ON rt.rule_id = r.id LEFT JOIN targets t ON t.id = rt.target_id
+         GROUP BY r.id, g.name ORDER BY r.name",
+    )
+    .fetch_all(db)
+    .await?)
+}
+
+/// Jours d'une règle, lisibles : « tous les jours », « lun-ven », « lun,mer,ven ».
+fn days_label(mask: i16) -> String {
+    const FR: [&str; 7] = ["lun", "mar", "mer", "jeu", "ven", "sam", "dim"];
+    const EN: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+    let names = if lang::is_fr() { FR } else { EN };
+    match mask {
+        127 => t!("every day", "tous les jours").into(),
+        0b0011111 => format!("{}-{}", names[0], names[4]),
+        _ => (0..7).filter(|d| mask & (1 << d) != 0).map(|d| names[d]).collect::<Vec<_>>().join(","),
+    }
 }
 
 #[cfg(test)]
@@ -1187,5 +1841,34 @@ mod tests {
         assert_eq!(super::parse_days("ven-lun").unwrap(), 0b1110001);
         assert_eq!(super::parse_days("mon-fri").unwrap(), 0b0011111);
         assert!(super::parse_days("xyz").is_err());
+    }
+
+    #[test]
+    fn interrupteur() {
+        assert_eq!(super::parse_switch("on"), Ok(true));
+        assert_eq!(super::parse_switch("Oui"), Ok(true));
+        assert_eq!(super::parse_switch("off"), Ok(false));
+        assert!(super::parse_switch("peut-être").is_err());
+    }
+
+    #[test]
+    fn heures() {
+        assert_eq!(super::parse_hours("7-20").unwrap(), (7, 20));
+        assert_eq!(super::parse_hours("22-6").unwrap(), (22, 6), "plage qui passe minuit");
+        assert!(super::parse_hours("7").is_err());
+        assert!(super::parse_hours("8-8").is_err());
+        assert!(super::parse_hours("0-25").is_err());
+    }
+
+    #[test]
+    fn jours_lisibles() {
+        assert_eq!(super::days_label(0b0011111), super::days_label(super::parse_days("mon-fri").unwrap()));
+        assert!(super::days_label(0b0010101).split(',').count() == 3);
+    }
+
+    #[test]
+    fn commandes_valides() {
+        use clap::CommandFactory;
+        super::Cli::command().debug_assert();
     }
 }

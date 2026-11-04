@@ -9,7 +9,7 @@ use std::{
     collections::{HashMap, HashSet},
     path::Path,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicU8, Ordering},
         Arc, Mutex,
     },
     time::Duration,
@@ -23,6 +23,10 @@ use uuid::Uuid;
 use crate::{audit, model, State};
 
 const SWEEP: Duration = Duration::from_secs(30);
+
+/// Compteur que `portal close-sessions` et `portal off` font avancer : le service ferme alors
+/// les terminaux web ouverts.
+pub const PORTAL_CLOSE: &str = "portail_fermeture";
 
 struct Entry {
     user: Uuid,
@@ -39,6 +43,10 @@ pub struct Registry {
     entries: Arc<Mutex<HashMap<u64, Entry>>>,
     wake: Notify,
     low_disk: AtomicBool,
+    /// Derniers ordres de la ligne de commande vus : compteur de fermeture du portail + 1
+    /// (0 : pas encore lu), assistance ouverte (0 : pas encore lue, 1 : fermée, 2 : ouverte).
+    portal_close: AtomicI64,
+    assist_on: AtomicU8,
 }
 
 /// Ce que l'on inscrit : une connexion (sans serveur) ou une session vers un serveur.
@@ -217,12 +225,40 @@ async fn sweep(state: &State) -> Result<()> {
     Ok(())
 }
 
+/// Ordres donnés en ligne de commande, processus à part : appliqués ici, à chaque tour.
+async fn console_orders(state: &Arc<State>) -> Result<()> {
+    let close = model::setting(&state.db, PORTAL_CLOSE).await?.and_then(|v| v.as_i64()).unwrap_or(0) + 1;
+    let seen = state.live.portal_close.swap(close, Ordering::Relaxed);
+    if seen != 0 && seen != close {
+        state.web.close_all();
+    }
+    let on = crate::assist::settings(state).await?.enabled;
+    let seen = state.live.assist_on.swap(if on { 2 } else { 1 }, Ordering::Relaxed);
+    if seen != 0 && (seen == 2) != on {
+        if on {
+            // Le programme de la personne aidée, servi par la page de téléchargement.
+            let state = state.clone();
+            tokio::spawn(async move {
+                if let Err(e) = crate::assist::fetch_agent(state).await {
+                    tracing::warn!("{} {e:#}", t!("Portunia Assistance download:", "téléchargement de Portunia Assistance :"));
+                }
+            });
+        } else {
+            state.assist.close_all();
+        }
+    }
+    Ok(())
+}
+
 pub async fn run(state: Arc<State>) -> Result<()> {
     let mut tick = tokio::time::interval(SWEEP);
     loop {
         tokio::select! {
             _ = tick.tick() => {}
             _ = state.live.wake.notified() => {}
+        }
+        if let Err(e) = console_orders(&state).await {
+            tracing::error!("{} {e:#}", t!("applying console orders:", "application des ordres de la console :"));
         }
         if let Err(e) = sweep(&state).await {
             tracing::error!("{} {e:#}", t!("checking open sessions:", "vérification des sessions ouvertes :"));

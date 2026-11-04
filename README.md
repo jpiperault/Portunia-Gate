@@ -311,7 +311,7 @@ The TOTP code must have been enrolled first, in Portunia or with `sudo portunia-
 
 ## Command-line administration
 
-Everything can also be done from Portunia. On the server, the wizard installs the `portunia-gate` command, used with sudo from any folder:
+Everything is done either from Portunia or here, except replaying sessions and Let's Encrypt (Portunia only). On the server, the wizard installs the `portunia-gate` command, used with sudo from any folder:
 
 ```bash
 # Information
@@ -328,6 +328,8 @@ sudo portunia-gate user list | passwd marc | totp marc | disable marc | delete m
 # Groups
 sudo portunia-gate group add "Linux admins"
 sudo portunia-gate group member "Linux admins" marc julien
+sudo portunia-gate group remove "Linux admins" marc
+sudo portunia-gate group list | delete "Linux admins"
 
 # Servers (modes: coffre = vault, enregistre = recorded, rebond = jump)
 sudo portunia-gate target add web-01 --host 10.0.1.11 --mode coffre --account admin --password --folder Production
@@ -335,10 +337,24 @@ sudo portunia-gate target add stg-app --host 10.0.2.5 --mode enregistre --folder
 sudo portunia-gate target add fw-edge --host 10.0.0.1 --mode rebond --folder Network
 sudo portunia-gate target add srv-ad-01 --host 10.0.3.10 --protocol rdp --mode enregistre --folder Windows
 sudo portunia-gate target list
+sudo portunia-gate target edit web-01 --folder Production --account root   # --rename, --host, --port, --mode, --password, --key-file
+sudo portunia-gate target secret web-01 --generate                 # or --password, --key-file: replaces the vault secret
+sudo portunia-gate target forget web-01                            # server reinstalled: forget its fingerprint
+sudo portunia-gate target delete fw-edge
 
 # Rules
 sudo portunia-gate rule add prod --group "Linux admins" --targets web-01,stg-app --sftp --days mon-fri --hours 7-20
 sudo portunia-gate rule add contractor-db --group Contractors --targets db-01 --expires 2026-12-31
+sudo portunia-gate rule list                                       # with their state now
+sudo portunia-gate rule edit prod --sftp off --hours ""            # "" clears days, hours or expiry
+sudo portunia-gate rule delete contractor-db
+
+# Web portal and assistance
+sudo portunia-gate portal set --url https://access.acme.com --group "Web access" --duration 4 --idle 30 --clipboard on
+sudo portunia-gate portal on                                       # off closes it; close-sessions ends web sessions
+sudo portunia-gate portal show
+sudo portunia-gate assist set --group Technicians --duration 4
+sudo portunia-gate assist on                                       # off, show
 
 # Settings
 sudo portunia-gate setting auth_policy "password+totp,key+totp"    # global policy

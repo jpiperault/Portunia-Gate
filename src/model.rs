@@ -27,6 +27,18 @@ pub async fn set_setting(db: &PgPool, key: &str, value: Value) -> Result<()> {
     Ok(())
 }
 
+/// Fait avancer un compteur rangé dans les réglages (ordre passé d'un processus à l'autre).
+pub async fn bump_setting(db: &PgPool, key: &str) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO settings (key, value) VALUES ($1, '1'::jsonb)
+         ON CONFLICT (key) DO UPDATE SET value = to_jsonb(COALESCE((settings.value #>> '{}')::bigint, 0) + 1)",
+    )
+    .bind(key)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
 pub async fn default_policy(db: &PgPool) -> Result<Policy> {
     let text = setting(db, "auth_policy")
         .await?

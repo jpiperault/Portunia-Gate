@@ -324,7 +324,7 @@ Le code TOTP doit avoir été enrôlé avant, dans Portunia ou avec `sudo portun
 
 ## Administrer en ligne de commande
 
-Tout se fait aussi depuis Portunia. Sur le serveur, l'assistant installe la commande `portunia-gate`, qui s'utilise avec sudo depuis n'importe quel dossier :
+Tout se fait au choix dans Portunia ou ici, sauf la relecture des sessions et Let's Encrypt (Portunia seulement). Sur le serveur, l'assistant installe la commande `portunia-gate`, qui s'utilise avec sudo depuis n'importe quel dossier :
 
 ```bash
 # Informations
@@ -341,6 +341,8 @@ sudo portunia-gate user list | passwd marc | totp marc | disable marc | delete m
 # Groupes
 sudo portunia-gate group add "Admins Linux"
 sudo portunia-gate group member "Admins Linux" marc julien
+sudo portunia-gate group remove "Admins Linux" marc
+sudo portunia-gate group list | delete "Admins Linux"
 
 # Serveurs
 sudo portunia-gate target add web-01 --host 10.0.1.11 --mode coffre --account admin --password --folder Production
@@ -348,10 +350,24 @@ sudo portunia-gate target add rec-app --host 10.0.2.5 --mode enregistre --folder
 sudo portunia-gate target add fw-edge --host 10.0.0.1 --mode rebond --folder Réseau
 sudo portunia-gate target add srv-ad-01 --host 10.0.3.10 --protocol rdp --mode rebond --folder Windows
 sudo portunia-gate target list
+sudo portunia-gate target edit web-01 --folder Production --account root   # --rename, --host, --port, --mode, --password, --key-file
+sudo portunia-gate target secret web-01 --generate                 # ou --password, --key-file : remplace le secret du coffre
+sudo portunia-gate target forget web-01                            # serveur réinstallé : oublie son empreinte
+sudo portunia-gate target delete fw-edge
 
 # Règles
 sudo portunia-gate rule add prod --group "Admins Linux" --targets web-01,rec-app --sftp --days lun-ven --hours 7-20
 sudo portunia-gate rule add presta-db --group Prestataires --targets db-01 --expires 2026-12-31
+sudo portunia-gate rule list                                       # avec leur état en ce moment
+sudo portunia-gate rule edit prod --sftp off --hours ""            # "" efface les jours, les heures ou l'expiration
+sudo portunia-gate rule delete presta-db
+
+# Portail web et assistance
+sudo portunia-gate portal set --url https://acces.acme.fr --group "Accès web" --duration 4 --idle 30 --clipboard on
+sudo portunia-gate portal on                                       # off le ferme ; close-sessions termine les sessions web
+sudo portunia-gate portal show
+sudo portunia-gate assist set --group Dépanneurs --duration 4
+sudo portunia-gate assist on                                       # off, show
 
 # Réglages
 sudo portunia-gate setting auth_policy "password+totp,key+totp"    # politique générale
