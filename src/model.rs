@@ -388,6 +388,7 @@ struct RuleRow {
     allow_sftp: bool,
     allow_tunnels: bool,
     record_input: bool,
+    allow_files: bool,
     days: i16,
     hour_from: Option<i16>,
     hour_to: Option<i16>,
@@ -430,11 +431,13 @@ pub struct Access {
     pub sftp: bool,
     pub tunnels: bool,
     pub record_input: bool,
+    /// Bureau à distance : copie de fichiers par le presse-papiers.
+    pub files: bool,
 }
 
 pub async fn access(db: &PgPool, user: Uuid, target: Uuid) -> Result<Option<Access>> {
     let rows: Vec<RuleRow> = sqlx::query_as(
-        "SELECT r.allow_sftp, r.allow_tunnels, r.record_input, r.days, r.hour_from, r.hour_to, r.expires_at
+        "SELECT r.allow_sftp, r.allow_tunnels, r.record_input, r.allow_files, r.days, r.hour_from, r.hour_to, r.expires_at
          FROM rules r
          JOIN rule_targets rt ON rt.rule_id = r.id
          JOIN group_members gm ON gm.group_id = r.group_id
@@ -452,6 +455,7 @@ pub async fn access(db: &PgPool, user: Uuid, target: Uuid) -> Result<Option<Acce
         sftp: active.iter().any(|r| r.allow_sftp),
         tunnels: active.iter().any(|r| r.allow_tunnels),
         record_input: active.iter().any(|r| r.record_input),
+        files: active.iter().any(|r| r.allow_files),
     }))
 }
 
@@ -473,6 +477,7 @@ pub struct NewRule {
     pub allow_sftp: bool,
     pub allow_tunnels: bool,
     pub record_input: bool,
+    pub allow_files: bool,
     pub days: i16,
     pub hours: Option<(i16, i16)>,
     pub expires_at: Option<DateTime<Utc>>,
@@ -482,8 +487,8 @@ pub async fn create_rule(db: &PgPool, r: NewRule) -> Result<Uuid> {
     let id = Uuid::new_v4();
     let mut tx = db.begin().await?;
     sqlx::query(
-        "INSERT INTO rules (id, name, group_id, allow_sftp, allow_tunnels, record_input, days, hour_from, hour_to, expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+        "INSERT INTO rules (id, name, group_id, allow_sftp, allow_tunnels, record_input, days, hour_from, hour_to, expires_at, allow_files)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
     )
     .bind(id)
     .bind(&r.name)
@@ -495,6 +500,7 @@ pub async fn create_rule(db: &PgPool, r: NewRule) -> Result<Uuid> {
     .bind(r.hours.map(|h| h.0))
     .bind(r.hours.map(|h| h.1))
     .bind(r.expires_at)
+    .bind(r.allow_files)
     .execute(&mut *tx)
     .await
     .map_err(|e| {
@@ -555,6 +561,12 @@ pub async fn session_end(db: &PgPool, id: Uuid, f: Finished) -> Result<()> {
 }
 
 /// Index de relecture, calculé à la fermeture de l'enregistrement.
+/// Nombre de fichiers copiés pendant une session Bureau à distance.
+pub async fn session_files(db: &PgPool, id: Uuid, count: i32) -> Result<()> {
+    sqlx::query("UPDATE sessions SET fichiers = $2 WHERE id = $1").bind(id).bind(count).execute(db).await?;
+    Ok(())
+}
+
 pub async fn session_index(db: &PgPool, id: Uuid, frappe: bool, texte: &str) -> Result<()> {
     sqlx::query("UPDATE sessions SET frappe = $2, texte = $3 WHERE id = $1")
         .bind(id)
@@ -582,10 +594,12 @@ pub struct AuditSession {
     pub signature: Option<String>,
     pub frappe: bool,
     pub bytes: i64,
+    /// Fichiers copiés par le presse-papiers (Bureau à distance).
+    pub fichiers: i32,
 }
 
 const AUDIT_COLUMNS: &str = "s.id, s.user_login AS login, s.target_name AS target, s.kind, s.detail, s.mode, s.client_addr,
-    s.started_at, s.ended_at, s.recording, s.recording_sha256, s.signature, s.frappe, s.bytes";
+    s.started_at, s.ended_at, s.recording, s.recording_sha256, s.signature, s.frappe, s.bytes, s.fichiers";
 
 #[derive(Default)]
 pub struct AuditFilter {
@@ -596,6 +610,8 @@ pub struct AuditFilter {
     /// Recherche dans le texte indexé (écran et frappe).
     pub text: Option<String>,
     pub with_input: bool,
+    /// Seulement les sessions où des fichiers ont été copiés.
+    pub with_files: bool,
     pub limit: i64,
 }
 
@@ -609,6 +625,7 @@ pub async fn audit_sessions(db: &PgPool, f: &AuditFilter) -> Result<Vec<AuditSes
            AND ($4::timestamptz IS NULL OR s.started_at < $4)
            AND ($5::text IS NULL OR s.texte ILIKE $5)
            AND (NOT $6 OR s.frappe)
+           AND (NOT $8 OR s.fichiers > 0)
          ORDER BY s.started_at DESC LIMIT $7"
     ))
     .bind(&f.login)
@@ -618,6 +635,7 @@ pub async fn audit_sessions(db: &PgPool, f: &AuditFilter) -> Result<Vec<AuditSes
     .bind(like)
     .bind(f.with_input)
     .bind(f.limit)
+    .bind(f.with_files)
     .fetch_all(db)
     .await?)
 }
@@ -677,6 +695,7 @@ mod tests {
             allow_sftp: false,
             allow_tunnels: false,
             record_input: false,
+            allow_files: false,
             days: 127,
             hour_from: None,
             hour_to: None,

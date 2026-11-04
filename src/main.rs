@@ -22,6 +22,7 @@ mod portal;
 mod relay;
 mod rdp;
 mod rdpcap;
+mod rdpclip;
 mod recording;
 mod replay;
 mod sshd;
@@ -136,6 +137,9 @@ enum Command {
         /// Only sessions whose keystrokes are recorded.
         #[arg(long)]
         input: bool,
+        /// Only Remote Desktop sessions where files were copied.
+        #[arg(long)]
+        files: bool,
     },
     /// Server hardening state, as noted by the installer every 15 minutes.
     Hardening,
@@ -150,7 +154,7 @@ enum Command {
     Edge(EdgeCmd),
     /// General settings; without a name, lists them all.
     Setting {
-        /// auth_policy, banner, name, language, session_hours, remember_password, own_replay or sensitive_commands.
+        /// auth_policy, banner, name, language, session_hours, remember_password, own_replay, sensitive_commands or file_copies_mb.
         key: Option<String>,
         /// New value; without a value, shows the current one.
         value: Option<String>,
@@ -492,6 +496,9 @@ enum RuleCmd {
         /// Also records keystrokes (careful: captures typed passwords).
         #[arg(long)]
         record_input: bool,
+        /// Remote Desktop: file copy through the clipboard (logged with name, size and SHA-256).
+        #[arg(long)]
+        files: bool,
         /// Days: "mon-fri", "mon,wed,fri" (French "lun-ven" also accepted); empty = every day.
         #[arg(long)]
         days: Option<String>,
@@ -524,6 +531,9 @@ enum RuleCmd {
         /// on or off (on: captures typed passwords).
         #[arg(long, value_parser = parse_switch)]
         record_input: Option<bool>,
+        /// Remote Desktop file copy: on or off.
+        #[arg(long, value_parser = parse_switch)]
+        files: Option<bool>,
         /// Days: "mon-fri", "mon,wed,fri"; empty: every day.
         #[arg(long)]
         days: Option<String>,
@@ -883,7 +893,7 @@ async fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Command::Sessions { cmd: Some(SessionsCmd::Show { id }), .. } => session_show(&state, &id).await,
-        Command::Sessions { cmd: None, last, user, server, since, until, text, input } => {
+        Command::Sessions { cmd: None, last, user, server, since, until, text, input, files } => {
             let filter = model::AuditFilter {
                 login: user,
                 target: server,
@@ -891,6 +901,7 @@ async fn run(cli: Cli) -> Result<()> {
                 until: until.as_deref().map(|d| parse_day(d, true)).transpose()?,
                 text,
                 with_input: input,
+                with_files: files,
                 limit: last.clamp(1, 2000),
             };
             for s in model::audit_sessions(&state.db, &filter).await? {
@@ -904,6 +915,10 @@ async fn run(cli: Cli) -> Result<()> {
                 }
                 if s.frappe {
                     marks.push(t!("keystrokes", "frappe"));
+                }
+                let copied = t!(format!("{} file(s)", s.fichiers), format!("{} fichier(s)", s.fichiers));
+                if s.fichiers > 0 {
+                    marks.push(&copied);
                 }
                 println!(
                     "{}  {}  {:<8} {:<12} {:<5} {:<10} {:<30} {:<16} {:>10} o  {}",
@@ -974,6 +989,7 @@ async fn all_settings(state: &State) -> Result<Vec<(&'static str, String)>> {
         ("remember_password", on_off(api::remember_allowed(state).await?)),
         ("own_replay", on_off(api::own_sessions_allowed(state).await?)),
         ("sensitive_commands", api::sensitive_commands(state).await?.join(", ")),
+        ("file_copies_mb", model::setting(&state.db, "copies_fichiers_mo").await?.and_then(|v| v.as_u64()).unwrap_or(0).to_string()),
         ("banner", api::setting_str(state, "banniere", sshd::default_banner()).await?.replace('\n', "\\n")),
     ])
 }
@@ -989,9 +1005,10 @@ async fn setting_cmd(state: &State, key: &str, value: Option<String>) -> Result<
         "remember_password" | "memo_mot_de_passe" => "memo_mot_de_passe",
         "own_replay" | "relecture_propres" => "relecture_propres",
         "sensitive_commands" | "commandes_sensibles" => "commandes_sensibles",
+        "file_copies_mb" | "copies_fichiers_mo" => "copies_fichiers_mo",
         _ => bail!(t!(
-            "unknown setting: auth_policy, banner, name, language, session_hours, remember_password, own_replay or sensitive_commands",
-            "réglage inconnu : auth_policy, banner, name, language, session_hours, remember_password, own_replay ou sensitive_commands"
+            "unknown setting: auth_policy, banner, name, language, session_hours, remember_password, own_replay, sensitive_commands or file_copies_mb",
+            "réglage inconnu : auth_policy, banner, name, language, session_hours, remember_password, own_replay, sensitive_commands ou file_copies_mb"
         )),
     };
     let Some(v) = value else {
@@ -1004,6 +1021,7 @@ async fn setting_cmd(state: &State, key: &str, value: Option<String>) -> Result<
             "memo_mot_de_passe" => "remember_password",
             "relecture_propres" => "own_replay",
             "commandes_sensibles" => "sensitive_commands",
+            "copies_fichiers_mo" => "file_copies_mb",
             other => other,
         };
         println!("{}", shown.into_iter().find(|(n, _)| *n == english).map(|(_, v)| v).unwrap_or_default());
@@ -1030,6 +1048,13 @@ async fn setting_cmd(state: &State, key: &str, value: Option<String>) -> Result<
             json!(h)
         }
         "memo_mot_de_passe" | "relecture_propres" => json!(parse_switch(&v).map_err(|e| anyhow!(e))?),
+        "copies_fichiers_mo" => {
+            let mb: u64 = v.trim().parse().map_err(|_| anyhow!(t!("file_copies_mb: a number of megabytes (0: no copy)", "file_copies_mb : un nombre de mégaoctets (0 : aucune copie)")))?;
+            if mb > 10_240 {
+                bail!(t!("file_copies_mb: 0 to 10240", "file_copies_mb : 0 à 10240"));
+            }
+            json!(mb)
+        }
         "commandes_sensibles" => {
             let list: Vec<String> = v.split(',').map(|c| c.trim().to_string()).filter(|c| !c.is_empty()).collect();
             json!(list)
@@ -2082,6 +2107,7 @@ async fn rule_cmd(state: &State, cmd: RuleCmd) -> Result<()> {
             sftp,
             tunnels,
             record_input,
+            files,
             days,
             hours,
             expires,
@@ -2111,6 +2137,7 @@ async fn rule_cmd(state: &State, cmd: RuleCmd) -> Result<()> {
                     allow_sftp: sftp,
                     allow_tunnels: tunnels,
                     record_input,
+                    allow_files: files,
                     days,
                     hours,
                     expires_at,
@@ -2121,7 +2148,7 @@ async fn rule_cmd(state: &State, cmd: RuleCmd) -> Result<()> {
                 db,
                 "console",
                 "regle.creee",
-                json!({ "regle": name, "groupe": group, "cibles": targets, "sftp": sftp, "tunnels": tunnels, "frappe": record_input }),
+                json!({ "regle": name, "groupe": group, "cibles": targets, "sftp": sftp, "tunnels": tunnels, "frappe": record_input, "fichiers": files }),
             )
             .await?;
             println!("{}", t!("Rule created.", "Règle créée."));
@@ -2134,7 +2161,7 @@ async fn rule_cmd(state: &State, cmd: RuleCmd) -> Result<()> {
                     _ => t!("outside hours", "hors plage"),
                 };
                 let mut options = Vec::new();
-                for (on, label) in [(r.allow_sftp, "sftp"), (r.allow_tunnels, "tunnels"), (r.record_input, t!("keystrokes", "frappe"))] {
+                for (on, label) in [(r.allow_sftp, "sftp"), (r.allow_tunnels, "tunnels"), (r.record_input, t!("keystrokes", "frappe")), (r.allow_files, t!("files", "fichiers"))] {
                     if on {
                         options.push(label);
                     }
@@ -2165,6 +2192,7 @@ async fn rule_cmd(state: &State, cmd: RuleCmd) -> Result<()> {
             sftp,
             tunnels,
             record_input,
+            files,
             days,
             hours,
             expires,
@@ -2203,10 +2231,11 @@ async fn rule_cmd(state: &State, cmd: RuleCmd) -> Result<()> {
                 None => r.expires_at,
             };
             let (sftp, tunnels, record_input) = (sftp.unwrap_or(r.allow_sftp), tunnels.unwrap_or(r.allow_tunnels), record_input.unwrap_or(r.record_input));
+            let files = files.unwrap_or(r.allow_files);
             let mut tx = db.begin().await?;
             sqlx::query(
                 "UPDATE rules SET name = $2, group_id = $3, allow_sftp = $4, allow_tunnels = $5, record_input = $6, days = $7,
-                 hour_from = $8, hour_to = $9, expires_at = $10 WHERE id = $1",
+                 hour_from = $8, hour_to = $9, expires_at = $10, allow_files = $11 WHERE id = $1",
             )
             .bind(r.id)
             .bind(&new_name)
@@ -2218,6 +2247,7 @@ async fn rule_cmd(state: &State, cmd: RuleCmd) -> Result<()> {
             .bind(hours.map(|h| h.0))
             .bind(hours.map(|h| h.1))
             .bind(expires_at)
+            .bind(files)
             .execute(&mut *tx)
             .await
             .map_err(|e| match &e {
@@ -2237,7 +2267,7 @@ async fn rule_cmd(state: &State, cmd: RuleCmd) -> Result<()> {
                 db,
                 "console",
                 "regle.modifiee",
-                json!({ "regle": new_name, "groupe": group_name, "cibles": target_names, "sftp": sftp, "tunnels": tunnels, "frappe": record_input, "jours": days, "heures": hours, "expire": expires_at }),
+                json!({ "regle": new_name, "groupe": group_name, "cibles": target_names, "sftp": sftp, "tunnels": tunnels, "frappe": record_input, "jours": days, "fichiers": files, "heures": hours, "expire": expires_at }),
             )
             .await?;
             println!("{}", t!("Rule changed: open sessions are rechecked within 30 seconds.", "Règle modifiée : les sessions ouvertes sont revérifiées sous 30 secondes."));
@@ -2263,6 +2293,7 @@ struct RuleRow {
     allow_sftp: bool,
     allow_tunnels: bool,
     record_input: bool,
+    allow_files: bool,
     days: i16,
     hour_from: Option<i16>,
     hour_to: Option<i16>,
@@ -2272,7 +2303,7 @@ struct RuleRow {
 
 async fn rules(db: &PgPool) -> Result<Vec<RuleRow>> {
     Ok(sqlx::query_as(
-        "SELECT r.id, r.name, g.name AS group_name, r.allow_sftp, r.allow_tunnels, r.record_input, r.days, r.hour_from, r.hour_to, r.expires_at,
+        "SELECT r.id, r.name, g.name AS group_name, r.allow_sftp, r.allow_tunnels, r.record_input, r.allow_files, r.days, r.hour_from, r.hour_to, r.expires_at,
                 COALESCE(array_agg(t.name ORDER BY t.name) FILTER (WHERE t.name IS NOT NULL), '{}') AS targets
          FROM rules r JOIN groups g ON g.id = r.group_id
          LEFT JOIN rule_targets rt ON rt.rule_id = r.id LEFT JOIN targets t ON t.id = rt.target_id

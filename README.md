@@ -349,6 +349,7 @@ sudo portunia-gate rule add contractor-db --group Contractors --targets db-01 --
 sudo portunia-gate rule list                                       # with their state now
 sudo portunia-gate rule edit prod --sftp off --hours ""            # "" clears days, hours or expiry
 sudo portunia-gate rule delete contractor-db
+sudo portunia-gate rule add windows --group Accounting --targets srv-ad-01 --files   # Remote Desktop file copy (logged, SHA-256)
 
 # Web portal and assistance
 sudo portunia-gate portal set --url https://access.acme.com --group "Web access" --duration 4 --idle 30 --clipboard on

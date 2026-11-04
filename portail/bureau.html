@@ -15,6 +15,7 @@
   <span class="tag rdp">RDP</span>
   <span class="rec"><i></i>{{Recorded|Enregistré}}</span>
   <span class="grow"></span>
+  <button class="btn" id="envoyer" type="button" hidden>{{Send files|Envoyer des fichiers}}</button>
   <button class="btn" id="cad" type="button" disabled>{{Ctrl+Alt+Del|Ctrl+Alt+Suppr}}</button>
   <button class="btn" id="plein" type="button" disabled>{{Full screen|Plein écran}}</button>
   <a class="btn" href="/">{{My servers|Mes serveurs}}</a>
@@ -36,6 +37,11 @@
     <button class="btn primary" type="submit" id="ouvrir">{{Open the session|Ouvrir la session}}</button>
   </form>
 </main>
+<aside id="fichiers" class="files-panel" hidden aria-live="polite">
+  <div class="files-head"><b>{{Files|Fichiers}}</b><button class="btn" id="fichiers-fermer" type="button" aria-label="{{Hide|Masquer}}">×</button></div>
+  <p class="files-hint">{{Send: drop files on the desktop or use « Send files », then paste them in Windows (Ctrl+V). Receive: copy files in Windows (Ctrl+C), they appear here.|Envoyer : déposez des fichiers sur le bureau ou utilisez « Envoyer des fichiers », puis collez-les dans Windows (Ctrl+V). Recevoir : copiez des fichiers dans Windows (Ctrl+C), ils apparaissent ici.}}</p>
+  <ul id="fichiers-liste"></ul>
+</aside>
 <div id="notice" class="notice" hidden>
   <b id="notice-titre"></b>
   <span id="notice-texte"></span>

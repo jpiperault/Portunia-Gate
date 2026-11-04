@@ -237,7 +237,12 @@ async fn run(state: &Arc<State>, socket: &mut WebSocket, origin: Origin) -> Resu
     }
     // Pas de session sans enregistrement.
     let id = Uuid::new_v4();
-    let capture = match crate::rdpcap::Recorder::create(&state.config.recordings_dir(), id, &format!("{} → {}", user.login, target.name), access.record_input).and_then(crate::rdpcap::Recorder::spawn) {
+    // Copie de fichiers : tracée si la règle l'autorise (et gardée, si le réglage le demande),
+    // bloquée en ligne sinon.
+    let keep_files = if access.files { file_copies_limit(state).await? } else { 0 };
+    let guard = (!access.files).then(crate::rdpclip::Guard::default);
+    let (mut from_server, mut from_client) = (guard.as_ref().map(|g| g.side(true)), guard.as_ref().map(|g| g.side(false)));
+    let capture = match crate::rdpcap::Recorder::create(&state.config.recordings_dir(), id, &format!("{} → {}", user.login, target.name), access.record_input, keep_files).and_then(crate::rdpcap::Recorder::spawn) {
         Ok(c) => c,
         Err(e) => {
             audit::note(db, &user.login, "enregistrement.echec", json!({ "cible": target.name, "raison": e.to_string(), "adresse": addr })).await;
@@ -275,10 +280,20 @@ async fn run(state: &Arc<State>, socket: &mut WebSocket, origin: Origin) -> Resu
                 match tls_read.read(&mut buf).await {
                     Ok(0) | Err(_) => return "serveur",
                     Ok(n) => {
-                        if !capture.push(true, &buf[..n]).await {
+                        let bytes = match &mut from_server {
+                            Some(side) => match side.filter(&buf[..n]) {
+                                Ok(b) => b,
+                                Err(why) => return why,
+                            },
+                            None => buf[..n].to_vec(),
+                        };
+                        if bytes.is_empty() {
+                            continue;
+                        }
+                        if !capture.push(true, &bytes).await {
                             return "enregistrement";
                         }
-                        if ws_send.send(Message::Binary(buf[..n].to_vec().into())).await.is_err() {
+                        if ws_send.send(Message::Binary(bytes.into())).await.is_err() {
                             return "client";
                         }
                     }
@@ -290,10 +305,20 @@ async fn run(state: &Arc<State>, socket: &mut WebSocket, origin: Origin) -> Resu
                 match ws_recv.next().await {
                     Some(Ok(Message::Binary(data))) => {
                         last_input.store(started.elapsed().as_millis() as u64, Ordering::Relaxed);
-                        if !capture.push(false, &data).await {
+                        let bytes = match &mut from_client {
+                            Some(side) => match side.filter(&data) {
+                                Ok(b) => b,
+                                Err(why) => return why,
+                            },
+                            None => data.to_vec(),
+                        };
+                        if bytes.is_empty() {
+                            continue;
+                        }
+                        if !capture.push(false, &bytes).await {
                             return "enregistrement";
                         }
-                        if tls_write.write_all(&data).await.is_err() {
+                        if tls_write.write_all(&bytes).await.is_err() {
                             return "serveur";
                         }
                     }
@@ -333,13 +358,33 @@ async fn run(state: &Arc<State>, socket: &mut WebSocket, origin: Origin) -> Resu
     let _ = ws_send.send(Message::Close(None)).await;
 
     let mut done = model::Finished { recording: None, sha256: None, signature: None, bytes: 0 };
+    let mut files = Vec::new();
     match capture.finish(state, id).await {
-        Ok((path, sha, sig, bytes)) => done = model::Finished { recording: Some(path), sha256: Some(sha), signature: Some(sig), bytes: bytes as i64 },
+        Ok(c) => {
+            done = model::Finished { recording: Some(c.path), sha256: Some(c.sha256), signature: Some(c.signature), bytes: c.bytes as i64 };
+            files = c.files;
+        }
         Err(e) => tracing::error!("{} {id}: {e:#}", t!("RDP recording", "enregistrement RDP")),
     }
     let bytes = done.bytes;
     model::session_end(db, id, done).await?;
     model::session_index(db, id, access.record_input, "").await?;
+    // Fichiers copiés : une ligne du journal chacun (sens, nom, taille, empreinte).
+    for f in &files {
+        let mut detail = f.clone();
+        if let Some(map) = detail.as_object_mut() {
+            map.remove("k");
+            map.insert("session".into(), json!(id));
+            map.insert("cible".into(), json!(target.name));
+        }
+        audit::note(db, &user.login, "fichier.copie", detail).await;
+    }
+    if !files.is_empty() {
+        model::session_files(db, id, files.len() as i32).await?;
+    }
+    if let Some(blocked) = guard.as_ref().map(|g| g.blocked()).filter(|&n| n > 0) {
+        audit::note(db, &user.login, "fichier.bloque", json!({ "session": id, "cible": target.name, "messages": blocked })).await;
+    }
     audit::note(
         db,
         &user.login,
@@ -348,6 +393,12 @@ async fn run(state: &Arc<State>, socket: &mut WebSocket, origin: Origin) -> Resu
     )
     .await;
     Ok(())
+}
+
+/// Copies de fichiers gardées par session (réglage « copies_fichiers_mo », en Mo ; 0 : aucune).
+async fn file_copies_limit(state: &State) -> Result<u64> {
+    let mb = model::setting(&state.db, "copies_fichiers_mo").await?.and_then(|v| v.as_u64()).unwrap_or(0);
+    Ok(mb.min(10_240) * 1024 * 1024)
 }
 
 #[cfg(test)]

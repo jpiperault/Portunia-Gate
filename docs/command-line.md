@@ -1,6 +1,6 @@
 # Portunia Gate — command-line reference
 
-*Portunia Gate 0.26 and later.* [Version française](ligne-de-commande.md)
+*Portunia Gate 0.26 and later; Remote Desktop file copy: 0.28 and later.* [Version française](ligne-de-commande.md)
 
 Everything Portunia's **Administer** menu does on a Gate can also be done on the Gate's server with the `portunia-gate` command, so a Gate can be run entirely from a Linux or macOS workstation over SSH: accounts, groups, servers, rules, settings, the web portal, Let's Encrypt, remote assistance, the audit log and session search. Only **replaying sessions** stays in Portunia (video player, revealing masked input).
 
@@ -90,14 +90,18 @@ sudo portunia-gate target delete fw-edge                  # secret erased; sessi
 ```bash
 sudo portunia-gate rule add prod --group "Linux admins" --targets web-01,stg --sftp --tunnels --days mon-fri --hours 7-20
 sudo portunia-gate rule add contractor --group Contractors --targets db-01 --record-input --expires 2026-12-31
+sudo portunia-gate rule add windows --group Accounting --targets srv-ad-01 --files   # Remote Desktop: file copy allowed
 sudo portunia-gate rule list                              # with their state now: active, outside hours, expired
 sudo portunia-gate rule edit prod --sftp off --targets web-01,web-02   # switches: on or off
 sudo portunia-gate rule edit contractor --expires 2027-03-31 --hours ""  # "" clears days, hours or expiry
 sudo portunia-gate rule edit prod --rename production --group Admins
+sudo portunia-gate rule edit windows --files off             # file copy blocked again
 sudo portunia-gate rule delete contractor                 # sessions it allowed close within 30 s
 ```
 
 `--sftp`, `--tunnels` (vault SSH servers) and `--record-input` (careful: captures typed passwords) apply to SSH.
+
+`--files` applies to Remote Desktop in recorded mode: copying files through the clipboard, in both directions (from the web portal: drop files on the desktop or « Send files », then paste in Windows; copy files in Windows to download them). Without it, the Gate blocks file copy; copied text still passes. With it, each file is written to the audit log (`fichier.copie`: direction, name, size, SHA-256) and shows in the recording; blocked attempts are logged as `fichier.bloque`. In jump mode the stream is encrypted end to end: the Gate can neither see nor block it (use a Windows group policy).
 
 ## General settings
 
@@ -111,10 +115,13 @@ sudo portunia-gate setting session_hours 8                # Portunia sign-in dur
 sudo portunia-gate setting remember_password off          # Portunia may remember the Gate password on workstations
 sudo portunia-gate setting own_replay off                 # each account may replay its own sessions
 sudo portunia-gate setting sensitive_commands "rm -rf,shutdown,DROP TABLE"   # marked on the player's timeline
+sudo portunia-gate setting file_copies_mb 200             # keep copied files, up to 200 MB per session (0: none)
 sudo portunia-gate setting session_hours                  # without a value: shows it
 ```
 
-French names are accepted too: `nom`, `langue`, `banniere`, `duree_session_h`, `memo_mot_de_passe`, `relecture_propres`, `commandes_sensibles`.
+French names are accepted too: `nom`, `langue`, `banniere`, `duree_session_h`, `memo_mot_de_passe`, `relecture_propres`, `commandes_sensibles`, `copies_fichiers_mo`.
+
+Kept file copies go next to the recording, in `/var/lib/portunia-gate/enregistrements/YYYY/MM/<session>-fichiers/`; their SHA-256 is in the signed recording and in the audit log.
 
 ## Web portal
 
@@ -183,6 +190,7 @@ sudo portunia-gate sessions --last 20
 sudo portunia-gate sessions --user marc --server web-01 --since 2026-11-01 --until 2026-11-30
 sudo portunia-gate sessions --text "rm -rf"               # text shown on screen or typed
 sudo portunia-gate sessions --input                       # sessions whose keystrokes are recorded
+sudo portunia-gate sessions --files                       # Remote Desktop sessions where files were copied
 sudo portunia-gate sessions show 3f2a9c1e                 # details, recording file, signature check
 ```
 

@@ -1,6 +1,6 @@
 # Portunia Gate — référence de la ligne de commande
 
-*Portunia Gate 0.26 et suivantes.* [English version](command-line.md)
+*Portunia Gate 0.26 et suivantes ; copie de fichiers en Bureau à distance : 0.28 et suivantes.* [English version](command-line.md)
 
 Tout ce que fait le menu **Administrer** de Portunia sur une Gate se fait aussi sur le serveur de la Gate avec la commande `portunia-gate`. Une Gate s'exploite donc entièrement depuis un poste Linux ou macOS, en SSH : comptes, groupes, serveurs, règles, réglages, portail web, Let's Encrypt, assistance à distance, journal d'audit et recherche de sessions. Seule la **relecture des sessions** reste dans Portunia (lecteur vidéo, révélation des saisies masquées).
 
@@ -90,14 +90,18 @@ sudo portunia-gate target delete fw-edge                  # secret effacé ; ses
 ```bash
 sudo portunia-gate rule add prod --group "Admins Linux" --targets web-01,rec --sftp --tunnels --days lun-ven --hours 7-20
 sudo portunia-gate rule add presta --group Prestataires --targets db-01 --record-input --expires 2026-12-31
+sudo portunia-gate rule add windows --group Comptabilité --targets srv-ad-01 --files   # Bureau à distance : copie de fichiers permise
 sudo portunia-gate rule list                              # avec leur état : active, hors plage, expirée
 sudo portunia-gate rule edit prod --sftp off --targets web-01,web-02   # interrupteurs : on ou off
 sudo portunia-gate rule edit presta --expires 2027-03-31 --hours ""    # "" efface les jours, les heures ou l'expiration
 sudo portunia-gate rule edit prod --rename production --group Admins
+sudo portunia-gate rule edit windows --files off             # copie de fichiers de nouveau bloquée
 sudo portunia-gate rule delete presta                     # les sessions qu'elle permettait se ferment sous 30 s
 ```
 
 `--sftp`, `--tunnels` (serveurs SSH en coffre) et `--record-input` (attention : capte les mots de passe tapés) concernent le SSH.
+
+`--files` concerne le Bureau à distance en mode enregistré : copie de fichiers par le presse-papiers, dans les deux sens (depuis le portail web : déposer des fichiers sur le bureau ou « Envoyer des fichiers », puis coller dans Windows ; copier des fichiers dans Windows pour les télécharger). Sans elle, la Gate bloque la copie de fichiers ; le texte copié passe toujours. Avec elle, chaque fichier est inscrit au journal (`fichier.copie` : sens, nom, taille, SHA-256) et apparaît dans l'enregistrement ; les tentatives bloquées sont notées `fichier.bloque`. En mode rebond, le flux est chiffré de bout en bout : la Gate ne peut ni le voir ni le bloquer (stratégie de groupe Windows).
 
 ## Réglages généraux
 
@@ -111,10 +115,13 @@ sudo portunia-gate setting session_hours 8                # durée d'une connexi
 sudo portunia-gate setting remember_password off          # Portunia peut retenir le mot de passe de la Gate sur les postes
 sudo portunia-gate setting own_replay off                 # chaque compte peut relire ses propres sessions
 sudo portunia-gate setting sensitive_commands "rm -rf,shutdown,DROP TABLE"   # repérées sur la barre de temps du lecteur
+sudo portunia-gate setting file_copies_mb 200             # garde les fichiers copiés, jusqu'à 200 Mo par session (0 : aucun)
 sudo portunia-gate setting session_hours                  # sans valeur : l'affiche
 ```
 
-Les noms français sont acceptés aussi : `nom`, `langue`, `banniere`, `duree_session_h`, `memo_mot_de_passe`, `relecture_propres`, `commandes_sensibles`.
+Les noms français sont acceptés aussi : `nom`, `langue`, `banniere`, `duree_session_h`, `memo_mot_de_passe`, `relecture_propres`, `commandes_sensibles`, `copies_fichiers_mo`.
+
+Les copies gardées sont rangées à côté de l'enregistrement, dans `/var/lib/portunia-gate/enregistrements/AAAA/MM/<session>-fichiers/` ; leur SHA-256 figure dans l'enregistrement signé et au journal.
 
 ## Portail web
 
@@ -183,6 +190,7 @@ sudo portunia-gate sessions --last 20
 sudo portunia-gate sessions --user marc --server web-01 --since 2026-11-01 --until 2026-11-30
 sudo portunia-gate sessions --text "rm -rf"               # texte affiché à l'écran ou tapé
 sudo portunia-gate sessions --input                       # sessions dont la frappe est enregistrée
+sudo portunia-gate sessions --files                       # sessions Bureau à distance avec des fichiers copiés
 sudo portunia-gate sessions show 3f2a9c1e                 # détail, fichier d'enregistrement, contrôle de la signature
 ```
 

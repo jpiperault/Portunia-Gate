@@ -1,7 +1,7 @@
 // Portail web de Portunia Gate : Bureau à distance dans le navigateur (client IronRDP), à travers
 // le passage RDCleanPath de la Gate.
 import '/static/iron-remote-desktop.js?v=__V__';
-import { Backend, init, displayControl, performanceFlags } from '/static/iron-remote-desktop-rdp.js?v=__V__';
+import { Backend, init, displayControl, performanceFlags, RdpFileTransferProvider } from '/static/iron-remote-desktop-rdp.js?v=__V__';
 
 const FR = document.documentElement.lang === 'fr';
 const T = (en, fr) => (FR ? fr : en);
@@ -79,6 +79,9 @@ async function open(user, password, domain) {
 
   const etat = await fetch('/api/etat', { credentials: 'same-origin' }).then((r) => r.json()).catch(() => ({}));
   ui.setEnableClipboard(etat.presse_papiers !== false);
+  // Copie de fichiers : seulement si la règle l'autorise (sinon la Gate la bloque de toute façon)
+  // et si le copier-coller du portail est permis, puisqu'elle passe par le presse-papiers.
+  if (data.fichiers && etat.presse_papiers !== false) enableFiles();
   const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
   const start = desktopSize();
   lastSize = `${start.width}x${start.height}`;
@@ -102,6 +105,113 @@ async function open(user, password, domain) {
   const end = await session.run();
   sizeWatch?.disconnect();
   showNotice(T('Session closed', 'Session fermée'), end?.reason?.() || T('The Remote Desktop session has ended.', 'La session Bureau à distance est terminée.'), [[T('Reopen', 'Rouvrir'), () => location.reload(), true], [T('My servers', 'Mes serveurs'), () => { location.href = '/'; }]]);
+}
+
+// Copie de fichiers par le presse-papiers. Envoyer : fichiers déposés sur le bureau ou choisis,
+// puis collés dans Windows. Recevoir : fichiers copiés dans Windows, téléchargés d'ici. La Gate
+// note chaque fichier au journal (nom, taille, empreinte).
+let files = null;
+const panel = document.getElementById('fichiers');
+const fileList = document.getElementById('fichiers-liste');
+const rows = new Map();
+
+function fileRow(key, name) {
+  let row = rows.get(key);
+  if (!row) {
+    row = document.createElement('li');
+    const label = document.createElement('span');
+    label.className = 'name';
+    label.textContent = name;
+    label.title = name;
+    const state = document.createElement('span');
+    state.className = 'state';
+    row.append(label, state);
+    fileList.prepend(row);
+    rows.set(key, row);
+  }
+  panel.hidden = false;
+  return row;
+}
+
+function setState(row, text) {
+  row.querySelector('.state').textContent = text;
+}
+
+function sizeText(n) {
+  if (n < 1024) return `${n} o`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} Ko`;
+  return `${(n / 1024 / 1024).toFixed(1)} Mo`;
+}
+
+function saveBlob(blob, name) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+}
+
+function upload(list) {
+  if (!list.length) return;
+  files.uploadFiles(list);
+  for (const f of list) {
+    if (f.isDirectory || (f.file === null)) continue;
+    setState(fileRow(`up:${f.name}`, f.name), T('ready: paste in Windows (Ctrl+V)', 'prêt : collez dans Windows (Ctrl+V)'));
+  }
+}
+
+function enableFiles() {
+  files = new RdpFileTransferProvider();
+  ui.enableFileTransfer(files);
+  const send = document.getElementById('envoyer');
+  send.hidden = false;
+  send.addEventListener('click', async () => upload(await files.showFilePicker({ multiple: true }).catch(() => [])));
+  screen.addEventListener('dragover', (e) => { files.handleDragOver(e); screen.classList.add('drop'); });
+  screen.addEventListener('dragleave', () => screen.classList.remove('drop'));
+  screen.addEventListener('drop', async (e) => {
+    screen.classList.remove('drop');
+    upload(await files.handleDrop(e).catch(() => []));
+  });
+  document.getElementById('fichiers-fermer').addEventListener('click', () => { panel.hidden = true; });
+  files.on('upload-progress', (p) => setState(fileRow(`up:${p.fileName}`, p.fileName), `${T('sending', 'envoi')} ${Math.round(p.percentage)} %`));
+  files.on('upload-complete', (file) => setState(fileRow(`up:${file.name}`, file.name), T('sent ✓', 'envoyé ✓')));
+  // Fichiers copiés dans Windows : proposés au téléchargement.
+  files.on('files-available', (list) => {
+    list.forEach((info, index) => {
+      if (info.isDirectory) return;
+      const row = fileRow(`down:${info.path || ''}\\${info.name}`, info.path ? `${info.path}\\${info.name}` : info.name);
+      setState(row, sizeText(info.size || 0));
+      row.querySelector('button')?.remove();
+      const get = document.createElement('button');
+      get.type = 'button';
+      get.className = 'btn';
+      get.textContent = T('Download', 'Télécharger');
+      get.addEventListener('click', async () => {
+        get.disabled = true;
+        try {
+          const blob = await files.downloadFile(info, index).completion;
+          saveBlob(blob, info.name);
+          setState(row, T('received ✓', 'reçu ✓'));
+          get.remove();
+        } catch (err) {
+          setState(row, T('failed', 'échec'));
+          get.disabled = false;
+        }
+      });
+      row.append(get);
+    });
+  });
+  files.on('download-progress', (p) => {
+    for (const row of rows.values()) {
+      if (row.querySelector('.name').textContent.endsWith(p.fileName)) setState(row, `${Math.round(p.percentage)} %`);
+    }
+  });
+  files.on('error', (err) => {
+    if (err.fileName) setState(fileRow(`err:${err.fileName}`, err.fileName), T('failed', 'échec'));
+    else showNotice(T('File copy', 'Copie de fichiers'), err.message || '', [[T('OK', 'OK'), () => { notice.hidden = true; }, true]]);
+  });
 }
 
 // La résolution du bureau Windows suit la place disponible : plein écran, fenêtre agrandie

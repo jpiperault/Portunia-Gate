@@ -362,6 +362,7 @@ sudo portunia-gate rule add presta-db --group Prestataires --targets db-01 --exp
 sudo portunia-gate rule list                                       # avec leur état en ce moment
 sudo portunia-gate rule edit prod --sftp off --hours ""            # "" efface les jours, les heures ou l'expiration
 sudo portunia-gate rule delete presta-db
+sudo portunia-gate rule add windows --group Comptabilité --targets srv-ad-01 --files   # copie de fichiers en Bureau à distance (journalisée, SHA-256)
 
 # Portail web et assistance
 sudo portunia-gate portal set --url https://acces.acme.fr --group "Accès web" --duration 4 --idle 30 --clipboard on

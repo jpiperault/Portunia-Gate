@@ -1168,11 +1168,12 @@ async fn desktop_ticket(AxState(portal): Ctx, ConnectInfo(peer): ConnectInfo<Soc
         let Some(target) = target else {
             return Ok(err(StatusCode::NOT_FOUND, t!("Server unavailable in the browser", "Serveur indisponible dans le navigateur")));
         };
-        if model::access(&state.db, w.user.id, target.id).await?.is_none() {
+        let Some(access) = model::access(&state.db, w.user.id, target.id).await? else {
             return Ok(err(StatusCode::FORBIDDEN, t!("Server not allowed at the moment", "Serveur non autorisé en ce moment")));
-        }
+        };
         let ticket = crate::api::issue_ticket(&state.db, w.user.id, target.id, Some(&format!("{ip} (web)"))).await?;
-        Ok::<_, anyhow::Error>(Json(json!({ "jeton": ticket, "compte": target.account })).into_response())
+        // « fichiers » : la page propose la copie de fichiers (la Gate la bloque sinon).
+        Ok::<_, anyhow::Error>(Json(json!({ "jeton": ticket, "compte": target.account, "fichiers": access.files })).into_response())
     }
     .await;
     result.unwrap_or_else(internal)

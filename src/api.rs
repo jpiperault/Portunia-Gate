@@ -1052,6 +1052,7 @@ struct RuleRow {
     allow_sftp: bool,
     allow_tunnels: bool,
     record_input: bool,
+    allow_files: bool,
     days: i16,
     hour_from: Option<i16>,
     hour_to: Option<i16>,
@@ -1062,7 +1063,7 @@ struct RuleRow {
 async fn admin_rules(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
     admin(&api, &headers).await?;
     let rows: Vec<RuleRow> = sqlx::query_as(
-        "SELECT r.id, r.name, g.name AS group_name, r.allow_sftp, r.allow_tunnels, r.record_input, r.days, r.hour_from, r.hour_to, r.expires_at,
+        "SELECT r.id, r.name, g.name AS group_name, r.allow_sftp, r.allow_tunnels, r.record_input, r.allow_files, r.days, r.hour_from, r.hour_to, r.expires_at,
                 COALESCE(array_agg(t.name ORDER BY t.name) FILTER (WHERE t.name IS NOT NULL), '{}') AS targets
          FROM rules r JOIN groups g ON g.id = r.group_id
          LEFT JOIN rule_targets rt ON rt.rule_id = r.id LEFT JOIN targets t ON t.id = rt.target_id
@@ -1076,7 +1077,7 @@ async fn admin_rules(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
             let state = model::rule_state(r.days, r.hour_from, r.hour_to, r.expires_at);
             json!({
                 "id": r.id, "nom": r.name, "groupe": r.group_name, "cibles": r.targets, "sftp": r.allow_sftp,
-                "tunnels": r.allow_tunnels, "frappe": r.record_input, "jours": r.days, "heure_debut": r.hour_from,
+                "tunnels": r.allow_tunnels, "frappe": r.record_input, "fichiers": r.allow_files, "jours": r.days, "heure_debut": r.hour_from,
                 "heure_fin": r.hour_to, "expire": r.expires_at, "etat": state,
             })
         })
@@ -1095,6 +1096,8 @@ struct RuleBody {
     tunnels: bool,
     #[serde(default)]
     frappe: bool,
+    /// Bureau à distance : copie de fichiers. Absent : inchangé (Portunia antérieur à 0.64).
+    fichiers: Option<bool>,
     #[serde(default = "all_days")]
     jours: i16,
     heure_debut: Option<i16>,
@@ -1156,13 +1159,14 @@ async fn admin_rule_create(AxState(api): Ctx, headers: HeaderMap, Json(body): Js
             allow_sftp: body.sftp,
             allow_tunnels: body.tunnels,
             record_input: body.frappe,
+            allow_files: body.fichiers.unwrap_or(false),
             days: body.jours,
             hours,
             expires_at,
         },
     )
     .await?;
-    audit::note(db, &actor.login, "regle.creee", json!({ "regle": body.nom, "groupe": body.groupe, "cibles": body.cibles, "sftp": body.sftp, "tunnels": body.tunnels, "frappe": body.frappe })).await;
+    audit::note(db, &actor.login, "regle.creee", json!({ "regle": body.nom, "groupe": body.groupe, "cibles": body.cibles, "sftp": body.sftp, "tunnels": body.tunnels, "frappe": body.frappe, "fichiers": body.fichiers.unwrap_or(false) })).await;
     Ok(Json(json!({ "id": id })))
 }
 
@@ -1173,7 +1177,7 @@ async fn admin_rule_update(AxState(api): Ctx, headers: HeaderMap, Path(id): Path
     let mut tx = db.begin().await?;
     let done = sqlx::query(
         "UPDATE rules SET name = $2, group_id = $3, allow_sftp = $4, allow_tunnels = $5, record_input = $6, days = $7,
-         hour_from = $8, hour_to = $9, expires_at = $10 WHERE id = $1",
+         hour_from = $8, hour_to = $9, expires_at = $10, allow_files = COALESCE($11, allow_files) WHERE id = $1",
     )
     .bind(id)
     .bind(body.nom.trim())
@@ -1185,6 +1189,7 @@ async fn admin_rule_update(AxState(api): Ctx, headers: HeaderMap, Path(id): Path
     .bind(hours.map(|h| h.0))
     .bind(hours.map(|h| h.1))
     .bind(expires_at)
+    .bind(body.fichiers)
     .execute(&mut *tx)
     .await?;
     if done.rows_affected() == 0 {
@@ -1203,7 +1208,7 @@ async fn admin_rule_update(AxState(api): Ctx, headers: HeaderMap, Path(id): Path
     }
     tx.commit().await?;
     api.state.live.recheck();
-    audit::note(db, &actor.login, "regle.modifiee", json!({ "regle": body.nom, "groupe": body.groupe, "cibles": body.cibles, "sftp": body.sftp, "tunnels": body.tunnels, "frappe": body.frappe, "jours": body.jours, "heures": hours, "expire": body.expire })).await;
+    audit::note(db, &actor.login, "regle.modifiee", json!({ "regle": body.nom, "groupe": body.groupe, "cibles": body.cibles, "sftp": body.sftp, "tunnels": body.tunnels, "frappe": body.frappe, "jours": body.jours, "fichiers": body.fichiers, "heures": hours, "expire": body.expire })).await;
     Ok(Json(json!({ "etat": "ok" })))
 }
 
@@ -1327,6 +1332,8 @@ async fn admin_settings(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
         "memo_mot_de_passe": remember_allowed(state).await?,
         "relecture_propres": own_sessions_allowed(state).await?,
         "commandes_sensibles": sensitive_commands(state).await?,
+        // Copies des fichiers copiés en Bureau à distance, gardées par session (Mo ; 0 : aucune).
+        "copies_fichiers_mo": model::setting(&state.db, "copies_fichiers_mo").await?.and_then(|v| v.as_u64()).unwrap_or(0),
         // « en », « fr », ou vide : langue du système de la Gate.
         "langue": setting_str(state, "langue", "").await?,
     })))
@@ -1342,6 +1349,7 @@ struct SettingsBody {
     relecture_propres: Option<bool>,
     commandes_sensibles: Option<Vec<String>>,
     langue: Option<String>,
+    copies_fichiers_mo: Option<u64>,
 }
 
 async fn admin_settings_update(AxState(api): Ctx, headers: HeaderMap, Json(body): Json<SettingsBody>) -> ApiResult {
@@ -1380,6 +1388,13 @@ async fn admin_settings_update(AxState(api): Ctx, headers: HeaderMap, Json(body)
         let list: Vec<String> = list.into_iter().map(|c| c.trim().to_string()).filter(|c| !c.is_empty()).collect();
         model::set_setting(db, "commandes_sensibles", json!(list)).await?;
         changed.insert("commandes_sensibles".into(), json!(list));
+    }
+    if let Some(v) = body.copies_fichiers_mo {
+        if v > 10_240 {
+            return Err(err(StatusCode::BAD_REQUEST, t!("File copies: 0 to 10240 MB", "Copies de fichiers : 0 à 10240 Mo")));
+        }
+        model::set_setting(db, "copies_fichiers_mo", json!(v)).await?;
+        changed.insert("copies_fichiers_mo".into(), json!(v));
     }
     if let Some(v) = body.langue {
         let v = v.trim().to_lowercase();
@@ -1449,6 +1464,7 @@ struct AuditQuery {
     jusqua: Option<String>,
     texte: Option<String>,
     frappe: Option<bool>,
+    fichiers: Option<bool>,
     limite: Option<i64>,
 }
 
@@ -1467,6 +1483,7 @@ async fn audit_sessions(AxState(api): Ctx, headers: HeaderMap, Query(q): Query<A
         until: nonempty(q.jusqua).map(|d| parse_day(&d, true)).transpose()?,
         text: text.clone(),
         with_input: q.frappe.unwrap_or(false),
+        with_files: q.fichiers.unwrap_or(false),
         // Une recherche lit chaque fichier trouvé pour donner le moment : liste plus courte.
         limit: q.limite.unwrap_or(200).clamp(1, if text.is_some() { 100 } else { 2000 }),
     };
@@ -1496,7 +1513,7 @@ async fn audit_sessions(AxState(api): Ctx, headers: HeaderMap, Query(q): Query<A
                 "relisible": s.recording.is_some() && s.kind != "rdp",
                 // Lecteur Bureau à distance : Portunia 0.47 et suivants (les précédents gardent « relecture bientôt »).
                 "relisible_rdp": s.recording.is_some() && s.kind == "rdp",
-                "frappe": s.frappe, "octets": s.bytes,
+                "frappe": s.frappe, "fichiers": s.fichiers, "octets": s.bytes,
                 "trouve": hit.map(|(t, extrait)| json!({ "t": t, "extrait": extrait })),
             })
         })
