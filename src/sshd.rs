@@ -735,7 +735,7 @@ async fn read_line(channel: &mut Channel<Msg>, echo: bool, pty: &mut Option<PtyI
 /// Menu des serveurs autorisés quand le nom ne désigne pas de cible.
 async fn choose_target(ctx: &Ctx, channel: &mut Channel<Msg>, pty: &mut Option<PtyInfo>) -> Result<Option<Target>> {
     // Les serveurs Bureau à distance s'ouvrent depuis Portunia, pas dans ce terminal.
-    let targets: Vec<Target> = model::allowed_targets(&ctx.state.db, ctx.user.id).await?.into_iter().filter(|t| !t.is_rdp()).collect();
+    let targets: Vec<Target> = model::allowed_targets(&ctx.state.db, ctx.user.id).await?.into_iter().filter(|t| t.is_ssh()).collect();
     let name = model::setting(&ctx.state.db, "nom")
         .await?
         .and_then(|v| v.as_str().map(str::to_owned))
@@ -831,8 +831,8 @@ async fn shell(ctx: Arc<Ctx>, mut channel: Channel<Msg>, mut pty: Option<PtyInfo
         close(&channel, 1).await;
         return Ok(());
     };
-    if target.is_rdp() {
-        say(&channel, &t!(format!("{} is a Remote Desktop server: open it from Portunia.\n", target.name), format!("{} est un serveur Bureau à distance : ouvrez-le depuis Portunia.\n", target.name))).await;
+    if !target.is_ssh() {
+        say(&channel, &t!(format!("{} is a Remote Desktop or web server: open it from Portunia or the web portal.\n", target.name), format!("{} est un serveur Bureau à distance ou web : ouvrez-le depuis Portunia ou le portail web.\n", target.name))).await;
         close(&channel, 1).await;
         return Ok(());
     }

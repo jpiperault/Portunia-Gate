@@ -82,7 +82,7 @@ impl ServerCertVerifier for Capture {
 }
 
 /// Empreinte du certificat du serveur, au format des clés SSH gardées pour les cibles.
-fn cert_fingerprint(der: &[u8]) -> String {
+pub(crate) fn cert_fingerprint(der: &[u8]) -> String {
     let hex = sha256_hex(der).to_uppercase();
     let pairs: Vec<&str> = (0..hex.len()).step_by(2).map(|i| &hex[i..i + 2]).collect();
     format!("TLS:{}", pairs.join(":"))

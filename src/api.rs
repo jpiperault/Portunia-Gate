@@ -116,6 +116,10 @@ pub async fn run(state: Arc<State>) -> anyhow::Result<()> {
         .route("/api/v1/assistance/{place}", get(assist_join))
         .route("/api/v1/admin/assistance", get(admin_assist).put(admin_assist_update))
         .route("/api/v1/admin/durcissement", get(admin_hardening))
+        // Interfaces web ouvertes depuis Portunia : entrée avec un jeton, puis toute autre
+        // adresse va au serveur web de la session (cookie).
+        .route("/web/entree", get(web_entry))
+        .fallback(web_any)
         .with_state(api)
         // Messages dans la langue demandée par Portunia (Accept-Language).
         .layer(axum::middleware::from_fn(crate::lang::middleware))
@@ -1672,6 +1676,66 @@ async fn rdp_passage(
     let addr = addr.ip().to_string();
     let lang = crate::lang::get();
     ws.on_upgrade(move |socket| crate::lang::scope(lang, crate::rdp::relay(state, socket, crate::rdp::Origin::Portunia { addr })))
+}
+
+// ---------- Interfaces web (Portunia) ----------
+
+#[derive(Deserialize)]
+struct WebEntry {
+    jeton: String,
+}
+
+fn web_refused(status: StatusCode, text: &str) -> Response {
+    (status, [(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")], text.to_string()).into_response()
+}
+
+/// Entrée : le jeton à usage unique de Portunia devient une clé de session web (cookie, 8 h),
+/// puis le navigateur de Portunia va à la racine du serveur.
+async fn web_entry(AxState(api): Ctx, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap, Query(q): Query<WebEntry>) -> Response {
+    let state = &api.state;
+    let cookie_name = crate::webproxy::key_cookie_name(&headers);
+    let result = async {
+        let Some((user_id, target_id, _)) = take_ticket(&state.db, &q.jeton).await? else {
+            return Ok(web_refused(StatusCode::UNAUTHORIZED, t!("Invalid, expired or already used token: open the server again from Portunia", "Jeton invalide, expiré ou déjà utilisé : rouvrez le serveur depuis Portunia")));
+        };
+        let user = model::user_by_id(&state.db, user_id).await?.filter(|u| !u.disabled);
+        let target = model::target_by_id(&state.db, target_id).await?.filter(|t| t.is_web());
+        let (Some(user), Some(target)) = (user, target) else {
+            return Ok(web_refused(StatusCode::FORBIDDEN, t!("Account or server unavailable", "Compte ou serveur indisponible")));
+        };
+        if !crate::webproxy::allowed(state, &user, &target).await? {
+            return Ok(web_refused(StatusCode::FORBIDDEN, t!("Server not allowed at the moment", "Serveur non autorisé en ce moment")));
+        }
+        crate::webproxy::opened(state, &user, &target, &peer.ip().to_string(), "portunia").await;
+        let key = crate::webproxy::new_key(user.id, target.id)?;
+        let cookie = format!("{cookie_name}={key}; Path=/; HttpOnly; SameSite=Lax");
+        Ok::<_, anyhow::Error>((StatusCode::FOUND, [(axum::http::header::SET_COOKIE, cookie), (axum::http::header::LOCATION, "/".to_string())]).into_response())
+    }
+    .await;
+    result.unwrap_or_else(|e| web_refused(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))
+}
+
+/// Toute autre adresse : relayée vers le serveur web de la clé de session.
+async fn web_any(AxState(api): Ctx, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: axum::extract::Request) -> Response {
+    let state = &api.state;
+    let Some((user_id, target_id)) = crate::webproxy::cookie(req.headers(), &crate::webproxy::key_cookie_name(req.headers())).and_then(|k| crate::webproxy::key_owner(&k)) else {
+        return web_refused(StatusCode::NOT_FOUND, t!("Not found", "Introuvable"));
+    };
+    let path = req.uri().path_and_query().map(|p| p.as_str().to_string()).unwrap_or_else(|| "/".into());
+    let found = async {
+        let user = model::user_by_id(&state.db, user_id).await?;
+        let target = model::target_by_id(&state.db, target_id).await?;
+        Ok::<_, anyhow::Error>(match (user, target) {
+            (Some(u), Some(t)) if crate::webproxy::allowed(state, &u, &t).await? => Some((u, t)),
+            _ => None,
+        })
+    }
+    .await;
+    match found {
+        Ok(Some((user, target))) => crate::webproxy::forward(state, &user, &target, req, &path, true, &peer.ip().to_string()).await,
+        Ok(None) => web_refused(StatusCode::FORBIDDEN, t!("Server not allowed at the moment: open it again from Portunia", "Serveur non autorisé en ce moment : rouvrez-le depuis Portunia")),
+        Err(e) => web_refused(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    }
 }
 
 // ---------- Administration : portail web ----------

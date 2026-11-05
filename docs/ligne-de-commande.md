@@ -82,6 +82,7 @@ sudo portunia-gate target forget srv-ad-01                # serveur réinstallé
 sudo portunia-gate target delete fw-edge                  # secret effacé ; sessions et enregistrements gardés
 ```
 
+- Interface web (`--protocol https` ou `http`, 0.30) : mode enregistré seulement (pris d'office), port 443 ou 80 ; la Gate relaie chaque requête et journalise les pages ouvertes (`web.page`). Exemple : `sudo portunia-gate target add vcenter --host 10.0.4.10 --protocol https`.
 - Bureau à distance (`--protocol rdp`) : `--mode enregistre`, `--mode rebond`, ou `--mode coffre` (0.29) avec `--account` et `--password` (un serveur RDP au coffre garde un mot de passe, pas une clé). Port 3389 par défaut.
 - Le portail web affiche les serveurs en `coffre` (SSH) et `enregistre` (SSH et RDP) ; les serveurs en `rebond` s'ouvrent depuis Portunia, ou avec `ssh -J` / `ssh -L`.
 

@@ -29,6 +29,7 @@ mod sshd;
 mod target;
 mod tls;
 mod tunnel;
+mod webproxy;
 
 use std::{io::IsTerminal, path::PathBuf, sync::Arc};
 
@@ -391,10 +392,10 @@ enum TargetCmd {
         name: String,
         #[arg(long)]
         host: String,
-        /// Port (22 for SSH, 3389 for Remote Desktop by default).
+        /// Port (by default 22 for SSH, 3389 for Remote Desktop, 443 for https, 80 for http).
         #[arg(long)]
         port: Option<i32>,
-        /// ssh or rdp (Remote Desktop).
+        /// ssh, rdp (Remote Desktop), https or http (web interface, recorded mode).
         #[arg(long, default_value = "ssh")]
         protocol: String,
         /// coffre (vault), enregistre (recorded) or rebond (jump); also vault, recorded, jump.
@@ -1505,8 +1506,9 @@ async fn target_cmd(state: &State, cmd: TargetCmd) -> Result<()> {
             password,
             key_file,
         } => {
-            let port = port.unwrap_or(if protocol == "rdp" { 3389 } else { 22 });
-            let mode = model::mode_alias(&mode).to_string();
+            let port = port.unwrap_or(match protocol.as_str() { "rdp" => 3389, "https" => 443, "http" => 80, _ => 22 });
+            // Interface web : seul le mode enregistré existe, il est pris d'office.
+            let mode = if matches!(protocol.as_str(), "http" | "https") && mode == "coffre" { "enregistre".to_string() } else { model::mode_alias(&mode).to_string() };
             let secret = console_secret(password, key_file.as_deref())?;
             let kind = secret.as_ref().map(|s| s.0.clone()).unwrap_or_else(|| "none".into());
             let new = model::NewTarget {

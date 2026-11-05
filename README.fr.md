@@ -233,6 +233,10 @@ La Gate doit joindre le port 3389 des serveurs Windows. Dans Portunia, l'extensi
 
 Un serveur RDP au coffre garde un mot de passe (compte local ou `DOMAINEcompte`), pas une clé. Si le mot de passe change sur le serveur, la connexion échoue avec `cible.coffre_refuse` : remplacez le secret.
 
+## Interfaces web
+
+Depuis la 0.30, les consoles d'administration (vCenter, iDRAC, iLO, pare-feu, NAS…) se déclarent comme des serveurs de protocole `https` ou `http`, en mode enregistré. La Gate relaie chaque requête (règle revérifiée toutes les 30 s), note chaque page ouverte (`web.page`) et épingle le certificat du serveur comme pour le Bureau à distance. Depuis Portunia, elles s'ouvrent dans une fenêtre dédiée par un relais local vers l'API de la Gate (session web de 8 heures) ; depuis le portail web, dans un onglet à l'adresse `/web/<nom>/` (une interface web à la fois par navigateur ; l'application partage l'adresse du portail, n'y publiez que des applications de confiance). Les cookies de la Gate et l'adresse du visiteur n'atteignent jamais le serveur ; les WebSocket passent.
+
 ## Portail web
 
 Une page web pour ouvrir ses serveurs depuis n'importe quel navigateur, sans Portunia : connexion, liste des serveurs autorisés, terminal SSH ou Bureau à distance dans un onglet. Elle ne sert pas à l'administration. Le Bureau à distance passe par le passage RDCleanPath de la Gate (tous les modes, voir [Bureau à distance](#bureau-à-distance-rdp)). Le portail passe par le serveur SSH de la Gate, avec un jeton à usage unique : mêmes règles, même coffre, même enregistrement, même journal. Une session web se relit dans l'audit comme une autre ; son adresse est suivie de « (web) ».

@@ -59,6 +59,7 @@ input.code { letter-spacing: .3em; font-family: var(--mono); }
 .tag { font-size: 10px; font-weight: 600; padding: 1px 6px; border-radius: 4px; background: var(--warn-soft); color: var(--warn); }
 .tag.ssh { background: var(--ssh-bg); color: var(--ssh); }
 .tag.rdp { background: var(--rdp-bg); color: var(--rdp); }
+.tag.http, .tag.https { background: var(--rdp-bg); color: var(--rdp); filter: hue-rotate(60deg); }
 .tag.plain { background: var(--bg); color: var(--muted); }
 .empty { color: var(--muted); }
 

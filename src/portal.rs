@@ -31,7 +31,7 @@ use axum::{
     http::{header, HeaderMap, HeaderValue, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{any, get, post},
     Json, Router,
 };
 // TCP_NODELAY sur chaque connexion : la frappe et la souris (terminal, Bureau à distance)
@@ -56,7 +56,7 @@ use crate::{
     State,
 };
 
-const COOKIE: &str = "portunia_gate_portail";
+pub const COOKIE: &str = "portunia_gate_portail";
 /// Réponse propre à ce démarrage de la Gate : l'essai de l'adresse publique vérifie que c'est elle.
 pub const PING_PATH: &str = "/.well-known/portunia-gate";
 static INSTANCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -572,6 +572,12 @@ fn build_router(portal: Portal) -> Router {
         .route("/assistance", get(page_assist))
         .route("/assistance/portunia-assistance.exe", get(assist_agent_file))
         .route("/assistance/relais", get(assist_agent))
+        // Interfaces web : entrée, puis chemins du serveur ; une adresse inconnue du portail va
+        // au serveur web ouvert dans ce navigateur.
+        .route("/web/{nom}", get(web_open))
+        .route("/web/{nom}/", any(web_root))
+        .route("/web/{nom}/{*rest}", any(web_path))
+        .fallback(web_fallback)
         .layer(middleware::from_fn_with_state(portal.clone(), guard))
         // Pages et messages dans la langue du sélecteur ou du navigateur.
         .layer(middleware::from_fn(crate::lang::middleware))
@@ -623,6 +629,10 @@ async fn guard(AxState(portal): Ctx, ConnectInfo(peer): ConnectInfo<SocketAddr>,
         return (StatusCode::FORBIDDEN, t!("Access restricted", "Accès restreint")).into_response();
     }
     let mut res = next.run(req).await;
+    // Page d'un serveur web relayé : ses propres règles de sécurité, pas celles du portail.
+    if res.extensions().get::<crate::webproxy::Proxied>().is_some() {
+        return res;
+    }
     let h = res.headers_mut();
     h.insert(
         header::CONTENT_SECURITY_POLICY,
@@ -709,7 +719,12 @@ fn page(html: &'static str) -> Response {
         .into_response()
 }
 
-async fn page_index() -> Response {
+/// Racine du portail. Venue d'une page d'un serveur web (le portail n'envoie jamais
+/// d'adresse d'origine, ses pages sont en « no-referrer ») : racine de ce serveur.
+async fn page_index(st: Ctx, peer: ConnectInfo<SocketAddr>, req: axum::extract::Request) -> Response {
+    if req.headers().contains_key(header::REFERER) && crate::webproxy::cookie(req.headers(), crate::webproxy::APP_COOKIE).is_some() {
+        return web_fallback(st, peer, req).await;
+    }
     page(INDEX)
 }
 
@@ -1104,7 +1119,7 @@ async fn terminal(
         let Some(w) = web_session(&portal, &headers, &s).await? else {
             return Ok(Err(err(StatusCode::UNAUTHORIZED, t!("Session expired", "Session expirée"))));
         };
-        let target = model::target_by_name(&state.db, &nom).await?.filter(|t| !t.is_rdp() && web_ready(t).is_none());
+        let target = model::target_by_name(&state.db, &nom).await?.filter(|t| t.is_ssh() && web_ready(t).is_none());
         let Some(target) = target else {
             return Ok(Err(err(StatusCode::NOT_FOUND, t!("Server unavailable in the browser", "Serveur indisponible dans le navigateur"))));
         };
@@ -1437,5 +1452,82 @@ mod tests {
         let mut h = HeaderMap::new();
         h.insert(header::COOKIE, HeaderValue::from_static("a=1; portunia_gate_portail=abc; b=2"));
         assert_eq!(cookie_token(&h).as_deref(), Some("abc"));
+    }
+}
+
+// ---------- Interfaces web ----------
+
+/// Ouverture d'un serveur web : session du portail et règle vérifiées, puis ce navigateur
+/// garde le nom du serveur (cookie) pour les chemins absolus de l'application.
+async fn web_open(AxState(portal): Ctx, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap, Path(nom): Path<String>) -> Response {
+    let ip = client_ip(&portal, peer, &headers);
+    let result = async {
+        let state = &portal.state;
+        let s = settings(state).await?;
+        if !s.enabled {
+            return Ok(err(StatusCode::SERVICE_UNAVAILABLE, t!("Portal closed", "Portail fermé")));
+        }
+        let Some(w) = web_session(&portal, &headers, &s).await? else {
+            return Ok((StatusCode::FOUND, [(header::LOCATION, "/")]).into_response());
+        };
+        let target = model::target_by_name(&state.db, &nom).await?.filter(|t| t.is_web());
+        let Some(target) = target else {
+            return Ok(err(StatusCode::NOT_FOUND, t!("Server unavailable in the browser", "Serveur indisponible dans le navigateur")));
+        };
+        if !crate::webproxy::allowed(state, &w.user, &target).await? {
+            audit::note(&state.db, &w.user.login, "acces.refuse", json!({ "cible": target.name, "type": "web", "adresse": format!("{ip} (web)") })).await;
+            return Ok(err(StatusCode::FORBIDDEN, t!("Server not allowed at the moment", "Serveur non autorisé en ce moment")));
+        }
+        crate::webproxy::opened(state, &w.user, &target, &format!("{ip} (web)"), "portail").await;
+        let cookie = format!("{}={}; Path=/; HttpOnly; Secure; SameSite=Lax", crate::webproxy::APP_COOKIE, target.name);
+        Ok::<_, anyhow::Error>((StatusCode::FOUND, [(header::SET_COOKIE, cookie), (header::LOCATION, format!("/web/{}/", target.name))]).into_response())
+    }
+    .await;
+    result.unwrap_or_else(internal)
+}
+
+async fn web_root(AxState(portal): Ctx, ConnectInfo(peer): ConnectInfo<SocketAddr>, Path(nom): Path<String>, req: axum::extract::Request) -> Response {
+    let query = req.uri().query().map(|q| format!("?{q}")).unwrap_or_default();
+    web_proxy(&portal, peer, &nom, format!("/{query}"), req).await
+}
+
+async fn web_path(AxState(portal): Ctx, ConnectInfo(peer): ConnectInfo<SocketAddr>, Path((nom, rest)): Path<(String, String)>, req: axum::extract::Request) -> Response {
+    let query = req.uri().query().map(|q| format!("?{q}")).unwrap_or_default();
+    web_proxy(&portal, peer, &nom, format!("/{rest}{query}"), req).await
+}
+
+/// Adresse inconnue du portail : chemin absolu du serveur web ouvert dans ce navigateur.
+async fn web_fallback(AxState(portal): Ctx, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: axum::extract::Request) -> Response {
+    let Some(nom) = crate::webproxy::cookie(req.headers(), crate::webproxy::APP_COOKIE) else {
+        return err(StatusCode::NOT_FOUND, t!("Page not found", "Page introuvable"));
+    };
+    let path = req.uri().path_and_query().map(|p| p.as_str().to_string()).unwrap_or_else(|| "/".into());
+    web_proxy(&portal, peer, &nom, path, req).await
+}
+
+async fn web_proxy(portal: &Portal, peer: SocketAddr, nom: &str, path: String, req: axum::extract::Request) -> Response {
+    let headers = req.headers().clone();
+    let ip = client_ip(portal, peer, &headers);
+    let checked = async {
+        let state = &portal.state;
+        let s = settings(state).await?;
+        if !s.enabled {
+            return Ok(Err(err(StatusCode::SERVICE_UNAVAILABLE, t!("Portal closed", "Portail fermé"))));
+        }
+        let Some(w) = web_session(portal, &headers, &s).await? else {
+            return Ok(Err((StatusCode::FOUND, [(header::LOCATION, "/")]).into_response()));
+        };
+        let target = model::target_by_name(&state.db, nom).await?.filter(|t| t.is_web());
+        match target {
+            Some(t) if crate::webproxy::allowed(state, &w.user, &t).await? => Ok(Ok((w.user, t))),
+            _ => Ok(Err(err(StatusCode::FORBIDDEN, t!("Server not allowed at the moment", "Serveur non autorisé en ce moment")))),
+        }
+    }
+    .await;
+    let checked: anyhow::Result<Result<(User, model::Target), Response>> = checked;
+    match checked {
+        Ok(Ok((user, target))) => crate::webproxy::forward(&portal.state, &user, &target, req, &path, false, &format!("{ip} (web)")).await,
+        Ok(Err(res)) => res,
+        Err(e) => internal(e),
     }
 }

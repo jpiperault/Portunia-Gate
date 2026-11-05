@@ -82,6 +82,7 @@ sudo portunia-gate target forget srv-ad-01                # server reinstalled: 
 sudo portunia-gate target delete fw-edge                  # secret erased; sessions and recordings stay
 ```
 
+- Web interface (`--protocol https` or `http`, 0.30): recorded mode only (taken by default), port 443 or 80; the Gate relays every request and logs the pages opened (`web.page`). Example: `sudo portunia-gate target add vcenter --host 10.0.4.10 --protocol https`.
 - Remote Desktop (`--protocol rdp`): `--mode enregistre`, `--mode rebond`, or `--mode coffre` (0.29) with `--account` and `--password` (a vault RDP server keeps a password, not a key). Port 3389 by default.
 - The web portal shows `coffre` (SSH) and `enregistre` (SSH and RDP) servers; `rebond` servers open from Portunia, or with `ssh -J` / `ssh -L`.
 

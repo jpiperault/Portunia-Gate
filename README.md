@@ -220,6 +220,10 @@ The Gate must reach port 3389 of the Windows servers. In Portunia, the Remote De
 
 A vault RDP server keeps a password (local account or `DOMAINaccount`), not a key. If the password changes on the server, the connection fails with `cible.coffre_refuse`: replace the secret.
 
+## Web interfaces
+
+Since 0.30, administration consoles (vCenter, iDRAC, iLO, firewalls, NAS…) are declared as servers with protocol `https` or `http`, in recorded mode. The Gate relays every request (rule checked again every 30 s), logs each page opened (`web.page`) and pins the server's certificate like for Remote Desktop. From Portunia they open in a dedicated window through a local relay to the Gate API (8-hour web session); from the web portal in a tab at `/web/<name>/` (one web interface at a time per browser; the application shares the portal's address, so only publish trusted applications there). The Gate's cookies and the visitor's address never reach the server; WebSockets go through.
+
 ## Web portal
 
 A web page to open your servers from any browser, without Portunia: sign-in, list of allowed servers, SSH terminal or Remote Desktop in a tab. It is not used for administration. SSH goes through the Gate's own SSH server with a one-time token: same rules, same vault, same recording, same log. Remote Desktop goes through the Gate's RDCleanPath gateway (every mode, see [Remote Desktop](#remote-desktop-rdp)). A web session is replayed in the audit like any other; its address is followed by "(web)".

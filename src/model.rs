@@ -263,7 +263,10 @@ pub fn check_protocol(protocole: &str, mode: &str) -> Result<()> {
         "ssh" => Ok(()),
         "rdp" if mode == "rebond" || mode == "enregistre" || mode == "coffre" => Ok(()),
         "rdp" => bail!(t!("Remote Desktop: jump, recorded or vault mode", "Bureau à distance : mode rebond, enregistré ou coffre")),
-        _ => bail!(t!("Unknown protocol: ssh or rdp", "Protocole inconnu : ssh ou rdp")),
+        // Interface web : la Gate relaie chaque requête et note les pages ouvertes.
+        "http" | "https" if mode == "enregistre" => Ok(()),
+        "http" | "https" => bail!(t!("Web interface: recorded mode only (pages visited are logged)", "Interface web : mode enregistré seulement (pages visitées journalisées)")),
+        _ => bail!(t!("Unknown protocol: ssh, rdp, http or https", "Protocole inconnu : ssh, rdp, http ou https")),
     }
 }
 
@@ -280,6 +283,13 @@ pub fn mode_alias(mode: &str) -> &str {
 impl Target {
     pub fn is_rdp(&self) -> bool {
         self.protocole == "rdp"
+    }
+    /// Interface web (http ou https), relayée par la Gate.
+    pub fn is_web(&self) -> bool {
+        self.protocole == "http" || self.protocole == "https"
+    }
+    pub fn is_ssh(&self) -> bool {
+        !self.is_rdp() && !self.is_web()
     }
     pub fn records(&self) -> bool {
         self.mode != "rebond"
