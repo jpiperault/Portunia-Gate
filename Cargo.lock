@@ -2571,7 +2571,7 @@ dependencies = [
 
 [[package]]
 name = "portunia-gate"
-version = "0.31.0"
+version = "0.31.1"
 dependencies = [
  "anyhow",
  "argon2 0.5.3",

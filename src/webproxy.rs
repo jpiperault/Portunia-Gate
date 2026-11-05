@@ -169,12 +169,23 @@ fn rewrite_cookie(value: &str, plain: bool) -> String {
         .join("; ")
 }
 
-/// `Location` vers le serveur lui-même : ramenée à un chemin de la Gate.
-fn rewrite_location(value: &str, origin: &str) -> String {
-    match value.strip_prefix(origin) {
-        Some(rest) if rest.is_empty() => "/".into(),
-        Some(rest) if rest.starts_with('/') || rest.starts_with('?') => rest.into(),
-        _ => value.into(),
+/// `Location` vers le serveur lui-même : ramenée à un chemin de la Gate. `prefix` :
+/// « /web/<nom> » dans le portail, pour qu'une redirection vers « / » (après la connexion
+/// à l'application, souvent) ne tombe pas sur l'accueil du portail ; vide pour Portunia.
+fn rewrite_location(value: &str, origin: &str, prefix: &str) -> String {
+    let path = match value.strip_prefix(origin) {
+        Some(rest) if rest.is_empty() => "/",
+        Some(rest) if rest.starts_with('/') || rest.starts_with('?') => rest,
+        // Chemin absolu, mais pas « //hôte » (autre serveur).
+        None if value.starts_with('/') && !value.starts_with("//") => value,
+        _ => return value.into(),
+    };
+    if prefix.is_empty() || path.starts_with(&format!("{prefix}/")) {
+        return path.into();
+    }
+    match path.strip_prefix('?') {
+        Some(query) => format!("{prefix}/?{query}"),
+        None => format!("{prefix}{path}"),
     }
 }
 
@@ -250,6 +261,8 @@ pub async fn forward(state: &State, user: &User, target: &Target, mut req: Reque
 #[allow(clippy::too_many_arguments)]
 async fn relay(state: &State, user: &User, target: &Target, req: &mut Request<Body>, path: &str, plain: bool, client_addr: &str) -> Result<Response<Body>> {
     let origin = origin(target);
+    // Portail (http chiffré) : chemins de l'application sous /web/<nom> ; Portunia : à la racine.
+    let prefix = if plain { String::new() } else { format!("/web/{}", target.name) };
     let upgrade = req.headers().get(header::UPGRADE).cloned();
     let client_upgrade = upgrade.as_ref().map(|_| hyper::upgrade::on(&mut *req));
     let mut out = Request::builder().method(req.method().clone()).uri(path.parse::<Uri>().map_err(|_| anyhow!("adresse invalide"))?);
@@ -309,7 +322,7 @@ async fn relay(state: &State, user: &User, target: &Target, req: &mut Request<Bo
             continue;
         }
         let value = match name.as_str() {
-            "location" => HeaderValue::from_str(&rewrite_location(value.to_str().unwrap_or_default(), &origin))?,
+            "location" => HeaderValue::from_str(&rewrite_location(value.to_str().unwrap_or_default(), &origin, &prefix))?,
             "set-cookie" => HeaderValue::from_str(&rewrite_cookie(value.to_str().unwrap_or_default(), plain))?,
             // Le serveur relayé ne doit pas imposer HTTPS à 127.0.0.1 (relais de Portunia).
             "strict-transport-security" if plain => continue,
@@ -344,10 +357,21 @@ mod tests {
 
     #[test]
     fn redirections() {
-        assert_eq!(rewrite_location("https://10.0.0.5/ui/", "https://10.0.0.5"), "/ui/");
-        assert_eq!(rewrite_location("https://10.0.0.5", "https://10.0.0.5"), "/");
-        assert_eq!(rewrite_location("https://autre/ui/", "https://10.0.0.5"), "https://autre/ui/");
-        assert_eq!(rewrite_location("/ui/", "https://10.0.0.5"), "/ui/");
+        // Portunia : chemins à la racine.
+        assert_eq!(rewrite_location("https://10.0.0.5/ui/", "https://10.0.0.5", ""), "/ui/");
+        assert_eq!(rewrite_location("https://10.0.0.5", "https://10.0.0.5", ""), "/");
+        assert_eq!(rewrite_location("https://autre/ui/", "https://10.0.0.5", ""), "https://autre/ui/");
+        assert_eq!(rewrite_location("/ui/", "https://10.0.0.5", ""), "/ui/");
+        // Portail : sous /web/<nom>, y compris « / » après la connexion à l'application.
+        let p = "/web/mail";
+        assert_eq!(rewrite_location("/", "https://10.0.0.5", p), "/web/mail/");
+        assert_eq!(rewrite_location("https://10.0.0.5", "https://10.0.0.5", p), "/web/mail/");
+        assert_eq!(rewrite_location("https://10.0.0.5/ui/?a=1", "https://10.0.0.5", p), "/web/mail/ui/?a=1");
+        assert_eq!(rewrite_location("https://10.0.0.5?a=1", "https://10.0.0.5", p), "/web/mail/?a=1");
+        assert_eq!(rewrite_location("/web/mail/x", "https://10.0.0.5", p), "/web/mail/x");
+        assert_eq!(rewrite_location("//autre/x", "https://10.0.0.5", p), "//autre/x");
+        assert_eq!(rewrite_location("https://autre/ui/", "https://10.0.0.5", p), "https://autre/ui/");
+        assert_eq!(rewrite_location("login.php", "https://10.0.0.5", p), "login.php");
         assert_eq!(rewrite_referer("https://acces.acme.fr/web/vc/ui/?x=1", "https://10.0.0.5"), "https://10.0.0.5/web/vc/ui/?x=1");
     }
 }
