@@ -250,8 +250,10 @@ pub struct Target {
     pub secret_kind: String,
     pub secret: Option<Vec<u8>>,
     pub host_key: Option<String>,
-    /// ssh ou rdp (Bureau à distance).
+    /// ssh, rdp (Bureau à distance), http ou https (interface web).
     pub protocole: String,
+    /// Interface web en mode coffre : auto, remplir ou basic (voir webvault.rs).
+    pub web_connexion: String,
 }
 
 /// Protocole et mode compatibles. Bureau à distance : rebond (la Gate relaie la connexion
@@ -263,10 +265,21 @@ pub fn check_protocol(protocole: &str, mode: &str) -> Result<()> {
         "ssh" => Ok(()),
         "rdp" if mode == "rebond" || mode == "enregistre" || mode == "coffre" => Ok(()),
         "rdp" => bail!(t!("Remote Desktop: jump, recorded or vault mode", "Bureau à distance : mode rebond, enregistré ou coffre")),
-        // Interface web : la Gate relaie chaque requête et note les pages ouvertes.
-        "http" | "https" if mode == "enregistre" => Ok(()),
-        "http" | "https" => bail!(t!("Web interface: recorded mode only (pages visited are logged)", "Interface web : mode enregistré seulement (pages visitées journalisées)")),
+        // Interface web : la Gate relaie chaque requête et note les pages ouvertes ; en mode
+        // coffre, elle connecte en plus l'utilisateur avec le compte du coffre.
+        "http" | "https" if mode == "enregistre" || mode == "coffre" => Ok(()),
+        "http" | "https" => bail!(t!("Web interface: recorded or vault mode", "Interface web : mode enregistré ou coffre")),
         _ => bail!(t!("Unknown protocol: ssh, rdp, http or https", "Protocole inconnu : ssh, rdp, http ou https")),
+    }
+}
+
+/// Connexion d'une interface web en mode coffre ; nom anglais « fill » accepté.
+pub fn web_login(value: &str) -> Result<String> {
+    match value {
+        "auto" => Ok("auto".into()),
+        "remplir" | "fill" => Ok("remplir".into()),
+        "basic" => Ok("basic".into()),
+        _ => bail!(t!("Web login: auto, fill or basic", "Connexion web : auto, remplir ou basic")),
     }
 }
 
@@ -302,7 +315,7 @@ impl Target {
     }
 }
 
-const TARGET_COLUMNS: &str = "id, name, folder, host, port, mode, account, secret_kind, secret, host_key, protocole";
+const TARGET_COLUMNS: &str = "id, name, folder, host, port, mode, account, secret_kind, secret, host_key, protocole, web_connexion";
 
 pub async fn target_by_id(db: &PgPool, id: Uuid) -> Result<Option<Target>> {
     Ok(sqlx::query_as(&format!("SELECT {TARGET_COLUMNS} FROM targets WHERE id = $1"))
@@ -350,6 +363,7 @@ pub struct NewTarget {
     pub account: Option<String>,
     pub secret_kind: String,
     pub protocole: String,
+    pub web_connexion: String,
 }
 
 pub async fn create_target(db: &PgPool, t: NewTarget, seal: impl FnOnce(Uuid) -> Result<Option<Vec<u8>>>) -> Result<Uuid> {
@@ -363,8 +377,8 @@ pub async fn create_target(db: &PgPool, t: NewTarget, seal: impl FnOnce(Uuid) ->
     let id = Uuid::new_v4();
     let secret = seal(id)?;
     sqlx::query(
-        "INSERT INTO targets (id, name, folder, host, port, mode, account, secret_kind, secret, protocole)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+        "INSERT INTO targets (id, name, folder, host, port, mode, account, secret_kind, secret, protocole, web_connexion)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
     )
     .bind(id)
     .bind(&t.name)
@@ -376,6 +390,7 @@ pub async fn create_target(db: &PgPool, t: NewTarget, seal: impl FnOnce(Uuid) ->
     .bind(&t.secret_kind)
     .bind(secret)
     .bind(&t.protocole)
+    .bind(&t.web_connexion)
     .execute(db)
     .await
     .map_err(|e| if is_unique(&e) { anyhow!(t!(format!("Target « {} » already exists", t.name), format!("La cible « {} » existe déjà", t.name))) } else { e.into() })?;

@@ -557,9 +557,12 @@ struct TargetBody {
     mode: String,
     compte: Option<String>,
     secret: Option<SecretBody>,
-    /// ssh (par défaut) ou rdp.
+    /// ssh (par défaut), rdp, http ou https.
     #[serde(default = "default_protocol")]
     protocole: String,
+    /// Interface web en mode coffre : auto (par défaut), remplir ou basic.
+    #[serde(default)]
+    connexion_web: Option<String>,
 }
 
 fn default_port() -> i32 {
@@ -582,7 +585,13 @@ fn target_json(t: &model::Target) -> Value {
         "secret": t.secret_kind,
         "empreinte": t.host_key,
         "protocole": t.protocole,
+        "connexion_web": t.web_connexion,
     })
+}
+
+/// Connexion web demandée (vérifiée par check_target), sinon celle donnée.
+fn web_login_of(asked: Option<&str>, otherwise: &str) -> String {
+    asked.and_then(|w| model::web_login(w).ok()).unwrap_or_else(|| otherwise.to_string())
 }
 
 async fn admin_targets(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
@@ -602,8 +611,11 @@ fn check_target(body: &TargetBody) -> Result<(), ApiError> {
         return Err(err(StatusCode::BAD_REQUEST, t!("The name must contain neither spaces nor « % »", "Le nom ne doit contenir ni espace ni « % »")));
     }
     model::check_protocol(&body.protocole, &body.mode).map_err(|e| err(StatusCode::BAD_REQUEST, e.to_string()))?;
-    if body.protocole == "rdp" && matches!(&body.secret, Some(SecretBody::Generer { .. }) | Some(SecretBody::Cle { .. })) {
-        return Err(err(StatusCode::BAD_REQUEST, t!("Remote Desktop: the vault keeps a password, not an SSH key", "Bureau à distance : le coffre garde un mot de passe, pas une clé SSH")));
+    if body.protocole != "ssh" && matches!(&body.secret, Some(SecretBody::Generer { .. }) | Some(SecretBody::Cle { .. })) {
+        return Err(err(StatusCode::BAD_REQUEST, t!("Remote Desktop and web: the vault keeps a password, not an SSH key", "Bureau à distance et web : le coffre garde un mot de passe, pas une clé SSH")));
+    }
+    if let Some(w) = &body.connexion_web {
+        model::web_login(w).map_err(|e| err(StatusCode::BAD_REQUEST, e.to_string()))?;
     }
     Ok(())
 }
@@ -654,6 +666,7 @@ async fn admin_target_create(AxState(api): Ctx, headers: HeaderMap, Json(body): 
         secret: None,
         host_key: None,
         protocole: body.protocole.clone(),
+        web_connexion: web_login_of(body.connexion_web.as_deref(), "auto"),
     };
     let secret = match body.secret {
         Some(s) => Some(resolve_secret(&api, &actor.login, &probe, s).await?),
@@ -668,6 +681,7 @@ async fn admin_target_create(AxState(api): Ctx, headers: HeaderMap, Json(body): 
         account: probe.account.clone(),
         secret_kind: secret.as_ref().map(|s| s.0.clone()).unwrap_or_else(|| "none".into()),
         protocole: probe.protocole.clone(),
+        web_connexion: probe.web_connexion.clone(),
     };
     let keys = &api.state.keys;
     let id = model::create_target(&api.state.db, new, |id| match &secret {
@@ -723,7 +737,7 @@ async fn admin_target_update(AxState(api): Ctx, headers: HeaderMap, Path(id): Pa
     }
     sqlx::query(
         "UPDATE targets SET name = $2, folder = $3, host = $4, port = $5, mode = $6, account = $7, secret_kind = $8, secret = $9, host_key = $10,
-                protocole = $11
+                protocole = $11, web_connexion = $12
          WHERE id = $1",
     )
     .bind(id)
@@ -737,6 +751,7 @@ async fn admin_target_update(AxState(api): Ctx, headers: HeaderMap, Path(id): Pa
     .bind(sealed)
     .bind(&probe.host_key)
     .bind(&body.protocole)
+    .bind(web_login_of(body.connexion_web.as_deref(), &current.web_connexion))
     .execute(db)
     .await
     .map_err(|e| match &e {

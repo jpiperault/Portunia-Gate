@@ -31,6 +31,7 @@ mod target;
 mod tls;
 mod tunnel;
 mod webproxy;
+mod webvault;
 
 use std::{io::IsTerminal, path::PathBuf, sync::Arc};
 
@@ -399,7 +400,7 @@ enum TargetCmd {
         /// Port (by default 22 for SSH, 3389 for Remote Desktop, 443 for https, 80 for http).
         #[arg(long)]
         port: Option<i32>,
-        /// ssh, rdp (Remote Desktop), https or http (web interface, recorded mode).
+        /// ssh, rdp (Remote Desktop), https or http (web interface: recorded or vault mode).
         #[arg(long, default_value = "ssh")]
         protocol: String,
         /// coffre (vault), enregistre (recorded) or rebond (jump); also vault, recorded, jump.
@@ -417,6 +418,9 @@ enum TargetCmd {
         /// Account private key (OpenSSH file).
         #[arg(long)]
         key_file: Option<String>,
+        /// Web interface in vault mode: auto (fills the sign-in form and submits it; HTTP authentication if the server asks), fill (fills only) or basic (HTTP authentication always).
+        #[arg(long, default_value = "auto")]
+        web_login: String,
     },
     /// Lists servers.
     List,
@@ -445,6 +449,9 @@ enum TargetCmd {
         /// New vault private key (OpenSSH file).
         #[arg(long)]
         key_file: Option<String>,
+        /// Web interface in vault mode: auto, fill or basic.
+        #[arg(long)]
+        web_login: Option<String>,
     },
     /// Replaces the vault secret: --password, --key-file, or --generate (SSH: the Gate creates a key and installs it).
     Secret {
@@ -1538,11 +1545,18 @@ async fn target_cmd(state: &State, cmd: TargetCmd) -> Result<()> {
             folder,
             password,
             key_file,
+            web_login,
         } => {
             let port = port.unwrap_or(match protocol.as_str() { "rdp" => 3389, "https" => 443, "http" => 80, _ => 22 });
-            // Interface web : seul le mode enregistré existe, il est pris d'office.
-            let mode = if matches!(protocol.as_str(), "http" | "https") && mode == "coffre" { "enregistre".to_string() } else { model::mode_alias(&mode).to_string() };
+            let web = matches!(protocol.as_str(), "http" | "https");
+            // Interface web sans secret : mode enregistré (le coffre, mode par défaut, en demande un).
+            let mode = model::mode_alias(&mode).to_string();
+            let mode = if web && mode == "coffre" && !password { "enregistre".to_string() } else { mode };
             let secret = console_secret(password, key_file.as_deref())?;
+            if web && secret.as_ref().is_some_and(|s| s.0 == "key") {
+                bail!(t!("Web interface: the vault keeps a password, not an SSH key", "Interface web : le coffre garde un mot de passe, pas une clé SSH"));
+            }
+            let web_login = model::web_login(&web_login)?;
             let kind = secret.as_ref().map(|s| s.0.clone()).unwrap_or_else(|| "none".into());
             let new = model::NewTarget {
                 name: name.clone(),
@@ -1553,6 +1567,7 @@ async fn target_cmd(state: &State, cmd: TargetCmd) -> Result<()> {
                 account,
                 secret_kind: kind,
                 protocole: protocol.clone(),
+                web_connexion: web_login,
             };
             model::create_target(db, new, |id| match &secret {
                 Some((_, plain)) => Ok(Some(state.keys.seal(&format!("cible:{id}"), plain)?)),
@@ -1592,6 +1607,7 @@ async fn target_cmd(state: &State, cmd: TargetCmd) -> Result<()> {
             folder,
             password,
             key_file,
+            web_login,
         } => {
             let current = find_target(db, &name).await?;
             let mut t = current.clone();
@@ -1619,13 +1635,16 @@ async fn target_cmd(state: &State, cmd: TargetCmd) -> Result<()> {
             if let Some(f) = folder {
                 t.folder = f.trim().into();
             }
+            if let Some(w) = web_login {
+                t.web_connexion = model::web_login(&w)?;
+            }
             model::check_protocol(&t.protocole, &t.mode)?;
             if !["rebond", "enregistre", "coffre"].contains(&t.mode.as_str()) {
                 bail!(t!("Mode: jump (rebond), recorded (enregistre) or vault (coffre)", "Mode : rebond, enregistre ou coffre"));
             }
             let secret = console_secret(password, key_file.as_deref())?;
-            if secret.as_ref().is_some_and(|s| s.0 == "key") && t.is_rdp() {
-                bail!(t!("Remote Desktop: the vault keeps a password, not an SSH key", "Bureau à distance : le coffre garde un mot de passe, pas une clé SSH"));
+            if secret.as_ref().is_some_and(|s| s.0 == "key") && !t.is_ssh() {
+                bail!(t!("Remote Desktop and web: the vault keeps a password, not an SSH key", "Bureau à distance et web : le coffre garde un mot de passe, pas une clé SSH"));
             }
             // Changement d'adresse : l'ancienne empreinte ne vaut plus, et le secret du coffre doit être
             // ressaisi (comme dans Portunia).
@@ -1662,8 +1681,8 @@ async fn target_cmd(state: &State, cmd: TargetCmd) -> Result<()> {
                 if password || key_file.is_some() {
                     bail!(t!("Choose --password, --key-file or --generate", "Choisissez --password, --key-file ou --generate"));
                 }
-                if t.is_rdp() {
-                    bail!(t!("Remote Desktop: the vault keeps a password, not an SSH key", "Bureau à distance : le coffre garde un mot de passe, pas une clé SSH"));
+                if !t.is_ssh() {
+                    bail!(t!("Remote Desktop and web: the vault keeps a password, not an SSH key", "Bureau à distance et web : le coffre garde un mot de passe, pas une clé SSH"));
                 }
                 let account = t.account.clone().ok_or_else(|| anyhow!(t!("Give the account on the server first (target edit --account)", "Indiquez d'abord le compte sur le serveur (target edit --account)")))?;
                 let current = prompt_secret(&t!(format!("Current password of {account} on {}: ", t.name), format!("Mot de passe actuel de {account} sur {} : ", t.name)))?;
@@ -1674,8 +1693,8 @@ async fn target_cmd(state: &State, cmd: TargetCmd) -> Result<()> {
                 console_secret(password, key_file.as_deref())?
                     .ok_or_else(|| anyhow!(t!("Give --password, --key-file or --generate", "Indiquez --password, --key-file ou --generate")))?
             };
-            if kind == "key" && t.is_rdp() {
-                bail!(t!("Remote Desktop: the vault keeps a password, not an SSH key", "Bureau à distance : le coffre garde un mot de passe, pas une clé SSH"));
+            if kind == "key" && !t.is_ssh() {
+                bail!(t!("Remote Desktop and web: the vault keeps a password, not an SSH key", "Bureau à distance et web : le coffre garde un mot de passe, pas une clé SSH"));
             }
             t.secret = Some(state.keys.seal(&t.secret_purpose(), &plain)?);
             t.secret_kind = kind.clone();
@@ -1707,7 +1726,8 @@ async fn find_target(db: &PgPool, name: &str) -> Result<model::Target> {
 
 async fn save_target(db: &PgPool, t: &model::Target) -> Result<()> {
     sqlx::query(
-        "UPDATE targets SET name = $2, folder = $3, host = $4, port = $5, mode = $6, account = $7, secret_kind = $8, secret = $9, host_key = $10
+        "UPDATE targets SET name = $2, folder = $3, host = $4, port = $5, mode = $6, account = $7, secret_kind = $8, secret = $9, host_key = $10,
+                web_connexion = $11
          WHERE id = $1",
     )
     .bind(t.id)
@@ -1720,6 +1740,7 @@ async fn save_target(db: &PgPool, t: &model::Target) -> Result<()> {
     .bind(&t.secret_kind)
     .bind(&t.secret)
     .bind(&t.host_key)
+    .bind(&t.web_connexion)
     .execute(db)
     .await
     .map_err(|e| match &e {

@@ -36,6 +36,7 @@ use uuid::Uuid;
 use crate::{
     audit,
     model::{self, Target, User},
+    webvault,
     State,
 };
 
@@ -265,15 +266,78 @@ async fn relay(state: &State, user: &User, target: &Target, req: &mut Request<Bo
     let prefix = if plain { String::new() } else { format!("/web/{}", target.name) };
     let upgrade = req.headers().get(header::UPGRADE).cloned();
     let client_upgrade = upgrade.as_ref().map(|_| hyper::upgrade::on(&mut *req));
+    // Page ouverte (et non image, script ou appel d'API).
+    let document = req.method() == axum::http::Method::GET
+        && (req.headers().get("sec-fetch-dest").and_then(|v| v.to_str().ok()) == Some("document")
+            || (req.headers().get("sec-fetch-dest").is_none() && req.headers().get(header::ACCEPT).and_then(|v| v.to_str().ok()).is_some_and(|a| a.starts_with("text/html"))));
+
+    // Mode coffre : compte et mot de passe, jetons remplacés dans ce qui part vers le serveur.
+    let vault = if target.vaulted() {
+        match crate::target::vault_credentials(state, target)? {
+            crate::target::Credentials::Password { user: account, password } => Some((account, password)),
+            crate::target::Credentials::Key { .. } => None,
+        }
+    } else {
+        None
+    };
+    let fill = vault.is_some() && target.web_connexion != "basic";
+    let mut substituted = false;
+    // Chemin d'origine pour le journal : jamais celui où le mot de passe a été mis.
+    let original = path;
+    let mut path = path.to_string();
+    if let Some((_, password)) = &vault {
+        if let Some(p) = webvault::substitute_path(&path, user.id, target.id, password) {
+            path = p;
+            substituted = true;
+        }
+    }
+    let mut body = std::mem::replace(req.body_mut(), Body::empty());
+    let mut new_length = None;
+    if let Some((_, password)) = &vault {
+        let content_type = req.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or_default().to_ascii_lowercase();
+        let length = req.headers().get(header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<usize>().ok());
+        let textual = ["x-www-form-urlencoded", "json", "text/", "multipart/form-data"].iter().any(|t| content_type.contains(t));
+        // Connexion : petit corps de texte. Les envois de fichiers passent sans être lus.
+        if textual && length.is_some_and(|n| n > 0 && n <= webvault::MAX_REQUEST) {
+            let bytes = axum::body::to_bytes(body, webvault::MAX_REQUEST).await?;
+            body = match webvault::substitute_body(&bytes, &content_type, user.id, target.id, password) {
+                Some(changed) => {
+                    substituted = true;
+                    new_length = Some(changed.len());
+                    Body::from(changed)
+                }
+                None => Body::from(bytes),
+            };
+        }
+    }
+
     let mut out = Request::builder().method(req.method().clone()).uri(path.parse::<Uri>().map_err(|_| anyhow!("adresse invalide"))?);
+    let mut authorization = false;
     for (name, value) in req.headers() {
         if dropped_upstream(name) || name == header::HOST {
+            continue;
+        }
+        // Page à compléter par le script : demandée entière et non compressée.
+        if fill && document && (name == header::ACCEPT_ENCODING || name == header::IF_NONE_MATCH || name == header::IF_MODIFIED_SINCE) {
+            continue;
+        }
+        if name == header::CONTENT_LENGTH && new_length.is_some() {
             continue;
         }
         let value = match name.as_str() {
             "cookie" => HeaderValue::from_str(&strip_own_cookies(value.to_str().unwrap_or_default()))?,
             "origin" => HeaderValue::from_str(&origin)?,
             "referer" => HeaderValue::from_str(&rewrite_referer(value.to_str().unwrap_or_default(), &origin))?,
+            "authorization" => {
+                authorization = true;
+                match vault.as_ref().and_then(|(_, pw)| webvault::substitute_basic(value.to_str().unwrap_or_default(), user.id, target.id, pw)) {
+                    Some(v) => {
+                        substituted = true;
+                        HeaderValue::from_str(&v)?
+                    }
+                    None => value.clone(),
+                }
+            }
             _ => value.clone(),
         };
         if name == header::COOKIE && value.is_empty() {
@@ -282,17 +346,29 @@ async fn relay(state: &State, user: &User, target: &Target, req: &mut Request<Bo
         out = out.header(name, value);
     }
     out = out.header(header::HOST, host_header(target));
+    if let Some(n) = new_length {
+        out = out.header(header::CONTENT_LENGTH, n);
+    }
+    // Authentification HTTP : toujours (basic), ou dès que le serveur l'a demandée (auto).
+    let mut basic_sent = false;
+    if let Some((account, password)) = &vault {
+        if !authorization && (target.web_connexion == "basic" || (target.web_connexion == "auto" && webvault::wants_basic(target.id))) {
+            out = out.header(header::AUTHORIZATION, webvault::basic_header(account, password));
+            basic_sent = true;
+        }
+    }
     if let Some(u) = &upgrade {
         out = out.header(header::CONNECTION, "upgrade").header(header::UPGRADE, u.clone());
     }
-    // Page ouverte (et non image, script ou appel d'API) : notée au journal.
-    let document = req.headers().get("sec-fetch-dest").and_then(|v| v.to_str().ok()) == Some("document")
-        || (req.headers().get("sec-fetch-dest").is_none() && req.headers().get(header::ACCEPT).and_then(|v| v.to_str().ok()).is_some_and(|a| a.starts_with("text/html")));
-    if document && req.method() == axum::http::Method::GET {
-        let shown = path.split('?').next().unwrap_or(path);
+    if document {
+        let shown = original.split('?').next().unwrap_or(original);
         audit::note(&state.db, &user.login, "web.page", json!({ "cible": target.name, "chemin": shown, "adresse": client_addr })).await;
     }
-    let body = std::mem::replace(req.body_mut(), Body::empty());
+    if substituted {
+        // Où le mot de passe du coffre est parti : visible au journal.
+        let shown = original.split('?').next().unwrap_or(original);
+        audit::note(&state.db, &user.login, "web.coffre", json!({ "cible": target.name, "chemin": shown, "compte": vault.as_ref().map(|v| &v.0), "adresse": client_addr })).await;
+    }
     let out = out.body(body)?;
 
     let io = connect(state, user, target).await?;
@@ -314,9 +390,21 @@ async fn relay(state: &State, user: &User, target: &Target, req: &mut Request<Bo
         }
     }
 
+    // Mode coffre (auto) : le serveur demande l'authentification HTTP. Elle lui sera envoyée
+    // désormais, et le navigateur refait sa demande (307 : même méthode, même corps).
+    if res.status() == StatusCode::UNAUTHORIZED && vault.is_some() && target.web_connexion == "auto" && !authorization && !basic_sent && webvault::basic_challenge(res.headers()) {
+        webvault::remember_basic(target.id);
+        let again = req.uri().path_and_query().map(|p| p.as_str().to_string()).unwrap_or_else(|| "/".into());
+        let mut retry = Response::new(Body::empty());
+        *retry.status_mut() = StatusCode::TEMPORARY_REDIRECT;
+        retry.headers_mut().insert(header::LOCATION, HeaderValue::from_str(&again)?);
+        retry.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        retry.extensions_mut().insert(Proxied);
+        return Ok(retry);
+    }
+
     let (parts, incoming) = res.into_parts();
-    let mut response = Response::new(Body::new(incoming));
-    *response.status_mut() = parts.status;
+    let mut headers = HeaderMap::new();
     for (name, value) in &parts.headers {
         if HOP.contains(&name.as_str()) && parts.status != StatusCode::SWITCHING_PROTOCOLS {
             continue;
@@ -326,10 +414,34 @@ async fn relay(state: &State, user: &User, target: &Target, req: &mut Request<Bo
             "set-cookie" => HeaderValue::from_str(&rewrite_cookie(value.to_str().unwrap_or_default(), plain))?,
             // Le serveur relayé ne doit pas imposer HTTPS à 127.0.0.1 (relais de Portunia).
             "strict-transport-security" if plain => continue,
+            // Coffre : jamais la fenêtre de connexion du navigateur (la Gate s'authentifie).
+            "www-authenticate" if vault.is_some() => continue,
             _ => value.clone(),
         };
-        response.headers_mut().append(name, value);
+        headers.append(name, value);
     }
+
+    // Page HTML en mode coffre : script de remplissage du formulaire de connexion.
+    let html = headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).is_some_and(|c| c.to_ascii_lowercase().starts_with("text/html"));
+    let encoded = headers.get(header::CONTENT_ENCODING).and_then(|v| v.to_str().ok()).is_some_and(|e| !e.eq_ignore_ascii_case("identity"));
+    let small = headers.get(header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<usize>().ok()).is_none_or(|n| n <= webvault::MAX_PAGE);
+    let body = match &vault {
+        Some((account, _)) if fill && document && parts.status == StatusCode::OK && html && !encoded && small => {
+            let page = axum::body::to_bytes(Body::new(incoming), webvault::MAX_PAGE).await?;
+            let marker = webvault::new_marker(user.id, target.id)?;
+            let page = webvault::inject(&page, &mut headers, account, &marker, target.web_connexion == "auto");
+            headers.remove(header::CONTENT_LENGTH);
+            headers.remove(header::ETAG);
+            headers.remove(header::LAST_MODIFIED);
+            headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+            Body::from(page)
+        }
+        _ => Body::new(incoming),
+    };
+
+    let mut response = Response::new(body);
+    *response.status_mut() = parts.status;
+    *response.headers_mut() = headers;
     response.extensions_mut().insert(Proxied);
     Ok(response)
 }

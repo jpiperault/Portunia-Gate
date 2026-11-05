@@ -127,7 +127,7 @@ On the first connection, Portunia Gate remembers the server's key (SSH) or certi
 - One install per server for the `portunia-gate` command (it points to the last installed folder).
 - Remote Desktop: file copies kept by the Gate (`file_copies_mb`) are only reachable on the server, in the recordings folder; Portunia shows their name, size and SHA-256 fingerprint but does not download them.
 - Native RDP (Gate 0.31): a .rdp file is single-use, so the client's automatic reconnection after a network cut is refused; very old RDP clients (no "server selected protocol" field) are not supported in Vault and Recorded modes.
-- Web interfaces (Gate 0.30): Recorded mode only, no credentials filled in by the Gate, pages opened logged (`web.ouvert`, `web.page`) but no line in the sessions list; in the portal, one web interface at a time per browser.
+- Web interfaces (Gate 0.30): pages opened logged (`web.ouvert`, `web.page`, and `web.coffre` for each use of the vault password) but no line in the sessions list; in the portal, one web interface at a time per browser. Vault mode (0.32) does not sign in automatically when the application hashes the password in the browser, or asks for a second factor or a captcha at sign-in. A user able to manipulate the page could reuse their one-time token in another request to the same application within 10 minutes: `web.coffre` shows where the password was sent.
 
 ## Limits and session closing
 
