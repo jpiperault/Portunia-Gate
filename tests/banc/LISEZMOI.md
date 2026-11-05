@@ -41,4 +41,7 @@ python3 recette.py --windows 10.0.0.60 --win-user banc --win-password-file /root
 (`banc-admin`, `banc-user`, mots de passe et codes TOTP gardés dans `/root/.banc/etat.json`),
 le groupe `banc-groupe`, les serveurs `banc-*` et la règle `banc-regle`, ouvre l'entrée RDP
 native, puis lit les résultats dans l'API (sessions, journal). Rapport :
-`/root/.banc/rapport-AAAAMMJJ-HHMM.json`. Code de sortie 1 au premier échec constaté.
+`/root/.banc/rapport-AAAAMMJJ-HHMM.json`, et le même en PDF (objectif, méthode, résultat
+attendu, preuve relevée, capture, statut, commentaire) grâce à `rapport.py` et Chromium ;
+`python3 rapport.py RAPPORT.json --notes notes.json` le refait avec des commentaires ajoutés.
+Code de sortie 1 au premier échec constaté.

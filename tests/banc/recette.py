@@ -540,6 +540,12 @@ def main():
         json.dump({"version": gate("--version").strip(), "date": started.isoformat(), "windows": args.windows, "web": args.web, "captures": CAPTURES, "essais": report.rows}, f, indent=2, ensure_ascii=False)
     ok = sum(r["resultat"] == "ok" for r in report.rows)
     print(f"\n{ok}/{len(report.rows)} réussis ; rapport : {path}")
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    try:
+        import rapport
+        print(f"rapport lisible : {rapport.make(path)}")
+    except Exception as e:  # noqa: BLE001 : le rapport lisible est un plus, la recette a déjà rendu son verdict
+        print(f"rapport lisible impossible : {e}")
     sys.exit(1 if report.failed else 0)
 
 
