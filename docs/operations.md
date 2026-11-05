@@ -116,6 +116,8 @@ On the first connection, Portunia Gate remembers the server's key (SSH) or certi
 | "No server is allowed to you right now" or empty list | No rule for your groups, or outside the rule's days, hours or dates. Hours follow the `TZ` time zone. |
 | "The vault account was refused" | The account's password or key changed on the server: replace its secret (Portunia › Administer › Servers). |
 | The Gate restarted on its own | Built-in monitoring found it stuck: see [Built-in monitoring](#built-in-monitoring) and send the log lines. |
+| mstsc cannot connect (native RDP) | Entry closed or port blocked: `sudo portunia-gate rdp show` (state, error), firewall, Docker port. File used or expired: prepare a new one. The reason of a refusal is in the log (`acces.refuse`, "type": "rdp natif"). |
+| Native RDP, recorded mode: "the server requires NLA" | No Windows account was given in Portunia: give it when opening, or set the server to accept connections without NLA. |
 
 ## Known limitations
 
@@ -124,6 +126,7 @@ On the first connection, Portunia Gate remembers the server's key (SSH) or certi
 - Sign-in from Portunia: accounts using a password (with or without a code). An "SSH key only" account connects with a standard SSH client.
 - One install per server for the `portunia-gate` command (it points to the last installed folder).
 - Remote Desktop: file copies kept by the Gate (`file_copies_mb`) are only reachable on the server, in the recordings folder; Portunia shows their name, size and SHA-256 fingerprint but does not download them.
+- Native RDP (Gate 0.31): a .rdp file is single-use, so the client's automatic reconnection after a network cut is refused; very old RDP clients (no "server selected protocol" field) are not supported in Vault and Recorded modes.
 - Web interfaces (Gate 0.30): Recorded mode only, no credentials filled in by the Gate, pages opened logged (`web.ouvert`, `web.page`) but no line in the sessions list; in the portal, one web interface at a time per browser.
 
 ## Limits and session closing

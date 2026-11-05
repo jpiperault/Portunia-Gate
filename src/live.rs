@@ -278,11 +278,13 @@ async fn console_orders(state: &Arc<State>) -> Result<()> {
         crate::acme::wake(true);
     }
     let https = crate::portal::https_status();
+    let native = crate::rdpnative::status();
     let snapshot = json!({
         "date": chrono::Utc::now(),
         "instance": crate::portal::instance_id(),
         "tunnel": crate::tunnel::report(state).await?,
         "https": { "ouverte": https.listening, "erreur": https.error },
+        "rdp_natif": { "ouverte": native.listening, "erreur": native.error },
         "acme": crate::acme::report(state).await?,
         "terminaux_web": state.web.active(),
         "assistance_en_attente": state.assist.waiting_count(),

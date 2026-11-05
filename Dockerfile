@@ -19,6 +19,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 COPY --from=build /portunia-gate /usr/local/bin/portunia-gate
 USER portunia-gate
 VOLUME /var/lib/portunia-gate
-EXPOSE 2222 8443
+EXPOSE 2222 8443 3390
 ENTRYPOINT ["portunia-gate"]
 CMD ["serve"]

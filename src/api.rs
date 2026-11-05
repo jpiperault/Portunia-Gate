@@ -83,6 +83,7 @@ pub async fn run(state: Arc<State>) -> anyhow::Result<()> {
         .route("/api/v1/moi", get(me))
         .route("/api/v1/serveurs", get(servers))
         .route("/api/v1/serveurs/{nom}/ticket", post(ticket))
+        .route("/api/v1/serveurs/{nom}/rdp-natif", post(native_rdp))
         .route("/api/v1/admin/cibles", get(admin_targets).post(admin_target_create))
         .route("/api/v1/admin/cibles/{id}", put(admin_target_update).delete(admin_target_delete))
         .route("/api/v1/admin/cibles/{id}/oublier-empreinte", post(admin_target_forget_key))
@@ -116,6 +117,7 @@ pub async fn run(state: Arc<State>) -> anyhow::Result<()> {
         .route("/api/v1/assistance/{place}", get(assist_join))
         .route("/api/v1/admin/assistance", get(admin_assist).put(admin_assist_update))
         .route("/api/v1/admin/durcissement", get(admin_hardening))
+        .route("/api/v1/admin/rdp-natif", get(admin_native_rdp).put(admin_native_rdp_update))
         // Interfaces web ouvertes depuis Portunia : entrée avec un jeton, puis toute autre
         // adresse va au serveur web de la session (cookie).
         .route("/web/entree", get(web_entry))
@@ -422,6 +424,7 @@ fn mode_label(mode: &str) -> &'static str {
 
 async fn servers(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
     let user = caller(&api, &headers).await?;
+    let native = crate::rdpnative::settings(&api.state).await?;
     let mut out = Vec::new();
     for t in model::targets(&api.state.db).await? {
         if let Some(access) = model::access(&api.state.db, user.id, t.id).await? {
@@ -435,6 +438,8 @@ async fn servers(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
                 "protocole": t.protocole,
                 "sftp": access.sftp && t.vaulted(),
                 "tunnels": access.tunnels && t.vaulted(),
+                // Entrée RDP native ouverte pour ce serveur (fichier .rdp pour mstsc, Remmina…).
+                "rdp_natif": native.enabled && t.is_rdp() && native.allows(&t.mode),
             }));
         }
     }
@@ -478,15 +483,21 @@ async fn ticket(AxState(api): Ctx, headers: HeaderMap, Path(nom): Path<String>) 
 /// Jeton SSH à usage unique (60 s) pour ce compte et ce serveur. `client_addr` : adresse
 /// réelle de l'utilisateur quand c'est le portail web qui se connecte pour lui.
 pub async fn issue_ticket(db: &sqlx::PgPool, user: Uuid, target: Uuid, client_addr: Option<&str>) -> anyhow::Result<String> {
+    issue_ticket_for(db, user, target, client_addr, 60).await
+}
+
+/// Même jeton, valable `seconds` secondes (fichier .rdp de l'entrée native).
+pub async fn issue_ticket_for(db: &sqlx::PgPool, user: Uuid, target: Uuid, client_addr: Option<&str>, seconds: i64) -> anyhow::Result<String> {
     let ticket = format!("hj1_{}", token()?);
     sqlx::query("DELETE FROM ssh_tickets WHERE expires_at < now()").execute(db).await?;
     sqlx::query(
-        "INSERT INTO ssh_tickets (ticket_hash, user_id, target_id, expires_at, client_addr) VALUES ($1, $2, $3, now() + interval '60 seconds', $4)",
+        "INSERT INTO ssh_tickets (ticket_hash, user_id, target_id, expires_at, client_addr) VALUES ($1, $2, $3, now() + make_interval(secs => $5), $4)",
     )
     .bind(sha256_hex(ticket.as_bytes()))
     .bind(user)
     .bind(target)
     .bind(client_addr)
+    .bind(seconds as f64)
     .execute(db)
     .await?;
     Ok(ticket)
@@ -1837,6 +1848,123 @@ async fn admin_assist_update(AxState(api): Ctx, headers: HeaderMap, Json(body): 
         }
     }
     audit::note(db, &actor.login, "assistance.reglage", Value::Object(changed)).await;
+    Ok(Json(json!({ "etat": "ok" })))
+}
+
+// ---------- Entrée RDP native ----------
+
+#[derive(Deserialize)]
+struct NativeBody {
+    /// Mode enregistré : identifiants Windows, gardés en mémoire le temps du jeton.
+    compte: Option<String>,
+    mot_de_passe: Option<String>,
+}
+
+/// Jeton à usage unique pour un client RDP ordinaire (mstsc, Remmina…) : Portunia en fait un
+/// fichier .rdp (« loadbalanceinfo »).
+async fn native_rdp(AxState(api): Ctx, headers: HeaderMap, Path(nom): Path<String>, Json(body): Json<NativeBody>) -> ApiResult {
+    let user = caller(&api, &headers).await?;
+    let state = &api.state;
+    let db = &state.db;
+    let s = crate::rdpnative::settings(state).await?;
+    if !s.enabled {
+        return Err(err(StatusCode::FORBIDDEN, t!("The native RDP entry is closed on this Gate", "L'entrée RDP native est fermée sur cette Gate")));
+    }
+    let target = model::target_by_name(db, &nom)
+        .await?
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, t!("Unknown server", "Serveur inconnu")))?;
+    if !target.is_rdp() || !s.allows(&target.mode) {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            t!(format!("{}: not available through the native RDP entry", target.name), format!("{} : pas accessible par l'entrée RDP native", target.name)),
+        ));
+    }
+    if model::access(db, user.id, target.id).await?.is_none() {
+        audit::note(db, &user.login, "acces.refuse", json!({ "cible": target.name, "raison": "aucune règle active", "via": "rdp natif" })).await;
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            t!(format!("{} is not allowed for you at the moment", target.name), format!("{} ne vous est pas autorisé en ce moment", target.name)),
+        ));
+    }
+    let ticket = issue_ticket_for(db, user.id, target.id, None, s.ticket_s).await?;
+    let account = body.compte.map(|c| c.trim().to_string()).filter(|c| !c.is_empty());
+    let password = body.mot_de_passe.filter(|p| !p.is_empty());
+    let given = target.mode == "enregistre" && account.is_some() && password.is_some();
+    if let (true, Some(account), Some(password)) = (given, account, password) {
+        crate::rdpnative::keep_credentials(&ticket, account, password, std::time::Duration::from_secs(s.ticket_s as u64));
+    }
+    audit::note(db, &user.login, "rdp_natif.fichier", json!({ "cible": target.name, "mode": target.mode, "identifiants": given })).await;
+    Ok(Json(json!({
+        "jeton": format!("{}{ticket}", crate::rdpnative::TOKEN_PREFIX),
+        "port": s.port,
+        "adresse": s.address,
+        "mode": mode_label(&target.mode),
+        "validite_s": s.ticket_s,
+        "empreinte": crate::tls::fingerprint(&state.config.data_dir)?,
+    })))
+}
+
+async fn admin_native_rdp(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
+    admin(&api, &headers).await?;
+    let s = crate::rdpnative::settings(&api.state).await?;
+    let status = crate::rdpnative::status();
+    Ok(Json(json!({
+        "actif": s.enabled,
+        "port": s.port,
+        "adresse": s.address,
+        "modes": s.modes,
+        "jeton_s": s.ticket_s,
+        "ecoute": status.listening,
+        "erreur": status.error,
+        "empreinte": crate::tls::fingerprint(&api.state.config.data_dir)?,
+    })))
+}
+
+#[derive(Deserialize)]
+struct NativeSettingsBody {
+    actif: Option<bool>,
+    port: Option<u16>,
+    adresse: Option<String>,
+    modes: Option<Vec<String>>,
+    jeton_s: Option<i64>,
+}
+
+async fn admin_native_rdp_update(AxState(api): Ctx, headers: HeaderMap, Json(body): Json<NativeSettingsBody>) -> ApiResult {
+    let actor = admin(&api, &headers).await?;
+    let db = &api.state.db;
+    let mut changed = serde_json::Map::new();
+    if let Some(port) = body.port {
+        if port == 0 {
+            return Err(err(StatusCode::BAD_REQUEST, t!("Port: 1 to 65535", "Port : 1 à 65535")));
+        }
+        model::set_setting(db, "rdp_natif_port", json!(port)).await?;
+        changed.insert("port".into(), json!(port));
+    }
+    if let Some(address) = body.adresse {
+        let address = address.trim().to_string();
+        crate::rdpnative::check_address(&address).map_err(|e| err(StatusCode::BAD_REQUEST, e.to_string()))?;
+        model::set_setting(db, "rdp_natif_adresse", json!(address)).await?;
+        changed.insert("adresse".into(), json!(address));
+    }
+    if let Some(modes) = body.modes {
+        if let Some(bad) = modes.iter().find(|m| !crate::rdpnative::MODES.contains(&m.as_str())) {
+            return Err(err(StatusCode::BAD_REQUEST, t!(format!("Unknown mode: {bad} (rebond, coffre, enregistre)"), format!("Mode inconnu : {bad} (rebond, coffre, enregistre)"))));
+        }
+        model::set_setting(db, "rdp_natif_modes", json!(modes)).await?;
+        changed.insert("modes".into(), json!(modes));
+    }
+    if let Some(seconds) = body.jeton_s {
+        if !(30..=600).contains(&seconds) {
+            return Err(err(StatusCode::BAD_REQUEST, t!("Validity of the .rdp file: 30 to 600 seconds", "Validité du fichier .rdp : 30 à 600 secondes")));
+        }
+        model::set_setting(db, "rdp_natif_jeton_s", json!(seconds)).await?;
+        changed.insert("jeton_s".into(), json!(seconds));
+    }
+    if let Some(on) = body.actif {
+        model::set_setting(db, "rdp_natif_actif", json!(on)).await?;
+        changed.insert("actif".into(), json!(on));
+    }
+    audit::note(db, &actor.login, "rdp_natif.reglage", Value::Object(changed)).await;
     Ok(Json(json!({ "etat": "ok" })))
 }
 

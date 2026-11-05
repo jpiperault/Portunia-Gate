@@ -231,7 +231,20 @@ En rebond et en enregistré, l'utilisateur tape ses identifiants Windows à chaq
 
 La Gate doit joindre le port 3389 des serveurs Windows. Dans Portunia, l'extension Bureau à distance doit être activée ; sinon les serveurs RDP restent visibles, grisés. Un serveur RDP n'apparaît pas dans le menu `ssh` de la Gate et ne s'ouvre pas en terminal.
 
-Un serveur RDP au coffre garde un mot de passe (compte local ou `DOMAINEcompte`), pas une clé. Si le mot de passe change sur le serveur, la connexion échoue avec `cible.coffre_refuse` : remplacez le secret.
+Un serveur RDP au coffre garde un mot de passe (compte local ou `DOMAINE\compte`), pas une clé. Si le mot de passe change sur le serveur, la connexion échoue avec `cible.coffre_refuse` : remplacez le secret.
+
+### Clients RDP ordinaires (RDP natif, 0.31)
+
+Les serveurs Windows de la Gate s'ouvrent aussi dans un client RDP ordinaire : **mstsc**, **Windows App** (Mac), **Remmina** ou **FreeRDP**. Portunia prépare un **fichier .rdp à usage unique** (clic droit sur le serveur › *Ouvrir dans le client Windows (mstsc)*) ; le jeton voyage dans le champ `loadbalanceinfo` du fichier, que ces clients envoient dès leur premier paquet, avant tout chiffrement. Portunia et le portail web fonctionnent comme avant.
+
+L'entrée écoute sur son propre port (**3390**), **fermée par défaut** : Portunia › Administrer › **RDP natif**, ou `sudo portunia-gate rdp on`. Tout s'y règle : port, adresse écrite dans les fichiers, modes accessibles ainsi, validité d'un fichier (2 minutes par défaut).
+
+| | **Rebond** | **Coffre** | **Enregistré** |
+|---|---|---|---|
+| Ce que fait la Gate | Retire le jeton, puis laisse passer la connexion telle quelle : TLS et authentification Windows (NLA) de bout en bout, rien n'est enregistré. | Ouvre la session Windows (NLA) avec le compte du coffre, puis relaie et enregistre. | Pareil, avec le compte Windows tapé dans Portunia en préparant le fichier : gardé **en mémoire** jusqu'à la connexion du client, jamais sur disque. Sans compte, seulement pour un serveur qui accepte TLS sans NLA (l'utilisateur le tape dans l'écran de connexion de Windows). |
+| Certificat vu par le client | Celui du serveur Windows. | Celui de l'API de la Gate (un avertissement une fois sans certificat d'entreprise : comparez-le avec `sudo portunia-gate info`). | Comme en coffre. |
+
+Le journal note `rdp_natif.fichier` (fichier préparé), puis les événements habituels de la session (`session.ouverte`, `rebond.ouvert`…) avec `(natif)` après l'adresse. Ouvrez le port sur le pare-feu (le durcissement l'ouvre quand l'entrée est ouverte) ; avec Docker, il est publié sous `PORTUNIA_GATE_RDP_PORT` (3390). Un fichier ne sert qu'une fois : un client RDP qui se reconnecte tout seul après une coupure réseau est refusé ; préparez un nouveau fichier.
 
 ## Interfaces web
 
@@ -326,6 +339,8 @@ sftp -P 2222 julien%web-01@gate      # fichiers (mode coffre, si la règle autor
 
 Le code TOTP doit avoir été enrôlé avant, dans Portunia ou avec `sudo portunia-gate user totp julien`.
 
+Les serveurs Windows s'ouvrent aussi dans mstsc, Windows App ou Remmina, avec un fichier .rdp à usage unique préparé par Portunia : voir [Clients RDP ordinaires](#clients-rdp-ordinaires-rdp-natif-031).
+
 ## Administrer en ligne de commande
 
 Tout se fait au choix dans Portunia ou ici ; seule la relecture des sessions reste dans Portunia. Sur le serveur, l'assistant installe la commande `portunia-gate`, qui s'utilise avec sudo depuis n'importe quel dossier :
@@ -397,7 +412,7 @@ Voir aussi [docs/exploitation.fr.md](docs/exploitation.fr.md) : sauvegardes, mis
 1. **Socle** : proxy SSH, trois modes, coffre, comptes et TOTP, droits, enregistrement signé, journal chaîné, Docker Compose.
 2. **Intégration Portunia** : API, ajout de la Gate dans Portunia, serveurs dans la barre latérale, jetons à usage unique, première connexion, administration complète, clé générée et installée sur les serveurs du coffre. Assistant d'installation (0.3), paquet Debian (0.4).
 3. **Audit** : relecture et recherche (0.5), vue en direct et coupure, vidéo MP4 à la demande, lecteur détachable, conservation réglable avec estimation du disque, syslog et CSV.
-4. **Bureau à distance** : rebond (0.6), enregistré avec enregistrement signé (0.8), relecture (0.10), coffre (0.29 : la Gate ouvre la session Windows avec le compte du coffre), puis règles (presse-papiers, son).
+4. **Bureau à distance** : rebond (0.6), enregistré avec enregistrement signé (0.8), relecture (0.10), coffre (0.29 : la Gate ouvre la session Windows avec le compte du coffre), clients RDP ordinaires (0.31 : mstsc, Windows App, Remmina avec un fichier .rdp à usage unique), puis règles (presse-papiers, son).
 5. **Portail web** : SSH (0.7) et Bureau à distance (0.8) dans le navigateur derrière Cloudflare, puis clés d'accès (passkeys), personnalisation.
 6. **Assistance à distance** : relais Portunia Assistance avec un code (0.11), puis lien d'invitation, accès sans surveillance à ses propres PC, transfert de fichiers, discussion.
 7. **Exploitation** : sauvegarde intégrée, dépôt apt pour les mises à jour, paquet ARM, imports (Portunia, CSV), console web activable.

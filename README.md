@@ -218,7 +218,20 @@ In Jump and Recorded modes, users type their Windows credentials each time; neit
 
 The Gate must reach port 3389 of the Windows servers. In Portunia, the Remote Desktop extension must be enabled; otherwise RDP servers stay visible, greyed out. An RDP server does not appear in the Gate's `ssh` menu and does not open as a terminal.
 
-A vault RDP server keeps a password (local account or `DOMAINaccount`), not a key. If the password changes on the server, the connection fails with `cible.coffre_refuse`: replace the secret.
+A vault RDP server keeps a password (local account or `DOMAIN\account`), not a key. If the password changes on the server, the connection fails with `cible.coffre_refuse`: replace the secret.
+
+### Ordinary RDP clients (native RDP, 0.31)
+
+Users can also open the Gate's Windows servers in an ordinary RDP client: **mstsc**, **Windows App** (Mac), **Remmina** or **FreeRDP**. Portunia prepares a **single-use .rdp file** (right-click the server › *Open in the Windows client (mstsc)*); the token travels in the file's `loadbalanceinfo` field, which these clients send in their very first packet, before any encryption. Portunia and the web portal keep working as before.
+
+The entry listens on its own port (**3390**), **closed by default**: Portunia › Administer › **Native RDP**, or `sudo portunia-gate rdp on`. Everything is set there: port, address written in the files, modes reachable this way, validity of a file (2 minutes by default).
+
+| | **Jump** | **Vault** | **Recorded** |
+|---|---|---|---|
+| What the Gate does | Removes the token, then lets the connection through untouched: TLS and Windows authentication (NLA) end to end, nothing recorded. | Signs in to Windows (NLA) with the vault account, then relays and records. | Same, with the Windows account typed in Portunia when preparing the file: kept **in memory** until the client connects, never on disk. Without an account, only for a server that accepts TLS without NLA (the user types it in the Windows sign-in screen). |
+| Certificate seen by the client | The Windows server's. | The Gate's API certificate (a warning once without a company certificate: compare it with `sudo portunia-gate info`). | Same as Vault. |
+
+The log records `rdp_natif.fichier` (file prepared), then the usual session events (`session.ouverte`, `rebond.ouvert`…) with `(natif)` after the address. Open the port on the firewall (hardening opens it when the entry is open); with Docker, it is published as `PORTUNIA_GATE_RDP_PORT` (3390). A file is single-use: an RDP client that reconnects on its own after a network cut is refused; prepare a new file.
 
 ## Web interfaces
 
@@ -313,6 +326,8 @@ sftp -P 2222 julien%web-01@Gate      # files (Vault mode, if the rule allows SFT
 
 The TOTP code must have been enrolled first, in Portunia or with `sudo portunia-gate user totp julien`.
 
+Windows servers can also be opened in mstsc, Windows App or Remmina, with a single-use .rdp file prepared by Portunia: see [Ordinary RDP clients](#ordinary-rdp-clients-native-rdp-031).
+
 ## Command-line administration
 
 Everything is done either from Portunia or here; only replaying sessions stays in Portunia. On the server, the wizard installs the `portunia-gate` command, used with sudo from any folder:
@@ -384,7 +399,7 @@ See also [docs/operations.md](docs/operations.md): backups, updates, logs, troub
 1. **Core**: SSH proxy, three modes, vault, accounts and TOTP, permissions, signed recording, chained audit log, Docker Compose.
 2. **Portunia integration**: API, adding the Gate in Portunia, servers in the sidebar, one-time tokens, first sign-in, full administration, keys generated and installed on vault servers. Setup wizard (0.3), Debian package (0.4).
 3. **Audit**: replay and search (0.5), live view and session termination, on-demand MP4 video, detachable player, configurable retention with disk estimate, syslog and CSV.
-4. **Remote Desktop**: jump (0.6), recorded with signed recording (0.8), replay (0.10), vault (0.29: the Gate opens the Windows session with the vault account), then rules (clipboard, sound).
+4. **Remote Desktop**: jump (0.6), recorded with signed recording (0.8), replay (0.10), vault (0.29: the Gate opens the Windows session with the vault account), ordinary RDP clients (0.31: mstsc, Windows App, Remmina with a single-use .rdp file), then rules (clipboard, sound).
 5. **Web portal**: SSH (0.7) and Remote Desktop (0.8) in the browser behind Cloudflare, then passkeys, branding.
 6. **Remote assistance**: Portunia Assistance relay with a code (0.11), then invitation link, unattended access to your own PCs, file transfer, chat.
 7. **Operations**: built-in backup, apt repository for updates, ARM package, imports (Portunia, CSV), optional web console.

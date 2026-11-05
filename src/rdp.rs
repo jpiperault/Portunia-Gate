@@ -51,6 +51,8 @@ pub enum Origin {
     /// Portail : la session web fixe la durée, et le jeton doit être celui de son compte.
     Portal { addr: String, user: Uuid, expires: DateTime<Utc>, idle: Duration },
     Portunia { addr: String },
+    /// Entrée RDP native (mstsc, Remmina…) : voir `rdpnative`.
+    Native,
 }
 
 /// Erreur renvoyée au client dans le protocole RDCleanPath, puis fermeture.
@@ -110,16 +112,17 @@ async fn read_request(socket: &mut WebSocket) -> Result<RDCleanPathPdu> {
     }
 }
 
-/// Réponse X.224 du serveur : un paquet TPKT (4 octets d'en-tête, longueur sur 2 octets).
-async fn read_tpkt(tcp: &mut tokio::net::TcpStream) -> Result<Vec<u8>> {
+/// Un paquet TPKT (4 octets d'en-tête, longueur sur 2 octets) : réponse X.224 du serveur,
+/// demande X.224 ou première trame d'un poste natif. `max` : longueur acceptée.
+pub(crate) async fn read_tpkt(tcp: &mut (impl AsyncRead + Unpin), max: usize) -> Result<Vec<u8>> {
     let mut head = [0u8; 4];
     tcp.read_exact(&mut head).await?;
     if head[0] != 3 {
-        bail!(t!("unexpected server answer (not RDP)", "réponse du serveur inattendue (pas de RDP)"));
+        bail!(t!("unexpected answer (not RDP)", "réponse inattendue (pas de RDP)"));
     }
     let len = u16::from_be_bytes([head[2], head[3]]) as usize;
-    if !(4..=4096).contains(&len) {
-        bail!(t!("X.224 answer with invalid length", "réponse X.224 de longueur invalide"));
+    if !(4..=max).contains(&len) {
+        bail!(t!("TPKT packet with invalid length", "paquet TPKT de longueur invalide"));
     }
     let mut pdu = head.to_vec();
     pdu.resize(len, 0);
@@ -129,12 +132,13 @@ async fn read_tpkt(tcp: &mut tokio::net::TcpStream) -> Result<Vec<u8>> {
 
 // ---------- Coffre : authentification NLA menée par la Gate ----------
 
-/// Protocoles de sécurité de la réponse X.224 (RDP_NEG_RSP) : NLA et NLA étendu.
-const HYBRID: u32 = 0x2;
-const HYBRID_EX: u32 = 0x8;
+/// Protocoles de sécurité de la négociation X.224 : TLS, NLA et NLA étendu.
+pub(crate) const SSL: u32 = 0x1;
+pub(crate) const HYBRID: u32 = 0x2;
+pub(crate) const HYBRID_EX: u32 = 0x8;
 
 /// Protocole choisi par le serveur : TPKT (4 octets), X.224 CC (7), puis RDP_NEG_RSP (8).
-fn selected_protocol(x224: &[u8]) -> Option<u32> {
+pub(crate) fn selected_protocol(x224: &[u8]) -> Option<u32> {
     (x224.len() >= 19 && x224[11] == 0x02).then(|| u32::from_le_bytes([x224[15], x224[16], x224[17], x224[18]]))
 }
 
@@ -305,6 +309,207 @@ pub async fn relay(state: Arc<State>, mut socket: WebSocket, origin: Origin) {
     }
 }
 
+/// Pourquoi une connexion est refusée : dit au client RDCleanPath ; l'entrée native, elle,
+/// ferme simplement la connexion (un client RDP n'affiche qu'une erreur générique).
+pub(crate) enum Refusal {
+    Http(u16),
+    Wsa(u16),
+    Tls(u8),
+    General,
+}
+
+impl Refusal {
+    fn pdu(&self) -> RDCleanPathPdu {
+        match self {
+            Refusal::Http(code) => RDCleanPathPdu::new_http_error(*code),
+            Refusal::Wsa(code) => RDCleanPathPdu::new_wsa_error(*code),
+            Refusal::Tls(code) => RDCleanPathPdu::new_tls_error(*code),
+            Refusal::General => RDCleanPathPdu::new_general_error(),
+        }
+    }
+}
+
+pub(crate) type Refused = (Refusal, anyhow::Error);
+
+fn general(e: anyhow::Error) -> Refused {
+    (Refusal::General, e)
+}
+
+/// Connexion autorisée : qui, vers quel serveur, avec quels droits, depuis quelle adresse.
+pub(crate) struct Allowed {
+    pub user: model::User,
+    pub target: model::Target,
+    pub access: model::Access,
+    pub addr: String,
+}
+
+/// Jeton à usage unique, compte, serveur et règle. `portal_user` : compte de la session web
+/// (le jeton doit être le sien) ; `mode_ok` : modes que cette entrée accepte.
+pub(crate) async fn authorize(db: &sqlx::PgPool, token: &str, addr: String, portal_user: Option<Uuid>, mode_ok: impl Fn(&model::Target) -> bool) -> Result<Allowed, Refused> {
+    // Le jeton dit qui et vers quel serveur.
+    let Some((user_id, target_id, real_addr)) = crate::api::take_ticket(db, token).await.map_err(general)? else {
+        return Err((Refusal::Http(401), anyhow!(t!("invalid, expired or already used token", "jeton invalide, expiré ou déjà utilisé"))));
+    };
+    let addr = real_addr.unwrap_or(addr);
+    let user = model::user_by_id(db, user_id).await.map_err(general)?.filter(|u| !u.disabled);
+    let target = model::target_by_id(db, target_id).await.map_err(general)?;
+    let (Some(user), Some(target)) = (user, target) else {
+        return Err((Refusal::Http(403), anyhow!(t!("account or server deleted", "compte ou serveur supprimé"))));
+    };
+    if portal_user.is_some_and(|web_user| web_user != user.id) {
+        audit::note(db, &user.login, "acces.refuse", json!({ "cible": target.name, "type": "rdp", "raison": "jeton d'un autre compte", "adresse": addr })).await;
+        return Err((Refusal::Http(403), anyhow!(t!("token of another account", "jeton d'un autre compte"))));
+    }
+    let access = model::access(db, user.id, target.id).await.map_err(general)?;
+    let Some(access) = access.filter(|_| target.is_rdp() && mode_ok(&target)) else {
+        audit::note(db, &user.login, "acces.refuse", json!({ "cible": target.name, "type": "rdp", "adresse": addr })).await;
+        return Err((Refusal::Http(403), anyhow!(t!(format!("{}: access denied", target.name), format!("{} : accès refusé", target.name)))));
+    };
+    Ok(Allowed { user, target, access, addr })
+}
+
+/// Pas d'enregistrement possible (disque plein) : pas de session, sauf en rebond.
+pub(crate) async fn check_space(state: &State, a: &Allowed) -> Result<(), Refused> {
+    if a.target.mode != "rebond" && !crate::live::can_record(state) {
+        audit::note(&state.db, &a.user.login, "enregistrement.echec", json!({ "cible": a.target.name, "raison": "espace disque insuffisant", "adresse": a.addr })).await;
+        return Err(general(anyhow!("{}", crate::live::no_space_message())));
+    }
+    Ok(())
+}
+
+/// Serveur Windows joint : négociation X.224 faite, TLS établi, certificat vérifié.
+pub(crate) struct Opened {
+    pub tls: tokio_rustls::client::TlsStream<tokio::net::TcpStream>,
+    /// Réponse X.224 du serveur (protocole choisi).
+    pub x224: Vec<u8>,
+    pub chain: Vec<Vec<u8>>,
+    pub server: String,
+}
+
+impl Opened {
+    /// Protocole de sécurité choisi par le serveur (0 : RDP ancien, 1 : TLS, 2 et 8 : NLA).
+    pub fn protocol(&self) -> u32 {
+        selected_protocol(&self.x224).unwrap_or(0)
+    }
+
+    pub fn nla(&self) -> bool {
+        self.protocol() & (HYBRID | HYBRID_EX) != 0
+    }
+}
+
+/// Connexion au serveur Windows avec cette demande X.224, négociation chiffrée, certificat
+/// vérifié par son empreinte (gardée à la première connexion).
+pub(crate) async fn open_server(db: &sqlx::PgPool, a: &Allowed, x224_request: &[u8]) -> Result<Opened, Refused> {
+    let target = &a.target;
+    let server = format!("{}:{}", target.host, target.port);
+    let address = crate::target::addresses(&target.host, target.port as u16).await.map_err(|e| (Refusal::Wsa(10061), e))?;
+    let mut tcp = match tokio::time::timeout(Duration::from_secs(10), tokio::net::TcpStream::connect(&address[..])).await {
+        Ok(Ok(t)) => t,
+        _ => return Err((Refusal::Wsa(10061), anyhow!("{server} injoignable"))),
+    };
+    let _ = tcp.set_nodelay(true);
+    tcp.write_all(x224_request).await.map_err(|e| general(e.into()))?;
+    let x224 = read_tpkt(&mut tcp, 4096).await.context(t!("X.224 negotiation", "négociation X.224")).map_err(general)?;
+    // Négociation refusée (RDP_NEG_FAILURE) : le serveur dit pourquoi.
+    if x224.len() >= 19 && x224[11] == 0x03 {
+        let why = match u32::from_le_bytes([x224[15], x224[16], x224[17], x224[18]]) {
+            5 => t!("the server requires NLA", "le serveur exige NLA").to_string(),
+            1 | 6 => t!("the server requires TLS", "le serveur exige TLS").to_string(),
+            2 | 3 => t!("the server does not accept TLS", "le serveur n'accepte pas TLS").to_string(),
+            code => t!(format!("negotiation refused (code {code})"), format!("négociation refusée (code {code})")).to_string(),
+        };
+        return Err(general(anyhow!("{} : {why}", target.name)));
+    }
+
+    // Négociation chiffrée avec le serveur, certificat vérifié par son empreinte.
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let config = rustls::ClientConfig::builder_with_provider(provider.clone())
+        .with_safe_default_protocol_versions()
+        .map_err(|e| general(e.into()))?
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(Capture(provider)))
+        .with_no_client_auth();
+    let name = ServerName::try_from(target.host.clone()).map_err(|_| general(anyhow!(t!("invalid server address", "adresse du serveur invalide"))))?;
+    let tls = match tokio_rustls::TlsConnector::from(Arc::new(config)).connect(name, tcp).await {
+        Ok(t) => t,
+        Err(e) => return Err((Refusal::Tls(40), anyhow!(t!(format!("TLS negotiation with {server}: {e}"), format!("négociation TLS avec {server} : {e}"))))),
+    };
+    let chain: Vec<Vec<u8>> = tls.get_ref().1.peer_certificates().unwrap_or_default().iter().map(|c| c.to_vec()).collect();
+    let Some(leaf) = chain.first() else {
+        return Err(general(anyhow!(t!(format!("{server} presented no certificate"), format!("{server} n'a pas présenté de certificat")))));
+    };
+    let fingerprint = cert_fingerprint(leaf);
+    match &target.host_key {
+        None => {
+            if model::pin_host_key(db, target.id, &fingerprint).await.map_err(general)? {
+                audit::note(db, &a.user.login, "cible.empreinte_memorisee", json!({ "cible": target.name, "empreinte": fingerprint })).await;
+            }
+        }
+        Some(known) if *known != fingerprint => {
+            audit::note(db, &a.user.login, "cible.empreinte_differente", json!({ "cible": target.name, "attendue": known, "recue": fingerprint })).await;
+            return Err(general(anyhow!(t!(
+                format!("{}: the server's certificate has changed (expected {known}, received {fingerprint})", target.name),
+                format!("{} : le certificat du serveur a changé (attendu {known}, reçu {fingerprint})", target.name)
+            ))));
+        }
+        _ => {}
+    }
+    Ok(Opened { tls, x224, chain, server })
+}
+
+/// La Gate ouvre la session Windows (NLA) avec ce compte : celui du coffre, ou celui que
+/// l'utilisateur a donné pour l'entrée native. Renvoie la clé publique du serveur.
+pub(crate) async fn gate_login(db: &sqlx::PgPool, a: &Allowed, o: &mut Opened, account: &str, password: String) -> Result<Vec<u8>, Refused> {
+    let target = &a.target;
+    let event = if target.vaulted() { "cible.coffre_refuse" } else { "cible.identifiants_refuses" };
+    if !o.nla() {
+        audit::note(db, &a.user.login, event, json!({ "cible": target.name, "raison": "serveur sans NLA" })).await;
+        return Err(general(anyhow!(t!(
+            format!("{}: the server does not offer NLA, the Gate cannot sign in", target.name),
+            format!("{} : le serveur ne propose pas NLA, la Gate ne peut pas ouvrir la session", target.name)
+        ))));
+    }
+    let early = o.protocol() & HYBRID_EX != 0;
+    let key = public_key(&o.chain[0]).map_err(general)?;
+    if let Err(e) = vault_login(&mut o.tls, account, password, &target.host, key.clone(), early).await {
+        audit::note(db, &a.user.login, event, json!({ "cible": target.name, "raison": e.to_string() })).await;
+        return Err(general(anyhow!("{} : {e:#}", target.name)));
+    }
+    Ok(key)
+}
+
+/// Compte du coffre (mot de passe) de ce serveur, pour `gate_login`.
+pub(crate) async fn vault_account(state: &State, a: &Allowed) -> Result<(String, String), Refused> {
+    match crate::target::vault_credentials(state, &a.target) {
+        Ok(crate::target::Credentials::Password { user, password }) => Ok((user, password)),
+        other => {
+            let e = match other {
+                Err(e) => e,
+                _ => anyhow!(t!("Remote Desktop: the vault keeps a password, not an SSH key", "Bureau à distance : le coffre garde un mot de passe, pas une clé SSH")),
+            };
+            audit::note(&state.db, &a.user.login, "cible.coffre_refuse", json!({ "cible": a.target.name, "raison": e.to_string() })).await;
+            Err(general(anyhow!("{} : {e:#}", a.target.name)))
+        }
+    }
+}
+
+/// Enregistrement de la session (aucun en rebond).
+pub(crate) async fn start_recording(state: &State, id: Uuid, a: &Allowed) -> Result<Option<crate::rdpcap::Tape>, Refused> {
+    if a.target.mode == "rebond" {
+        return Ok(None);
+    }
+    // Copie de fichiers : gardée si la règle l'autorise et si le réglage le demande.
+    let keep_files = if a.access.files { file_copies_limit(state).await.map_err(general)? } else { 0 };
+    let title = format!("{} → {}", a.user.login, a.target.name);
+    match crate::rdpcap::Recorder::create(&state.config.recordings_dir(), id, &title, a.access.record_input, keep_files).and_then(crate::rdpcap::Recorder::spawn) {
+        Ok(c) => Ok(Some(c)),
+        Err(e) => {
+            audit::note(&state.db, &a.user.login, "enregistrement.echec", json!({ "cible": a.target.name, "raison": e.to_string(), "adresse": a.addr })).await;
+            Err(general(anyhow!("{} {id}: {e:#}", t!("RDP recording", "enregistrement RDP"))))
+        }
+    }
+}
+
 async fn run(state: &Arc<State>, socket: &mut WebSocket, origin: Origin) -> Result<()> {
     let db = &state.db;
     let request = match read_request(socket).await {
@@ -318,199 +523,167 @@ async fn run(state: &Arc<State>, socket: &mut WebSocket, origin: Origin) -> Resu
         refuse(socket, RDCleanPathPdu::new_general_error()).await;
         bail!("message RDCleanPath inattendu");
     };
-
-    // Jeton à usage unique : il dit qui et vers quel serveur.
-    let Some((user_id, target_id, real_addr)) = crate::api::take_ticket(db, &proxy_auth).await? else {
-        refuse(socket, RDCleanPathPdu::new_http_error(401)).await;
-        bail!(t!("invalid, expired or already used token", "jeton invalide, expiré ou déjà utilisé"));
+    let (addr, portal_user) = match &origin {
+        Origin::Portunia { addr } => (addr.clone(), None),
+        Origin::Portal { addr, user, .. } => (format!("{addr} (web)"), Some(*user)),
+        Origin::Native => bail!("entrée native sur le passage RDCleanPath"),
     };
-    let addr = real_addr.unwrap_or_else(|| match &origin {
-        Origin::Portunia { addr } => addr.clone(),
-        Origin::Portal { addr, .. } => format!("{addr} (web)"),
-    });
-    let user = model::user_by_id(db, user_id).await?.filter(|u| !u.disabled);
-    let target = model::target_by_id(db, target_id).await?;
-    let (Some(user), Some(target)) = (user, target) else {
-        refuse(socket, RDCleanPathPdu::new_http_error(403)).await;
-        bail!(t!("account or server deleted", "compte ou serveur supprimé"));
-    };
-    if matches!(&origin, Origin::Portal { user: web_user, .. } if *web_user != user.id) {
-        audit::note(db, &user.login, "acces.refuse", json!({ "cible": target.name, "type": "rdp", "raison": "jeton d'un autre compte", "adresse": addr })).await;
-        refuse(socket, RDCleanPathPdu::new_http_error(403)).await;
-        bail!(t!("token of another account", "jeton d'un autre compte"));
-    }
-    let access = model::access(db, user.id, target.id).await?;
     // Rebond depuis le navigateur : la Gate relaie sans enregistrer (Portunia, lui, passe par
     // un tunnel SSH de bout en bout).
-    let web = matches!(origin, Origin::Portal { .. });
-    let jump = target.mode == "rebond";
-    let Some(access) = access.filter(|_| target.is_rdp() && (target.mode == "enregistre" || target.vaulted() || (jump && web))) else {
-        audit::note(db, &user.login, "acces.refuse", json!({ "cible": target.name, "type": "rdp", "adresse": addr })).await;
-        refuse(socket, RDCleanPathPdu::new_http_error(403)).await;
-        bail!(t!(format!("{}: access denied", target.name), format!("{} : accès refusé", target.name)));
+    let web = portal_user.is_some();
+    let prepared = async {
+        let a = authorize(db, &proxy_auth, addr, portal_user, |t| t.mode == "enregistre" || t.vaulted() || (t.mode == "rebond" && web)).await?;
+        check_space(state, &a).await?;
+        let mut o = open_server(db, &a, x224_connection_request.as_bytes()).await?;
+        // Coffre : la Gate s'authentifie auprès du serveur avant de répondre au client.
+        let vault_key = if a.target.vaulted() {
+            let (account, password) = vault_account(state, &a).await?;
+            Some(gate_login(db, &a, &mut o, &account, password).await?)
+        } else {
+            None
+        };
+        let id = Uuid::new_v4();
+        let capture = start_recording(state, id, &a).await?;
+        Ok::<_, Refused>((a, o, vault_key, id, capture))
     };
-
-    if !jump && !crate::live::can_record(state) {
-        audit::note(db, &user.login, "enregistrement.echec", json!({ "cible": target.name, "raison": "espace disque insuffisant", "adresse": addr })).await;
-        refuse(socket, RDCleanPathPdu::new_general_error()).await;
-        bail!("{}", crate::live::no_space_message());
-    }
-
-    // Connexion au serveur Windows, début de la négociation RDP.
-    let server = format!("{}:{}", target.host, target.port);
-    let address = match crate::target::addresses(&target.host, target.port as u16).await {
-        Ok(a) => a,
-        Err(e) => {
-            refuse(socket, RDCleanPathPdu::new_wsa_error(10061)).await;
+    let (a, o, vault_key, id, capture) = match prepared.await {
+        Ok(p) => p,
+        Err((why, e)) => {
+            refuse(socket, why.pdu()).await;
             return Err(e);
         }
     };
-    let mut tcp = match tokio::time::timeout(Duration::from_secs(10), tokio::net::TcpStream::connect(&address[..])).await {
-        Ok(Ok(t)) => t,
-        _ => {
-            refuse(socket, RDCleanPathPdu::new_wsa_error(10061)).await;
-            bail!("{server} injoignable");
-        }
-    };
-    let _ = tcp.set_nodelay(true);
-    tcp.write_all(x224_connection_request.as_bytes()).await?;
-    let x224_response = read_tpkt(&mut tcp).await.context(t!("X.224 negotiation", "négociation X.224"))?;
-
-    // Négociation chiffrée avec le serveur, certificat vérifié par son empreinte.
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let config = rustls::ClientConfig::builder_with_provider(provider.clone())
-        .with_safe_default_protocol_versions()?
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(Capture(provider)))
-        .with_no_client_auth();
-    let name = ServerName::try_from(target.host.clone()).map_err(|_| anyhow!(t!("invalid server address", "adresse du serveur invalide")))?;
-    let mut tls = match tokio_rustls::TlsConnector::from(Arc::new(config)).connect(name, tcp).await {
-        Ok(t) => t,
-        Err(e) => {
-            refuse(socket, RDCleanPathPdu::new_tls_error(40)).await;
-            bail!(t!(format!("TLS negotiation with {server}: {e}"), format!("négociation TLS avec {server} : {e}")));
-        }
-    };
-    let chain: Vec<Vec<u8>> = tls.get_ref().1.peer_certificates().unwrap_or_default().iter().map(|c| c.to_vec()).collect();
-    let Some(leaf) = chain.first() else {
-        refuse(socket, RDCleanPathPdu::new_general_error()).await;
-        bail!(t!(format!("{server} presented no certificate"), format!("{server} n'a pas présenté de certificat")));
-    };
-    let fingerprint = cert_fingerprint(leaf);
-    match &target.host_key {
-        None => {
-            if model::pin_host_key(db, target.id, &fingerprint).await? {
-                audit::note(db, &user.login, "cible.empreinte_memorisee", json!({ "cible": target.name, "empreinte": fingerprint })).await;
-            }
-        }
-        Some(known) if *known != fingerprint => {
-            audit::note(db, &user.login, "cible.empreinte_differente", json!({ "cible": target.name, "attendue": known, "recue": fingerprint })).await;
-            refuse(socket, RDCleanPathPdu::new_general_error()).await;
-            bail!(t!(
-                format!("{}: the server's certificate has changed (expected {known}, received {fingerprint})", target.name),
-                format!("{} : le certificat du serveur a changé (attendu {known}, reçu {fingerprint})", target.name)
-            ));
-        }
-        _ => {}
-    }
-    // Coffre : la Gate s'authentifie auprès du serveur avant de répondre au client.
-    let protocol = selected_protocol(&x224_response).unwrap_or(0);
-    let early = protocol & HYBRID_EX != 0;
-    let vault_key = if target.vaulted() {
-        if protocol & (HYBRID | HYBRID_EX) == 0 {
-            audit::note(db, &user.login, "cible.coffre_refuse", json!({ "cible": target.name, "raison": "serveur sans NLA" })).await;
-            refuse(socket, RDCleanPathPdu::new_general_error()).await;
-            bail!(t!(
-                format!("{}: the server does not offer NLA, the vault cannot sign in", target.name),
-                format!("{} : le serveur ne propose pas NLA, le coffre ne peut pas ouvrir la session", target.name)
-            ));
-        }
-        let key = public_key(leaf)?;
-        let login = match crate::target::vault_credentials(state, &target) {
-            Ok(crate::target::Credentials::Password { user: account, password }) => vault_login(&mut tls, &account, password, &target.host, key.clone(), early).await,
-            Ok(_) => Err(anyhow!(t!("Remote Desktop: the vault keeps a password, not an SSH key", "Bureau à distance : le coffre garde un mot de passe, pas une clé SSH"))),
-            Err(e) => Err(e),
-        };
-        if let Err(e) = login {
-            audit::note(db, &user.login, "cible.coffre_refuse", json!({ "cible": target.name, "raison": e.to_string() })).await;
-            refuse(socket, RDCleanPathPdu::new_general_error()).await;
-            bail!("{} : {e:#}", target.name);
-        }
-        Some(key)
-    } else {
-        None
-    };
-    // Pas de session sans enregistrement, sauf en rebond.
-    let id = Uuid::new_v4();
-    // Copie de fichiers : tracée si la règle l'autorise (et gardée, si le réglage le demande),
-    // bloquée en ligne sinon.
-    let keep_files = if access.files { file_copies_limit(state).await? } else { 0 };
-    let guard = (!access.files).then(crate::rdpclip::Guard::default);
-    let (mut from_server, mut from_client) = (guard.as_ref().map(|g| g.side(true)), guard.as_ref().map(|g| g.side(false)));
-    let capture = if jump {
-        None
-    } else {
-        match crate::rdpcap::Recorder::create(&state.config.recordings_dir(), id, &format!("{} → {}", user.login, target.name), access.record_input, keep_files).and_then(crate::rdpcap::Recorder::spawn) {
-            Ok(c) => Some(c),
-            Err(e) => {
-                audit::note(db, &user.login, "enregistrement.echec", json!({ "cible": target.name, "raison": e.to_string(), "adresse": addr })).await;
-                refuse(socket, RDCleanPathPdu::new_general_error()).await;
-                bail!("{} {id}: {e:#}", t!("RDP recording", "enregistrement RDP"));
-            }
-        }
-    };
-    // Octets relayés (rebond : sans enregistrement pour les compter).
-    let moved = AtomicU64::new(0);
-    let response = RDCleanPathPdu::new_response(server.clone(), x224_response, chain)?.to_der()?;
+    let early = o.protocol() & HYBRID_EX != 0;
+    let response = RDCleanPathPdu::new_response(o.server.clone(), o.x224.clone(), o.chain.clone())?.to_der()?;
     socket.send(Message::Binary(response.into())).await?;
     // Coffre : le client s'authentifie auprès de la Gate avec son jeton ; ce qu'il a envoyé
     // ensuite part vers le serveur comme le reste de la session.
+    let mut pending = Vec::new();
     if let Some(key) = vault_key {
-        let rest = match token_login(socket, &proxy_auth, key, early).await {
-            Ok(rest) => rest,
+        match token_login(socket, &proxy_auth, key, early).await {
+            Ok(rest) => pending = rest,
             Err(e) => {
-                audit::note(db, &user.login, "acces.refuse", json!({ "cible": target.name, "type": "rdp", "raison": e.to_string(), "adresse": addr })).await;
+                audit::note(db, &a.user.login, "acces.refuse", json!({ "cible": a.target.name, "type": "rdp", "raison": e.to_string(), "adresse": a.addr })).await;
                 if let Some(c) = capture {
                     let _ = c.finish(state, id).await;
                 }
                 return Err(e);
             }
-        };
-        if !rest.is_empty() {
-            let bytes = match &mut from_client {
-                Some(side) => side.filter(&rest).map_err(|why| anyhow!("{why}"))?,
-                None => rest,
-            };
-            if !bytes.is_empty() {
-                if let Some(c) = &capture {
-                    c.push(false, &bytes).await;
+        }
+    }
+    let (tx, rx) = socket.split();
+    relay_session(state, id, &a, &origin, capture, o.tls, ClientRx::Ws(rx), ClientTx::Ws(tx), pending).await
+}
+
+/// Côté poste : la WebSocket RDCleanPath, ou une connexion RDP native (TLS de la Gate).
+pub(crate) type NativeTls = tokio_rustls::server::TlsStream<tokio::net::TcpStream>;
+
+pub(crate) enum ClientRx<'a> {
+    Ws(futures_util::stream::SplitStream<&'a mut WebSocket>),
+    Native(tokio::io::ReadHalf<&'a mut NativeTls>),
+}
+
+pub(crate) enum ClientTx<'a> {
+    Ws(futures_util::stream::SplitSink<&'a mut WebSocket, Message>),
+    Native(tokio::io::WriteHalf<&'a mut NativeTls>),
+}
+
+impl ClientRx<'_> {
+    /// Prochains octets du poste ; None : il est parti.
+    async fn recv(&mut self, buf: &mut [u8]) -> Option<Vec<u8>> {
+        match self {
+            ClientRx::Ws(ws) => loop {
+                match ws.next().await {
+                    Some(Ok(Message::Binary(data))) => return Some(data.to_vec()),
+                    Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return None,
+                    _ => {}
                 }
-                tls.write_all(&bytes).await?;
+            },
+            ClientRx::Native(tls) => match tls.read(buf).await {
+                Ok(0) | Err(_) => None,
+                Ok(n) => Some(buf[..n].to_vec()),
+            },
+        }
+    }
+}
+
+impl ClientTx<'_> {
+    async fn send(&mut self, bytes: Vec<u8>) -> bool {
+        match self {
+            ClientTx::Ws(ws) => ws.send(Message::Binary(bytes.into())).await.is_ok(),
+            ClientTx::Native(tls) => tls.write_all(&bytes).await.is_ok(),
+        }
+    }
+
+    async fn close(&mut self) {
+        match self {
+            ClientTx::Ws(ws) => {
+                let _ = ws.send(Message::Close(None)).await;
             }
+            ClientTx::Native(tls) => {
+                let _ = tls.shutdown().await;
+            }
+        }
+    }
+}
+
+/// Session ouverte : relais dans les deux sens, enregistrement, journal. `pending` : octets
+/// que le poste a déjà envoyés, à faire suivre en premier.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn relay_session(
+    state: &Arc<State>,
+    id: Uuid,
+    a: &Allowed,
+    origin: &Origin,
+    capture: Option<crate::rdpcap::Tape>,
+    tls: tokio_rustls::client::TlsStream<tokio::net::TcpStream>,
+    mut client_rx: ClientRx<'_>,
+    mut client_tx: ClientTx<'_>,
+    pending: Vec<u8>,
+) -> Result<()> {
+    let db = &state.db;
+    let (user, target, access) = (&a.user, &a.target, &a.access);
+    let web = matches!(origin, Origin::Portal { .. });
+    let jump = target.mode == "rebond";
+    // Copie de fichiers : tracée si la règle l'autorise (et gardée, si le réglage le demande),
+    // bloquée en ligne sinon.
+    let guard = (!access.files).then(crate::rdpclip::Guard::default);
+    let (mut from_server, mut from_client) = (guard.as_ref().map(|g| g.side(true)), guard.as_ref().map(|g| g.side(false)));
+    let (mut tls_read, mut tls_write) = tokio::io::split(tls);
+    if !pending.is_empty() {
+        let bytes = match &mut from_client {
+            Some(side) => side.filter(&pending).map_err(|why| anyhow!("{why}"))?,
+            None => pending,
+        };
+        if !bytes.is_empty() {
+            if let Some(c) = &capture {
+                c.push(false, &bytes).await;
+            }
+            tls_write.write_all(&bytes).await?;
         }
     }
 
     // Session ouverte : relais et enregistrement.
     if jump {
-        model::session_start(db, id, user.id, target.id, "rebond", "rdp (web)", &addr).await?;
-        audit::note(db, &user.login, "rebond.ouvert", json!({ "session": id, "cible": target.name, "protocole": "rdp", "adresse": addr })).await;
+        model::session_start(db, id, user.id, target.id, "rebond", "rdp (web)", &a.addr).await?;
+        audit::note(db, &user.login, "rebond.ouvert", json!({ "session": id, "cible": target.name, "protocole": "rdp", "adresse": a.addr })).await;
     } else {
-        model::session_start(db, id, user.id, target.id, "rdp", if target.vaulted() { "coffre" } else { "enregistré" }, &addr).await?;
+        model::session_start(db, id, user.id, target.id, "rdp", if target.vaulted() { "coffre" } else { "enregistré" }, &a.addr).await?;
         audit::note(
             db,
             &user.login,
             "session.ouverte",
-            json!({ "session": id, "cible": target.name, "protocole": "rdp", "mode": target.mode, "adresse": addr }),
+            json!({ "session": id, "cible": target.name, "protocole": "rdp", "mode": target.mode, "adresse": a.addr }),
         )
         .await;
     }
     let started = Instant::now();
-    let (_watch, mut cut) = state.live.watch(crate::live::Watched { user: user.id, login: &user.login, target: Some(&target), web, recorded: !jump });
+    let (_watch, mut cut) = state.live.watch(crate::live::Watched { user: user.id, login: &user.login, target: Some(target), web, recorded: !jump });
     let mut tick = tokio::time::interval(Duration::from_secs(5));
+    // Octets relayés (rebond : sans enregistrement pour les compter).
+    let moved = AtomicU64::new(0);
     // Dernière saisie du poste, en millisecondes depuis le début de la session.
     let last_input = AtomicU64::new(0);
-    let (mut tls_read, mut tls_write) = tokio::io::split(tls);
-    let (mut ws_send, mut ws_recv) = socket.split();
     let mut closing = state.web.subscribe();
     let reason: String = {
         // Les deux sens avancent chacun de leur côté : un poste lent à recevoir l'image ne
@@ -537,7 +710,7 @@ async fn run(state: &Arc<State>, socket: &mut WebSocket, origin: Origin) -> Resu
                             }
                         }
                         moved.fetch_add(bytes.len() as u64, Ordering::Relaxed);
-                        if ws_send.send(Message::Binary(bytes.into())).await.is_err() {
+                        if !client_tx.send(bytes).await {
                             return "client";
                         }
                     }
@@ -545,32 +718,28 @@ async fn run(state: &Arc<State>, socket: &mut WebSocket, origin: Origin) -> Resu
             }
         };
         let up = async {
+            let mut buf = vec![0u8; 64 * 1024];
             loop {
-                match ws_recv.next().await {
-                    Some(Ok(Message::Binary(data))) => {
-                        last_input.store(started.elapsed().as_millis() as u64, Ordering::Relaxed);
-                        let bytes = match &mut from_client {
-                            Some(side) => match side.filter(&data) {
-                                Ok(b) => b,
-                                Err(why) => return why,
-                            },
-                            None => data.to_vec(),
-                        };
-                        if bytes.is_empty() {
-                            continue;
-                        }
-                        if let Some(c) = &capture {
-                            if !c.push(false, &bytes).await {
-                                return "enregistrement";
-                            }
-                        }
-                        moved.fetch_add(bytes.len() as u64, Ordering::Relaxed);
-                        if tls_write.write_all(&bytes).await.is_err() {
-                            return "serveur";
-                        }
+                let Some(data) = client_rx.recv(&mut buf).await else { return "client" };
+                last_input.store(started.elapsed().as_millis() as u64, Ordering::Relaxed);
+                let bytes = match &mut from_client {
+                    Some(side) => match side.filter(&data) {
+                        Ok(b) => b,
+                        Err(why) => return why,
+                    },
+                    None => data,
+                };
+                if bytes.is_empty() {
+                    continue;
+                }
+                if let Some(c) = &capture {
+                    if !c.push(false, &bytes).await {
+                        return "enregistrement";
                     }
-                    Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return "client",
-                    _ => {}
+                }
+                moved.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                if tls_write.write_all(&bytes).await.is_err() {
+                    return "serveur";
                 }
             }
         };
@@ -582,7 +751,7 @@ async fn run(state: &Arc<State>, socket: &mut WebSocket, origin: Origin) -> Resu
                 _ = closing.changed(), if web => break "administrateur".into(),
                 why = cut.reason() => break why,
                 _ = tick.tick() => {
-                    if let Origin::Portal { expires, idle, .. } = &origin {
+                    if let Origin::Portal { expires, idle, .. } = origin {
                         if Utc::now() >= *expires {
                             break "session web expirée".into();
                         }
@@ -602,7 +771,7 @@ async fn run(state: &Arc<State>, socket: &mut WebSocket, origin: Origin) -> Resu
         }
     };
     let _ = tls_write.shutdown().await;
-    let _ = ws_send.send(Message::Close(None)).await;
+    client_tx.close().await;
 
     let mut done = model::Finished { recording: None, sha256: None, signature: None, bytes: moved.load(Ordering::Relaxed) as i64 };
     let mut files = Vec::new();

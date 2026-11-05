@@ -762,14 +762,18 @@ harden_admin_ports() {
 }
 
 harden_gate_ports() {
-  local ssh api tls
+  local ssh api tls rdp
   ssh=$(env_value PORTUNIA_GATE_SSH_PORT)
   api=$(env_value PORTUNIA_GATE_API_PORT)
   tls=$(env_value PORTUNIA_GATE_PORTAL_TLS_LISTEN)
   # Réglée depuis Portunia (Administrer › Portail web) : lue auprès de la Gate.
   [ -n "$tls" ] || tls=$(hcmd portal https 2>/dev/null | sed -n 's/^HTTPS: *\([^ ]*\).*/\1/p' | grep -v '^—$' || true)
+  # Entrée RDP native, seulement si elle est ouverte (Administrer › RDP natif) ; avec Docker,
+  # c'est le port publié qui compte.
+  rdp=$(hcmd rdp port 2>/dev/null | grep -E '^[0-9]+$' || true)
+  if [ -n "$rdp" ] && [ "$MODE" = docker ]; then rdp=$(env_value PORTUNIA_GATE_RDP_PORT); rdp=${rdp:-3390}; fi
   # 8446, l'écoute HTTPS proposée par défaut, reste ouvert : la démarrer depuis Portunia suffit.
-  printf '%s\n' "${ssh:-2222}" "${api:-8443}" 8446 ${tls:+"${tls##*:}"} | sort -un | paste -sd, -
+  printf '%s\n' "${ssh:-2222}" "${api:-8443}" 8446 ${tls:+"${tls##*:}"} ${rdp:+"$rdp"} | sort -un | paste -sd, -
 }
 
 # Le compte qui administre a-t-il une clé SSH déjà installée ?

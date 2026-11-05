@@ -180,6 +180,20 @@ sudo portunia-gate assist show                            # état, programme pr�
 
 La page de la personne aidée est `https://<adresse du portail>/assistance` : réglez d'abord l'adresse publique du portail.
 
+## RDP natif
+
+Clients RDP ordinaires (mstsc, Windows App, Remmina, FreeRDP) avec un fichier .rdp à usage unique préparé par Portunia. Fermé par défaut.
+
+```bash
+sudo portunia-gate rdp set --port 3390 --modes rebond,coffre,enregistre --ticket-seconds 120
+sudo portunia-gate rdp set --address gate.exemple.fr:3390   # adresse écrite dans les fichiers, si elle diffère (NAT, nom DNS)
+sudo portunia-gate rdp on                                  # en écoute sous 3 s ; ouvrez le port sur le pare-feu
+sudo portunia-gate rdp off                                 # les sessions en cours continuent
+sudo portunia-gate rdp show                                # état, port, modes, certificat présenté aux clients
+```
+
+Avec Docker, gardez le port 3390 dans le conteneur et changez celui qui est publié (`PORTUNIA_GATE_RDP_PORT` dans `.env`), puis `--address`. `PORTUNIA_GATE_RDP_BIND` limite l'écoute à une adresse (0.0.0.0 par défaut).
+
 ## Journal d'audit et sessions
 
 ```bash

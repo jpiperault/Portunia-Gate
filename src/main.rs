@@ -23,6 +23,7 @@ mod relay;
 mod rdp;
 mod rdpcap;
 mod rdpclip;
+mod rdpnative;
 mod recording;
 mod replay;
 mod sshd;
@@ -150,6 +151,9 @@ enum Command {
     /// Remote assistance (Portunia Assistance relay).
     #[command(subcommand)]
     Assist(AssistCmd),
+    /// Native RDP entry: mstsc, Remmina, FreeRDP or Windows App with a single-use .rdp file from Portunia.
+    #[command(subcommand)]
+    Rdp(RdpCmd),
     /// Dedicated relay: this machine publishes the web portal of a Gate.
     #[command(subcommand)]
     Edge(EdgeCmd),
@@ -459,6 +463,34 @@ enum TargetCmd {
     Forget { name: String },
     /// Deletes a server: its secret is erased, its sessions and recordings stay.
     Delete { name: String },
+}
+
+#[derive(Subcommand)]
+enum RdpCmd {
+    /// Shows the native RDP entry: state, port, modes and validity of the .rdp files.
+    Show,
+    /// Opens the native RDP entry (listening within 3 seconds).
+    On,
+    /// Closes the native RDP entry; sessions under way continue.
+    Off,
+    /// Settings of the native RDP entry; what is not given stays as it is.
+    Set {
+        /// Listening port (3390 by default).
+        #[arg(long)]
+        port: Option<u16>,
+        /// Public address written in the .rdp files: host or host:port (empty: the Gate's address known to Portunia).
+        #[arg(long)]
+        address: Option<String>,
+        /// Server modes reachable this way, comma separated: rebond, coffre, enregistre.
+        #[arg(long)]
+        modes: Option<String>,
+        /// Validity of a .rdp file, in seconds (30 to 600).
+        #[arg(long)]
+        ticket_seconds: Option<i64>,
+    },
+    /// Prints the port if the entry is open (used by the installer for the firewall).
+    #[command(hide = true)]
+    Port,
 }
 
 #[derive(Subcommand)]
@@ -835,7 +867,7 @@ async fn run(cli: Cli) -> Result<()> {
                     tokio::time::sleep(std::time::Duration::from_secs(24 * 3600)).await;
                 }
             });
-            tokio::try_join!(sshd::run(state.clone()), api::run(state.clone()), portal::run(state.clone()), relay::run(state.clone()), tunnel::run(state.clone()), acme::run(state.clone()), health::run(state.clone()), live::run(state.clone()))?;
+            tokio::try_join!(sshd::run(state.clone()), api::run(state.clone()), portal::run(state.clone()), relay::run(state.clone()), tunnel::run(state.clone()), acme::run(state.clone()), health::run(state.clone()), live::run(state.clone()), rdpnative::run(state.clone()))?;
             Ok(())
         }
         Command::User(cmd) => user_cmd(&state, cmd).await,
@@ -844,6 +876,7 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Rule(cmd) => rule_cmd(&state, cmd).await,
         Command::Portal(cmd) => portal_cmd(&state, cmd).await,
         Command::Assist(cmd) => assist_cmd(&state, cmd).await,
+        Command::Rdp(cmd) => rdp_cmd(&state, cmd).await,
         Command::Audit { verify, last, search, csv } => {
             if verify {
                 match audit::verify(&state.db).await? {
@@ -2042,6 +2075,82 @@ async fn service_snapshot(state: &State) -> Result<Option<serde_json::Value>> {
         );
     }
     Ok(Some(live))
+}
+
+async fn rdp_cmd(state: &State, cmd: RdpCmd) -> Result<()> {
+    let db = &state.db;
+    match cmd {
+        RdpCmd::Show => {
+            let s = rdpnative::settings(state).await?;
+            println!("{} {}", t!("Native RDP entry:", "Entrée RDP native :"), if s.enabled { t!("open", "ouverte") } else { t!("closed", "fermée") });
+            println!("{} {}", t!("Port:", "Port :"), s.port);
+            println!(
+                "{} {}",
+                t!("Address in the .rdp files:", "Adresse dans les fichiers .rdp :"),
+                if s.address.is_empty() { t!("the Gate's address known to Portunia", "l'adresse de la Gate que connaît Portunia").to_string() } else { s.address.clone() }
+            );
+            println!("{} {}", t!("Modes:", "Modes :"), if s.modes.is_empty() { "—".to_string() } else { s.modes.join(", ") });
+            println!("{} {} s", t!("Validity of a .rdp file:", "Validité d'un fichier .rdp :"), s.ticket_s);
+            println!("{} {}", t!("Certificate shown to RDP clients", "Certificat présenté aux clients RDP"), tls::fingerprint(&state.config.data_dir)?);
+            if let Some(live) = service_snapshot(state).await? {
+                let native = &live["rdp_natif"];
+                match (native["ouverte"].as_str(), native["erreur"].as_str()) {
+                    (Some(addr), _) => println!("{} {addr}", t!("Listening on", "En écoute sur")),
+                    (None, Some(e)) => println!("⚠ {} {e}", t!("Not listening:", "Pas en écoute :")),
+                    _ if s.enabled => println!("{}", t!("Not listening yet (within 3 seconds).", "Pas encore en écoute (sous 3 secondes).")),
+                    _ => {}
+                }
+            }
+        }
+        RdpCmd::On | RdpCmd::Off => {
+            let on = matches!(cmd, RdpCmd::On);
+            model::set_setting(db, "rdp_natif_actif", json!(on)).await?;
+            audit::log(db, "console", "rdp_natif.reglage", json!({ "actif": on })).await?;
+            if on {
+                let s = rdpnative::settings(state).await?;
+                println!("✓ {}", t!(format!("Native RDP entry open: listening on port {} within 3 seconds.", s.port), format!("Entrée RDP native ouverte : en écoute sur le port {} sous 3 secondes.", s.port)));
+                println!("  {}", t!("Open this port on the firewall (and publish it with Docker).", "Ouvrez ce port sur le pare-feu (et publiez-le avec Docker)."));
+            } else {
+                println!("✓ {}", t!("Native RDP entry closed; sessions under way continue.", "Entrée RDP native fermée ; les sessions en cours continuent."));
+            }
+        }
+        RdpCmd::Set { port, address, modes, ticket_seconds } => {
+            let mut changed = serde_json::Map::new();
+            if let Some(p) = port {
+                anyhow::ensure!(p > 0, t!("Port: 1 to 65535", "Port : 1 à 65535"));
+                changed.insert("port".into(), json!(p));
+            }
+            if let Some(a) = address {
+                let a = a.trim().to_string();
+                rdpnative::check_address(&a)?;
+                changed.insert("adresse".into(), json!(a));
+            }
+            if let Some(m) = modes {
+                let list: Vec<String> = m.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect();
+                if let Some(bad) = list.iter().find(|x| !rdpnative::MODES.contains(&x.as_str())) {
+                    bail!(t!(format!("Unknown mode: {bad} (rebond, coffre, enregistre)"), format!("Mode inconnu : {bad} (rebond, coffre, enregistre)")));
+                }
+                changed.insert("modes".into(), json!(list));
+            }
+            if let Some(sec) = ticket_seconds {
+                anyhow::ensure!((30..=600).contains(&sec), t!("Validity of the .rdp file: 30 to 600 seconds", "Validité du fichier .rdp : 30 à 600 secondes"));
+                changed.insert("jeton_s".into(), json!(sec));
+            }
+            anyhow::ensure!(!changed.is_empty(), t!("Nothing to change: --port, --address, --modes or --ticket-seconds", "Rien à changer : --port, --address, --modes ou --ticket-seconds"));
+            for (key, value) in &changed {
+                model::set_setting(db, &format!("rdp_natif_{key}"), value.clone()).await?;
+            }
+            audit::log(db, "console", "rdp_natif.reglage", serde_json::Value::Object(changed)).await?;
+            println!("✓ {}", t!("Native RDP settings saved (applied within 3 seconds).", "Réglages du RDP natif enregistrés (appliqués sous 3 secondes)."));
+        }
+        RdpCmd::Port => {
+            let s = rdpnative::settings(state).await?;
+            if s.enabled {
+                println!("{}", s.port);
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn assist_cmd(state: &State, cmd: AssistCmd) -> Result<()> {

@@ -45,6 +45,9 @@ services:
     ports:
       - "${PORTUNIA_GATE_SSH_PORT:-2222}:2222"
       - "${PORTUNIA_GATE_API_PORT:-8443}:8443"
+      # Entrée RDP native (mstsc, Remmina…), fermée tant qu'elle n'est pas ouverte dans Portunia ;
+      # dans le conteneur, gardez le port 3390 et changez celui-ci (puis l'adresse des fichiers .rdp).
+      - "${PORTUNIA_GATE_RDP_PORT:-3390}:3390"
       # Proxy Cloudflare : PORTUNIA_GATE_PORTAL_PORT=0.0.0.0:8446 dans .env pour l'ouvrir au réseau.
       - "${PORTUNIA_GATE_PORTAL_PORT:-127.0.0.1:8446}:8446"
     volumes:
