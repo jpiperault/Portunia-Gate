@@ -111,10 +111,10 @@ An interrupted install (power cut, error) resumes when you run the wizard again:
 
 ### Unattended install
 
-Without a terminal, the wizard uses the suggested values, or those of the `PORTUNIA_GATE_NOM`, `PORTUNIA_GATE_ADMIN`, `PORTUNIA_GATE_SSH_PORT`, `PORTUNIA_GATE_API_PORT` and `TZ` variables:
+Without a terminal, the wizard uses the suggested values, or those of the `PORTUNIA_GATE_NAME`, `PORTUNIA_GATE_ADMIN`, `PORTUNIA_GATE_SSH_PORT`, `PORTUNIA_GATE_API_PORT` and `TZ` variables:
 
 ```bash
-sudo PORTUNIA_GATE_ADMIN=julien PORTUNIA_GATE_NOM="ACME Gate" bash installer.sh </dev/null
+sudo PORTUNIA_GATE_ADMIN=julien PORTUNIA_GATE_NAME="ACME Gate" bash installer.sh </dev/null
 ```
 
 ### Harden the server (optional)

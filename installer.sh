@@ -17,9 +17,10 @@
 # Messages are in French when the system's language is French (LANG=fr_…), in English otherwise;
 # PORTUNIA_GATE_LANG=en or fr chooses.
 #
-# Without a terminal (automation), answers come from PORTUNIA_GATE_NOM, PORTUNIA_GATE_ADMIN, PORTUNIA_GATE_SSH_PORT,
-# PORTUNIA_GATE_API_PORT and TZ, or the defaults. PORTUNIA_GATE_DURCIR=oui allows hardening without a terminal
-# (access then unchecked), PORTUNIA_GATE_GARDER lists services to keep, PORTUNIA_GATE_DURCIR_PAQUETS=oui removes packages.
+# Without a terminal (automation), answers come from PORTUNIA_GATE_NAME, PORTUNIA_GATE_ADMIN, PORTUNIA_GATE_SSH_PORT,
+# PORTUNIA_GATE_API_PORT and TZ, or the defaults. PORTUNIA_GATE_HARDEN=yes allows hardening without a terminal
+# (access then unchecked), PORTUNIA_GATE_KEEP lists services to keep, PORTUNIA_GATE_HARDEN_PACKAGES=yes removes packages.
+# French names are kept: PORTUNIA_GATE_NOM, PORTUNIA_GATE_DURCIR=oui, PORTUNIA_GATE_GARDER, PORTUNIA_GATE_DURCIR_PAQUETS=oui.
 set -euo pipefail
 
 RELEASES=${PORTUNIA_GATE_RELEASES:-https://github.com/jpiperault/Portunia-Gate-releases/releases/latest/download}
@@ -78,16 +79,22 @@ while [ $# -gt 0 ]; do
     update | mise-a-jour) ACTION=update ;;
     portal | portail) ACTION=portal ;;
     relay | relais) ACTION=relay; ACTION_ARG=${2:-}; RELAY_NAME=${3:-portunia-gate-relais}; [ -z "${2:-}" ] || shift; [ -z "${3:-}" ] || shift ;;
-    *) die "$(t "Usage: $0 [--docker] [--package FILE.deb] [--harden] [info | update | admin LOGIN | portal | harden]" "Usage : $0 [--docker] [--paquet FICHIER.deb] [info | mise-a-jour | admin IDENTIFIANT | portail]")" ;;
+    *) die "$(t "Usage: $0 [--docker] [--package FILE.deb] [--harden] [info | update | admin LOGIN | portal | harden [plan | status | undo] | relay CODE [NAME]]" "Usage : $0 [--docker] [--paquet FICHIER.deb] [--durcir] [info | mise-a-jour | admin IDENTIFIANT | portail | durcir [simulation | etat | annuler] | relais CODE [NOM]]")" ;;
   esac
   shift
 done
 
 if [ "$(id -u)" -ne 0 ]; then
   command -v sudo >/dev/null || die "$(t "Run the assistant as root." "Lancez l'assistant en root.")"
-  exec sudo --preserve-env=PORTUNIA_GATE_NOM,PORTUNIA_GATE_ADMIN,PORTUNIA_GATE_SSH_PORT,PORTUNIA_GATE_API_PORT,TZ,PORTUNIA_GATE_RELEASES,PORTUNIA_GATE_TUNNEL_TOKEN,PORTUNIA_GATE_LANG,PORTUNIA_GATE_DURCIR,PORTUNIA_GATE_GARDER,PORTUNIA_GATE_DURCIR_PAQUETS -- "$SELF" "${ARGS[@]}"
+  exec sudo --preserve-env=PORTUNIA_GATE_NOM,PORTUNIA_GATE_ADMIN,PORTUNIA_GATE_SSH_PORT,PORTUNIA_GATE_API_PORT,TZ,PORTUNIA_GATE_RELEASES,PORTUNIA_GATE_TUNNEL_TOKEN,PORTUNIA_GATE_LANG,PORTUNIA_GATE_DURCIR,PORTUNIA_GATE_GARDER,PORTUNIA_GATE_DURCIR_PAQUETS,PORTUNIA_GATE_NAME,PORTUNIA_GATE_HARDEN,PORTUNIA_GATE_KEEP,PORTUNIA_GATE_HARDEN_PACKAGES -- "$SELF" "${ARGS[@]}"
 fi
 BACKUP_OWNER=${SUDO_USER:-root}
+
+# Variables d'automatisation : noms anglais, ou français (gardés). Oui/yes indifféremment.
+GATE_NAME=${PORTUNIA_GATE_NAME:-${PORTUNIA_GATE_NOM:-}}
+GATE_HARDEN=${PORTUNIA_GATE_HARDEN:-${PORTUNIA_GATE_DURCIR:-}}
+GATE_KEEP=${PORTUNIA_GATE_KEEP:-${PORTUNIA_GATE_GARDER:-}}
+GATE_HARDEN_PACKAGES=${PORTUNIA_GATE_HARDEN_PACKAGES:-${PORTUNIA_GATE_DURCIR_PAQUETS:-no}}
 
 address() { hostname -I 2>/dev/null | awk '{print $1}'; }
 container() { [ "$(systemd-detect-virt -c 2>/dev/null)" != none ]; }
@@ -356,7 +363,7 @@ questions() {
   PORTUNIA_GATE_SSH_PORT=${PORTUNIA_GATE_SSH_PORT:-$(env_value PORTUNIA_GATE_SSH_PORT)}
   PORTUNIA_GATE_API_PORT=${PORTUNIA_GATE_API_PORT:-$(env_value PORTUNIA_GATE_API_PORT)}
   TZ=${TZ:-$(env_value TZ)}
-  NOM=$(ask "$(t "Gate name, shown in Portunia" "Nom de la Gate, affiché dans Portunia")" "${PORTUNIA_GATE_NOM:-Portunia Gate}")
+  NOM=$(ask "$(t "Gate name, shown in Portunia" "Nom de la Gate, affiché dans Portunia")" "${GATE_NAME:-Portunia Gate}")
   while :; do
     ADMIN=$(ask "$(t "Administrator login" "Identifiant de l'administrateur")" "${PORTUNIA_GATE_ADMIN:-admin}")
     [[ "$ADMIN" =~ ^[a-z0-9][a-z0-9._-]{0,31}$ ]] && break
@@ -772,7 +779,7 @@ harden_has_key() {
   [ -s "${home:-/root}/.ssh/authorized_keys" ]
 }
 
-harden_extra_kept() { echo " ${PORTUNIA_GATE_GARDER:-} ${HARDEN_KEEP:-} " | tr ',' ' '; }
+harden_extra_kept() { echo " ${GATE_KEEP:-} ${HARDEN_KEEP:-} " | tr ',' ' '; }
 
 # Services et sockets activés qui ne servent ni au système ni à la Gate.
 harden_unneeded() {
@@ -924,7 +931,7 @@ harden_packages() {
   local list
   list=$(harden_packages_present | paste -sd' ' -)
   [ -n "$list" ] || return 0
-  local answer=${PORTUNIA_GATE_DURCIR_PAQUETS:-non}
+  local answer=$GATE_HARDEN_PACKAGES
   if interactive; then
     read -r -p "  $(t "Remove these packages for good? ($list) [y/N]:" "Retirer ces paquets définitivement ? ($list) [o/N] :") " answer || answer=''
   fi
@@ -959,8 +966,8 @@ harden_apply() {
   if interactive; then
     HARDEN_KEEP=$(ask "$(t "Services to keep, separated by spaces (monitoring, backup…)" "Services à garder, séparés par des espaces (supervision, sauvegarde…)")" "")
     confirm "$(t "Harden this server?" "Durcir ce serveur ?")" || { warn "$(t "Nothing was changed." "Rien n'a été modifié.")"; return 0; }
-  elif [ "${PORTUNIA_GATE_DURCIR:-}" != oui ]; then
-    die "$(t "Without a terminal, set PORTUNIA_GATE_DURCIR=oui." "Sans terminal, indiquez PORTUNIA_GATE_DURCIR=oui.")"
+  elif [ "$GATE_HARDEN" != yes ] && [ "$GATE_HARDEN" != oui ]; then
+    die "$(t "Without a terminal, set PORTUNIA_GATE_HARDEN=yes." "Sans terminal, indiquez PORTUNIA_GATE_DURCIR=oui.")"
   fi
   install -d -m 700 "$HARDEN_DIR"
   step "$(t "Access" "Accès")"
