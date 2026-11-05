@@ -66,14 +66,14 @@ function connect() {
     } else if (msg.t === 'ferme') {
       closedByServer = true;
       clearInterval(warnTimer);
-      showNotice(T('Session closed', 'Session fermée'), msg.raison || '', [[T('Reopen', 'Rouvrir'), connect, true], [T('My servers', 'Mes serveurs'), () => { location.href = '/'; }]]);
+      showNotice(T('Session closed', 'Session fermée'), msg.raison || '', [[T('Reopen', 'Rouvrir'), connect, true], [T('My servers', 'Mes serveurs'), () => { location.href = '/?accueil'; }]]);
     }
   });
   ws.addEventListener('close', (e) => {
     if (closedByServer) return;
     clearInterval(warnTimer);
     const text = e.code === 1006 ? T('Connection lost, or web session expired.', 'Connexion perdue, ou session web expirée.') : T('The connection to the Gate is closed.', 'La connexion à la Gate est fermée.');
-    showNotice(T('Session closed', 'Session fermée'), text, [[T('Reopen', 'Rouvrir'), connect, true], [T('My servers', 'Mes serveurs'), () => { location.href = '/'; }]]);
+    showNotice(T('Session closed', 'Session fermée'), text, [[T('Reopen', 'Rouvrir'), connect, true], [T('My servers', 'Mes serveurs'), () => { location.href = '/?accueil'; }]]);
   });
   term.focus();
 }
@@ -114,7 +114,7 @@ document.getElementById('fermer').addEventListener('click', () => {
   closedByServer = true;
   if (ws) ws.close();
   window.close();
-  showNotice(T('Session closed', 'Session fermée'), T('You can close this tab.', 'Vous pouvez fermer cet onglet.'), [[T('My servers', 'Mes serveurs'), () => { location.href = '/'; }, true]]);
+  showNotice(T('Session closed', 'Session fermée'), T('You can close this tab.', 'Vous pouvez fermer cet onglet.'), [[T('My servers', 'Mes serveurs'), () => { location.href = '/?accueil'; }, true]]);
 });
 // Sans copier-coller autorisé : pas de collage dans le terminal.
 document.getElementById('term').addEventListener('paste', (e) => { if (!clipboard) { e.preventDefault(); e.stopPropagation(); } }, true);
@@ -135,7 +135,7 @@ document.getElementById('term').addEventListener('paste', (e) => { if (!clipboar
       document.getElementById('mode').textContent = { coffre: T('Vault', 'Coffre'), enregistre: T('Recorded', 'Enregistré'), rebond: T('Jump', 'Rebond') }[s.mode] || s.mode;
       document.getElementById('rec').hidden = s.mode === 'rebond';
     }
-    if (!etat.connecte) { location.href = '/'; return; }
+    if (!etat.connecte) { location.href = '/?accueil'; return; }
   } catch { /* le terminal dira s'il ne peut pas se connecter */ }
   connect();
 })();

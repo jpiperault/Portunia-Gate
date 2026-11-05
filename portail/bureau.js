@@ -63,7 +63,7 @@ async function open(user, password, domain) {
   // Jeton à usage unique pour ce serveur, demandé avec la session du portail.
   const res = await fetch(`/api/rdp/${encodeURIComponent(nom)}`, { method: 'POST', credentials: 'same-origin', headers: { 'X-Portunia-Gate': 'portail' } });
   const data = await res.json().catch(() => ({}));
-  if (res.status === 401) { location.href = '/'; return; }
+  if (res.status === 401) { location.href = '/?accueil'; return; }
   if (!res.ok) throw new Error(data.erreur || T('Server unavailable', 'Serveur indisponible'));
   await ready;
 
@@ -107,7 +107,7 @@ async function open(user, password, domain) {
   followSize();
   const end = await session.run();
   sizeWatch?.disconnect();
-  showNotice(T('Session closed', 'Session fermée'), end?.reason?.() || T('The Remote Desktop session has ended.', 'La session Bureau à distance est terminée.'), [[T('Reopen', 'Rouvrir'), () => location.reload(), true], [T('My servers', 'Mes serveurs'), () => { location.href = '/'; }]]);
+  showNotice(T('Session closed', 'Session fermée'), end?.reason?.() || T('The Remote Desktop session has ended.', 'La session Bureau à distance est terminée.'), [[T('Reopen', 'Rouvrir'), () => location.reload(), true], [T('My servers', 'Mes serveurs'), () => { location.href = '/?accueil'; }]]);
 }
 
 // Copie de fichiers par le presse-papiers. Envoyer : fichiers déposés sur le bureau ou choisis,
@@ -301,13 +301,13 @@ fullButton.addEventListener('click', () => {
 document.getElementById('fermer').addEventListener('click', () => {
   ui?.shutdown();
   window.close();
-  showNotice(T('Session closed', 'Session fermée'), T('You can close this tab.', 'Vous pouvez fermer cet onglet.'), [[T('My servers', 'Mes serveurs'), () => { location.href = '/'; }, true]]);
+  showNotice(T('Session closed', 'Session fermée'), T('You can close this tab.', 'Vous pouvez fermer cet onglet.'), [[T('My servers', 'Mes serveurs'), () => { location.href = '/?accueil'; }, true]]);
 });
 
 // Compte proposé par le serveur (s'il est déclaré), et vérification de la session du portail.
 (async () => {
   const etat = await fetch('/api/etat', { credentials: 'same-origin' }).then((r) => r.json()).catch(() => ({}));
-  if (!etat.connecte) { location.href = '/'; return; }
+  if (!etat.connecte) { location.href = '/?accueil'; return; }
   const list = await fetch('/api/serveurs', { credentials: 'same-origin' }).then((r) => (r.ok ? r.json() : { serveurs: [] })).catch(() => ({ serveurs: [] }));
   const s = (list.serveurs || []).find((x) => x.nom === nom);
   // Coffre : rien à demander, la session s'ouvre tout de suite (le bouton sert à réessayer).

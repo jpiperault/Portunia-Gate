@@ -719,13 +719,23 @@ fn page(html: &'static str) -> Response {
         .into_response()
 }
 
-/// Racine du portail. Venue d'une page d'un serveur web (le portail n'envoie jamais
-/// d'adresse d'origine, ses pages sont en « no-referrer ») : racine de ce serveur.
+/// Racine du portail. Ses propres pages y reviennent par « /?accueil ». « / » seul, demandé
+/// depuis une page du site (lien, redirection en JavaScript : beaucoup d'applications sont en
+/// « no-referrer ») alors qu'une interface web est ouverte : racine de cette interface.
+/// Adresse tapée ou favori (`Sec-Fetch-Site: none`) : accueil du portail.
 async fn page_index(st: Ctx, peer: ConnectInfo<SocketAddr>, req: axum::extract::Request) -> Response {
-    if req.headers().contains_key(header::REFERER) && crate::webproxy::cookie(req.headers(), crate::webproxy::APP_COOKIE).is_some() {
+    if web_root_request(req.uri().query(), req.headers()) {
         return web_fallback(st, peer, req).await;
     }
     page(INDEX)
+}
+
+fn web_root_request(query: Option<&str>, headers: &HeaderMap) -> bool {
+    if query.is_some_and(|q| q.split('&').any(|p| p == "accueil")) || crate::webproxy::cookie(headers, crate::webproxy::APP_COOKIE).is_none() {
+        return false;
+    }
+    let site = headers.get("sec-fetch-site").and_then(|v| v.to_str().ok());
+    headers.contains_key(header::REFERER) || site == Some("same-origin")
 }
 
 async fn page_session(Path(_nom): Path<String>) -> Response {
@@ -1335,6 +1345,25 @@ pub fn seal_turnstile(state: &State, secret: &str) -> Result<String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn racine_accueil_ou_interface_web() {
+        let headers = |pairs: &[(&'static str, &'static str)]| {
+            let mut h = HeaderMap::new();
+            for (k, v) in pairs {
+                h.insert(*k, HeaderValue::from_static(v));
+            }
+            h
+        };
+        let app = ("cookie", "portunia_gate_web=mail");
+        // Redirection de l'application en JavaScript, sans Referer : vers l'application.
+        assert!(web_root_request(None, &headers(&[app, ("sec-fetch-site", "same-origin")])));
+        assert!(web_root_request(None, &headers(&[app, ("referer", "https://gate/web/mail/login")])));
+        // Accueil demandé par le portail, adresse tapée, ou aucune interface ouverte : portail.
+        assert!(!web_root_request(Some("accueil"), &headers(&[app, ("sec-fetch-site", "same-origin")])));
+        assert!(!web_root_request(None, &headers(&[app, ("sec-fetch-site", "none")])));
+        assert!(!web_root_request(None, &headers(&[("sec-fetch-site", "same-origin")])));
+    }
+
     #[tokio::test]
     async fn ressource_compressee() {
         let body: &'static [u8] = include_bytes!("../portail/iron-remote-desktop-rdp.js");
@@ -1468,7 +1497,7 @@ async fn web_open(AxState(portal): Ctx, ConnectInfo(peer): ConnectInfo<SocketAdd
             return Ok(err(StatusCode::SERVICE_UNAVAILABLE, t!("Portal closed", "Portail fermé")));
         }
         let Some(w) = web_session(&portal, &headers, &s).await? else {
-            return Ok((StatusCode::FOUND, [(header::LOCATION, "/")]).into_response());
+            return Ok((StatusCode::FOUND, [(header::LOCATION, "/?accueil")]).into_response());
         };
         let target = model::target_by_name(&state.db, &nom).await?.filter(|t| t.is_web());
         let Some(target) = target else {
@@ -1515,7 +1544,7 @@ async fn web_proxy(portal: &Portal, peer: SocketAddr, nom: &str, path: String, r
             return Ok(Err(err(StatusCode::SERVICE_UNAVAILABLE, t!("Portal closed", "Portail fermé"))));
         }
         let Some(w) = web_session(portal, &headers, &s).await? else {
-            return Ok(Err((StatusCode::FOUND, [(header::LOCATION, "/")]).into_response()));
+            return Ok(Err((StatusCode::FOUND, [(header::LOCATION, "/?accueil")]).into_response()));
         };
         let target = model::target_by_name(&state.db, nom).await?.filter(|t| t.is_web());
         match target {

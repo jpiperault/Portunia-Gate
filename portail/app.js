@@ -3,6 +3,10 @@
 
 const app = document.getElementById('app');
 
+// Accueil du portail : toujours « /?accueil ». « / » seul, demandé depuis une page du site
+// alors qu'une interface web est ouverte, revient à cette interface (voir portal.rs).
+if (location.pathname === '/' && !location.search) history.replaceState(null, '', '/?accueil');
+
 // Langue de la page, choisie par la Gate (cookie du sélecteur, sinon langue du navigateur).
 const FR = document.documentElement.lang === 'fr';
 const T = (en, fr) => (FR ? fr : en);
