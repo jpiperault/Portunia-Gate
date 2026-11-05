@@ -436,6 +436,7 @@ async fn servers(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
                 "port": t.port,
                 "compte": t.account,
                 "protocole": t.protocole,
+                "description": t.description,
                 "sftp": access.sftp && t.vaulted(),
                 "tunnels": access.tunnels && t.vaulted(),
                 // Entrée RDP native ouverte pour ce serveur (fichier .rdp pour mstsc, Remmina…).
@@ -563,6 +564,9 @@ struct TargetBody {
     /// Interface web en mode coffre : auto (par défaut), remplir ou basic.
     #[serde(default)]
     connexion_web: Option<String>,
+    /// Texte de la vignette ; absent : inchangé (modification) ou vide (création).
+    #[serde(default)]
+    description: Option<String>,
 }
 
 fn default_port() -> i32 {
@@ -586,6 +590,7 @@ fn target_json(t: &model::Target) -> Value {
         "empreinte": t.host_key,
         "protocole": t.protocole,
         "connexion_web": t.web_connexion,
+        "description": t.description,
     })
 }
 
@@ -616,6 +621,9 @@ fn check_target(body: &TargetBody) -> Result<(), ApiError> {
     }
     if let Some(w) = &body.connexion_web {
         model::web_login(w).map_err(|e| err(StatusCode::BAD_REQUEST, e.to_string()))?;
+    }
+    if let Some(d) = &body.description {
+        model::check_description(d).map_err(|e| err(StatusCode::BAD_REQUEST, e.to_string()))?;
     }
     Ok(())
 }
@@ -667,6 +675,7 @@ async fn admin_target_create(AxState(api): Ctx, headers: HeaderMap, Json(body): 
         host_key: None,
         protocole: body.protocole.clone(),
         web_connexion: web_login_of(body.connexion_web.as_deref(), "auto"),
+        description: body.description.clone().unwrap_or_default(),
     };
     let secret = match body.secret {
         Some(s) => Some(resolve_secret(&api, &actor.login, &probe, s).await?),
@@ -682,6 +691,7 @@ async fn admin_target_create(AxState(api): Ctx, headers: HeaderMap, Json(body): 
         secret_kind: secret.as_ref().map(|s| s.0.clone()).unwrap_or_else(|| "none".into()),
         protocole: probe.protocole.clone(),
         web_connexion: probe.web_connexion.clone(),
+        description: probe.description.clone(),
     };
     let keys = &api.state.keys;
     let id = model::create_target(&api.state.db, new, |id| match &secret {
@@ -737,7 +747,7 @@ async fn admin_target_update(AxState(api): Ctx, headers: HeaderMap, Path(id): Pa
     }
     sqlx::query(
         "UPDATE targets SET name = $2, folder = $3, host = $4, port = $5, mode = $6, account = $7, secret_kind = $8, secret = $9, host_key = $10,
-                protocole = $11, web_connexion = $12
+                protocole = $11, web_connexion = $12, description = $13
          WHERE id = $1",
     )
     .bind(id)
@@ -752,6 +762,10 @@ async fn admin_target_update(AxState(api): Ctx, headers: HeaderMap, Path(id): Pa
     .bind(&probe.host_key)
     .bind(&body.protocole)
     .bind(web_login_of(body.connexion_web.as_deref(), &current.web_connexion))
+    .bind(match &body.description {
+        Some(d) => model::check_description(d).unwrap_or_default(),
+        None => current.description.clone(),
+    })
     .execute(db)
     .await
     .map_err(|e| match &e {

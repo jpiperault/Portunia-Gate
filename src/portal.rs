@@ -1086,7 +1086,7 @@ async fn servers(AxState(portal): Ctx, headers: HeaderMap) -> Response {
             .iter()
             .map(|t| {
                 json!({
-                    "nom": t.name, "dossier": t.folder, "protocole": t.protocole,
+                    "nom": t.name, "dossier": t.folder, "protocole": t.protocole, "description": t.description,
                     "mode": t.mode, "compte": t.account, "indisponible": web_ready(t),
                 })
             })

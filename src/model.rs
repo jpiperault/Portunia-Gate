@@ -254,6 +254,8 @@ pub struct Target {
     pub protocole: String,
     /// Interface web en mode coffre : auto, remplir ou basic (voir webvault.rs).
     pub web_connexion: String,
+    /// Texte de la vignette (portail, Portunia) ; vide : texte automatique.
+    pub description: String,
 }
 
 /// Protocole et mode compatibles. Bureau à distance : rebond (la Gate relaie la connexion
@@ -315,7 +317,7 @@ impl Target {
     }
 }
 
-const TARGET_COLUMNS: &str = "id, name, folder, host, port, mode, account, secret_kind, secret, host_key, protocole, web_connexion";
+const TARGET_COLUMNS: &str = "id, name, folder, host, port, mode, account, secret_kind, secret, host_key, protocole, web_connexion, description";
 
 pub async fn target_by_id(db: &PgPool, id: Uuid) -> Result<Option<Target>> {
     Ok(sqlx::query_as(&format!("SELECT {TARGET_COLUMNS} FROM targets WHERE id = $1"))
@@ -364,6 +366,16 @@ pub struct NewTarget {
     pub secret_kind: String,
     pub protocole: String,
     pub web_connexion: String,
+    pub description: String,
+}
+
+/// Description d'un serveur : une ligne, 200 caractères au plus.
+pub fn check_description(text: &str) -> Result<String> {
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.chars().count() > 200 {
+        bail!(t!("Description: 200 characters at most", "Description : 200 caractères au plus"));
+    }
+    Ok(text)
 }
 
 pub async fn create_target(db: &PgPool, t: NewTarget, seal: impl FnOnce(Uuid) -> Result<Option<Vec<u8>>>) -> Result<Uuid> {
@@ -377,8 +389,8 @@ pub async fn create_target(db: &PgPool, t: NewTarget, seal: impl FnOnce(Uuid) ->
     let id = Uuid::new_v4();
     let secret = seal(id)?;
     sqlx::query(
-        "INSERT INTO targets (id, name, folder, host, port, mode, account, secret_kind, secret, protocole, web_connexion)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+        "INSERT INTO targets (id, name, folder, host, port, mode, account, secret_kind, secret, protocole, web_connexion, description)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
     )
     .bind(id)
     .bind(&t.name)
@@ -391,6 +403,7 @@ pub async fn create_target(db: &PgPool, t: NewTarget, seal: impl FnOnce(Uuid) ->
     .bind(secret)
     .bind(&t.protocole)
     .bind(&t.web_connexion)
+    .bind(check_description(&t.description)?)
     .execute(db)
     .await
     .map_err(|e| if is_unique(&e) { anyhow!(t!(format!("Target « {} » already exists", t.name), format!("La cible « {} » existe déjà", t.name))) } else { e.into() })?;
@@ -748,5 +761,12 @@ mod tests {
             ..all
         };
         assert!(!elsewhere.active_now());
+    }
+
+    #[test]
+    fn description_sur_une_ligne() {
+        assert_eq!(check_description("  Messagerie  de\n l'agence ").unwrap(), "Messagerie de l'agence");
+        assert!(check_description(&"x".repeat(200)).is_ok());
+        assert!(check_description(&"x".repeat(201)).is_err());
     }
 }

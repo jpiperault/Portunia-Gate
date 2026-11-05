@@ -155,7 +155,7 @@ async function home(state) {
   const count = h('span', { class: 'who' });
   const render = () => {
     const q = search.value.trim().toLowerCase();
-    const list = data.serveurs.filter((s) => !q || s.nom.toLowerCase().includes(q) || s.dossier.toLowerCase().includes(q));
+    const list = data.serveurs.filter((s) => !q || s.nom.toLowerCase().includes(q) || s.dossier.toLowerCase().includes(q) || (s.description || '').toLowerCase().includes(q));
     grid.replaceChildren();
     const folders = [...new Set(list.map((s) => s.dossier))].sort((a, b) => a.localeCompare(b));
     for (const f of folders) {
@@ -169,6 +169,7 @@ async function home(state) {
           h('b', {}, s.nom),
           h('span', { class: 'tags' }, h('span', { class: `tag ${s.protocole}` }, s.protocole.toUpperCase()), h('span', { class: `tag${s.mode === 'rebond' ? ' plain' : ''}` }, MODES[s.mode] || s.mode)),
           h('small', {}, !ready ? s.indisponible
+            : s.description ? s.description
             : WEB.includes(s.protocole) ? T('Web interface in a tab, through the Gate; pages visited are logged', 'Interface web dans un onglet, par la Gate ; pages visitées journalisées')
             : s.protocole === 'rdp' && s.mode === 'coffre' ? T('Remote Desktop in a tab; signed in by the Gate', 'Bureau à distance dans un onglet ; session ouverte par la Gate')
             : s.protocole === 'rdp' && s.mode === 'rebond' ? T('Remote Desktop in a tab, not recorded; Windows credentials asked', 'Bureau à distance dans un onglet, non enregistré ; identifiants Windows demandés')

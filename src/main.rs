@@ -421,6 +421,9 @@ enum TargetCmd {
         /// Web interface in vault mode: auto (fills the sign-in form and submits it; HTTP authentication if the server asks), fill (fills only) or basic (HTTP authentication always).
         #[arg(long, default_value = "auto")]
         web_login: String,
+        /// Text shown on the server's tile in the web portal and in Portunia (200 characters at most).
+        #[arg(long, default_value = "")]
+        description: String,
     },
     /// Lists servers.
     List,
@@ -452,6 +455,9 @@ enum TargetCmd {
         /// Web interface in vault mode: auto, fill or basic.
         #[arg(long)]
         web_login: Option<String>,
+        /// Text shown on the server's tile; empty: automatic text.
+        #[arg(long)]
+        description: Option<String>,
     },
     /// Replaces the vault secret: --password, --key-file, or --generate (SSH: the Gate creates a key and installs it).
     Secret {
@@ -1546,6 +1552,7 @@ async fn target_cmd(state: &State, cmd: TargetCmd) -> Result<()> {
             password,
             key_file,
             web_login,
+            description,
         } => {
             let port = port.unwrap_or(match protocol.as_str() { "rdp" => 3389, "https" => 443, "http" => 80, _ => 22 });
             let web = matches!(protocol.as_str(), "http" | "https");
@@ -1568,6 +1575,7 @@ async fn target_cmd(state: &State, cmd: TargetCmd) -> Result<()> {
                 secret_kind: kind,
                 protocole: protocol.clone(),
                 web_connexion: web_login,
+                description,
             };
             model::create_target(db, new, |id| match &secret {
                 Some((_, plain)) => Ok(Some(state.keys.seal(&format!("cible:{id}"), plain)?)),
@@ -1608,6 +1616,7 @@ async fn target_cmd(state: &State, cmd: TargetCmd) -> Result<()> {
             password,
             key_file,
             web_login,
+            description,
         } => {
             let current = find_target(db, &name).await?;
             let mut t = current.clone();
@@ -1637,6 +1646,9 @@ async fn target_cmd(state: &State, cmd: TargetCmd) -> Result<()> {
             }
             if let Some(w) = web_login {
                 t.web_connexion = model::web_login(&w)?;
+            }
+            if let Some(d) = description {
+                t.description = model::check_description(&d)?;
             }
             model::check_protocol(&t.protocole, &t.mode)?;
             if !["rebond", "enregistre", "coffre"].contains(&t.mode.as_str()) {
@@ -1727,7 +1739,7 @@ async fn find_target(db: &PgPool, name: &str) -> Result<model::Target> {
 async fn save_target(db: &PgPool, t: &model::Target) -> Result<()> {
     sqlx::query(
         "UPDATE targets SET name = $2, folder = $3, host = $4, port = $5, mode = $6, account = $7, secret_kind = $8, secret = $9, host_key = $10,
-                web_connexion = $11
+                web_connexion = $11, description = $12
          WHERE id = $1",
     )
     .bind(t.id)
@@ -1741,6 +1753,7 @@ async fn save_target(db: &PgPool, t: &model::Target) -> Result<()> {
     .bind(&t.secret)
     .bind(&t.host_key)
     .bind(&t.web_connexion)
+    .bind(&t.description)
     .execute(db)
     .await
     .map_err(|e| match &e {

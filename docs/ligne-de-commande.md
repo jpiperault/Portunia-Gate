@@ -76,6 +76,7 @@ sudo portunia-gate target add srv-ad-01 --host 10.0.3.10 --protocol rdp --mode e
 sudo portunia-gate target list                            # protocole, adresse, mode, compte, empreinte
 sudo portunia-gate target edit web-01 --folder Prod --account admin    # aussi --rename, --host, --port, --mode
 sudo portunia-gate target edit web-01 --host 10.0.1.21 --password      # nouvelle adresse : secret à redonner, empreinte oubliée
+sudo portunia-gate target edit mail --description "Messagerie de l'agence"   # texte de la vignette dans le portail et Portunia (0.33 ; vide : texte automatique)
 sudo portunia-gate target secret web-01 --password        # remplace le secret du coffre (ou --key-file FICHIER)
 sudo portunia-gate target secret app-02 --generate        # SSH : la Gate crée une clé, l'installe avec le mot de passe actuel, puis l'oublie
 sudo portunia-gate target forget srv-ad-01                # serveur réinstallé : oublie son empreinte
