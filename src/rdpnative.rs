@@ -20,7 +20,10 @@
 use std::{
     collections::HashMap,
     net::SocketAddr,
-    sync::{Arc, LazyLock, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, LazyLock, Mutex,
+    },
     time::{Duration, Instant},
 };
 
@@ -28,7 +31,7 @@ use anyhow::{anyhow, bail, Result};
 use rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer};
 use serde_json::json;
 use tokio::{
-    io::AsyncWriteExt,
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     sync::Semaphore,
 };
@@ -390,18 +393,39 @@ async fn jump(state: &Arc<State>, a: Allowed, mut client: TcpStream, request: &R
     audit::note(db, &user.login, "rebond.ouvert", json!({ "session": id, "cible": target.name, "protocole": "rdp", "adresse": a.addr })).await;
     let started = Instant::now();
     let (_watch, mut cut) = state.live.watch(crate::live::Watched { user: user.id, login: &user.login, target: Some(target), web: false, recorded: false });
-    let (reason, bytes) = tokio::select! {
-        r = tokio::io::copy_bidirectional(&mut client, &mut server) => match r {
-            Ok((up, down)) => ("fin".to_string(), up + down),
-            Err(_) => ("réseau".to_string(), 0),
-        },
-        why = cut.reason() => (why, 0),
+    // Chaque sens compte ses octets : un poste qui coupe brutalement ne les efface pas.
+    let moved = AtomicU64::new(0);
+    let reason = {
+        let (mut client_read, mut client_write) = client.split();
+        let (mut server_read, mut server_write) = server.split();
+        tokio::select! {
+            _ = pump(&mut client_read, &mut server_write, &moved) => "client".to_string(),
+            _ = pump(&mut server_read, &mut client_write, &moved) => "serveur".to_string(),
+            why = cut.reason() => why,
+        }
     };
     let _ = server.shutdown().await;
     let _ = client.shutdown().await;
+    let bytes = moved.load(Ordering::Relaxed);
     model::session_end(db, id, model::Finished { recording: None, sha256: None, signature: None, bytes: bytes as i64 }).await?;
     audit::note(db, &user.login, "rebond.ferme", json!({ "session": id, "cible": target.name, "duree_s": started.elapsed().as_secs(), "octets": bytes, "fin": reason })).await;
     Ok(())
+}
+
+/// Copie dans un sens jusqu'à la fin de la connexion (ou une erreur), en comptant les octets.
+async fn pump(from: &mut (impl AsyncRead + Unpin), to: &mut (impl AsyncWrite + Unpin), moved: &AtomicU64) {
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        match from.read(&mut buf).await {
+            Ok(0) | Err(_) => return,
+            Ok(n) => {
+                if to.write_all(&buf[..n]).await.is_err() {
+                    return;
+                }
+                moved.fetch_add(n as u64, Ordering::Relaxed);
+            }
+        }
+    }
 }
 
 #[cfg(test)]

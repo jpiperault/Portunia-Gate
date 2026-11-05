@@ -22,6 +22,7 @@ import json
 import os
 import secrets
 import shutil
+import signal
 import ssl
 import struct
 import subprocess
@@ -209,17 +210,24 @@ class Report:
         self.rows = []
 
     def check(self, ident, title, fn):
+        """`fn` renvoie un détail, ou {"detail", "preuve", "capture"} ; une exception = échec.
+        Les preuves et captures d'un essai qui échoue restent dans `EVIDENCE` pour le rapport."""
         start = time.time()
+        EVIDENCE.clear()
         try:
-            detail = fn() or ""
+            result = fn() or ""
             ok = True
         except Skip as e:
             self.rows.append({"id": ident, "titre": title, "resultat": "sauté", "detail": str(e), "duree_s": 0})
             print(f"  –  {ident} {title} : sauté ({e})")
             return
         except Exception as e:  # noqa: BLE001 : chaque essai rapporte son échec et la recette continue
-            detail, ok = str(e), False
-        self.rows.append({"id": ident, "titre": title, "resultat": "ok" if ok else "ÉCHEC", "detail": detail, "duree_s": round(time.time() - start, 1)})
+            result, ok = str(e), False
+        row = dict(EVIDENCE)
+        row.update(result if isinstance(result, dict) else {"detail": result})
+        row.update({"id": ident, "titre": title, "resultat": "ok" if ok else "ÉCHEC", "duree_s": round(time.time() - start, 1)})
+        self.rows.append(row)
+        detail = row.get("detail", "")
         print(f"  {'✓' if ok else '✗'}  {ident} {title}{' : ' + detail if detail else ''}")
 
     @property
@@ -243,25 +251,65 @@ def freerdp():
     raise Skip("xfreerdp absent (apt install freerdp2-x11 ou freerdp3-x11)")
 
 
-def rdp_session(args, token=None, user=None, password=None, nla=False, seconds=25):
-    """xfreerdp sous Xvfb vers l'entrée native ; renvoie (resté ouvert, fin de sa sortie)."""
-    cmd = ["xvfb-run", "-a", freerdp(), f"/v:127.0.0.1:{args.rdp_port}", "/cert:ignore", "/size:1280x800", "+clipboard"]
+CAPTURES = f"{HOME}/captures"
+# Preuves de l'essai en cours (texte, capture), gardées même s'il échoue.
+EVIDENCE = {}
+
+
+class Screen:
+    """Écran virtuel (Xvfb) où s'affiche xfreerdp, pour en prendre une capture."""
+
+    def __enter__(self):
+        for n in range(50, 90):
+            if not os.path.exists(f"/tmp/.X11-unix/X{n}"):
+                self.display = f":{n}"
+                break
+        self.xvfb = subprocess.Popen(["Xvfb", self.display, "-screen", "0", "1280x800x24", "-nolisten", "tcp"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(1)
+        return self
+
+    def shot(self, name):
+        os.makedirs(CAPTURES, exist_ok=True)
+        path = f"{CAPTURES}/{name}.png"
+        subprocess.run(["import", "-display", self.display, "-window", "root", path], capture_output=True, timeout=30)
+        return os.path.basename(path) if os.path.exists(path) else None
+
+    def __exit__(self, *_):
+        self.xvfb.terminate()
+        self.xvfb.wait(timeout=10)
+
+
+def stop(p):
+    """xfreerdp et ses éventuels enfants, sans les laisser connectés."""
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(p.pid, sig)
+            p.wait(timeout=8)
+            return
+        except (ProcessLookupError, subprocess.TimeoutExpired):
+            continue
+
+
+def rdp_session(args, name, token=None, user=None, password=None, nla=False, seconds=25):
+    """xfreerdp sur un écran virtuel vers l'entrée native ; capture l'écran au bout de `seconds`
+    et renvoie (resté ouvert, fin de sa sortie). La capture va dans EVIDENCE."""
+    cmd = [freerdp(), f"/v:127.0.0.1:{args.rdp_port}", "/cert:ignore", "/size:1280x800", "+clipboard"]
     if token:
         cmd.append(f"/load-balance-info:{token}")
     if user:
         cmd += [f"/u:{user}", f"/p:{password}"]
-    cmd.append("/sec:nla" if nla else "/sec:tls")
-    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=ENV)
-    try:
-        out = p.communicate(timeout=seconds)[0]
-        return False, (out or "").strip()[-300:]
-    except subprocess.TimeoutExpired:
-        p.terminate()
+    # TLS simple (coffre, enregistré) : la Gate ouvre la session Windows ; l'identifiant donné à
+    # xfreerdp n'est là que pour qu'il ne le demande pas au clavier.
+    cmd += ["/sec:nla"] if nla else ["/sec:tls", "/u:portunia", "/p:portunia"]
+    with Screen() as screen:
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=dict(ENV, DISPLAY=screen.display), start_new_session=True)
         try:
-            p.communicate(timeout=10)
+            out = p.communicate(timeout=seconds)[0]
+            return False, (out or "").strip()[-300:]
         except subprocess.TimeoutExpired:
-            p.kill()
-        return True, ""
+            EVIDENCE["capture"] = screen.shot(name)
+            stop(p)
+            return True, ""
 
 
 def sessions_since(api, admin, target, since):
@@ -285,16 +333,42 @@ def native_token(api, user_token, target, account=None, password=None):
 
 
 def recorded_session(api, admin, target, since, kind):
-    time.sleep(3)
-    found = sessions_since(api, admin, target, since)
+    """Session fermée (le relevé des octets et l'enregistrement ne sont complets qu'à la fin)."""
+    found = []
+    for _ in range(30):
+        found = sessions_since(api, admin, target, since)
+        if found and found[0]["fin"]:
+            break
+        time.sleep(1)
     expect(found, f"aucune session {target} au journal des sessions")
     s = found[0]
+    EVIDENCE["preuve"] = (f"session {s['id'][:8]} · {s['compte']} → {s['serveur']} · {s['type']} ({s['detail']})\n"
+                          f"adresse {s['adresse']} · début {s['debut'][:19]} · fin {(s['fin'] or 'en cours')[:19]}\n"
+                          f"{s['octets']} octets relayés · enregistrée : {'oui' if s['enregistree'] else 'non'}")
+    expect(s["fin"], "session toujours ouverte 30 s après la fermeture du client")
     expect("(natif)" in (s["adresse"] or ""), f"adresse sans « (natif) » : {s['adresse']}")
     expect(s["type"] == kind, f"type {s['type']} au lieu de {kind}")
     if kind == "rdp":
         expect(s["enregistree"], "session non enregistrée")
     expect((s["octets"] or 0) > 10_000, f"trop peu d'octets relayés ({s['octets']})")
     return f"{s['octets']} octets, {s['detail']}"
+
+
+def journal_lines(events):
+    return "\n".join(f"{e['date'][11:19]}  {e['qui']}  {e['evenement']}  {json.dumps(e['detail'], ensure_ascii=False)}" for e in reversed(events[:6]))
+
+
+def web_capture(port, ticket, name):
+    """Page publiée par la Gate, vue par un navigateur sans écran (Chromium), si présent."""
+    exe = shutil.which("chromium") or shutil.which("chromium-browser")
+    if not exe or not ticket:
+        return None
+    os.makedirs(CAPTURES, exist_ok=True)
+    path = f"{CAPTURES}/{name}.png"
+    url = f"https://127.0.0.1:{port}/web/entree?jeton={urllib.parse.quote(ticket)}"
+    subprocess.run([exe, "--headless", "--no-sandbox", "--disable-gpu", "--ignore-certificate-errors", "--hide-scrollbars",
+                    "--window-size=1280,800", "--virtual-time-budget=15000", f"--screenshot={path}", url], capture_output=True, timeout=120)
+    return os.path.basename(path) if os.path.exists(path) else None
 
 
 def tests(args, state, api, report, win_password, targets):
@@ -312,7 +386,7 @@ def tests(args, state, api, report, win_password, targets):
         for t in targets:
             if names[t].get("protocole") == "rdp":
                 expect(names[t].get("rdp_natif"), f"{t} sans rdp_natif")
-        return f"{len(targets)} serveurs"
+        return {"detail": f"{len(targets)} serveurs", "preuve": "\n".join(f"{n:<18} {names[n].get('protocole', 'ssh'):<6} {names[n]['mode']:<11} rdp_natif={names[n].get('rdp_natif')}" for n in targets)}
     report.check("API-01", "Liste des serveurs du compte de test", servers)
 
     if want("rdp"):
@@ -327,7 +401,7 @@ def tests(args, state, api, report, win_password, targets):
                 since = now_utc()
                 token, _ = native_token(api, user, f"{PREFIX}win-coffre")
                 used["coffre"] = token
-                stayed, out = rdp_session(args, token)
+                stayed, out = rdp_session(args, "G-RDP-09", token)
                 expect(stayed, f"xfreerdp s'est arrêté : {out}")
                 return recorded_session(api, admin, f"{PREFIX}win-coffre", since, "rdp")
             report.check("G-RDP-09", "RDP natif, coffre (xfreerdp)", vault)
@@ -335,7 +409,7 @@ def tests(args, state, api, report, win_password, targets):
             def recorded():
                 since = now_utc()
                 token, _ = native_token(api, user, f"{PREFIX}win-enr", args.win_user, win_password)
-                stayed, out = rdp_session(args, token)
+                stayed, out = rdp_session(args, "G-RDP-10", token)
                 expect(stayed, f"xfreerdp s'est arrêté : {out}")
                 return recorded_session(api, admin, f"{PREFIX}win-enr", since, "rdp")
             report.check("G-RDP-10", "RDP natif, enregistré avec compte", recorded)
@@ -343,17 +417,17 @@ def tests(args, state, api, report, win_password, targets):
             def recorded_without():
                 since = now_utc()
                 token, _ = native_token(api, user, f"{PREFIX}win-enr")
-                stayed, _ = rdp_session(args, token, seconds=15)
+                stayed, out = rdp_session(args, "G-RDP-11", token, seconds=15)
                 expect(not stayed, "session ouverte sans compte (le serveur n'exige pas NLA ?)")
                 refused = [e for e in events_since(api, admin, f"{PREFIX}win-enr", since) if e["evenement"] == "acces.refuse"]
                 expect(refused, "pas d'acces.refuse au journal")
-                return refused[0]["detail"].get("raison", "")
+                return {"detail": refused[0]["detail"].get("raison", ""), "preuve": journal_lines(refused) + "\n\nxfreerdp : " + out[-200:]}
             report.check("G-RDP-11", "RDP natif, enregistré sans compte refusé", recorded_without)
 
             def jump():
                 since = now_utc()
                 token, _ = native_token(api, user, f"{PREFIX}win-rebond")
-                stayed, out = rdp_session(args, token, user=args.win_user, password=win_password, nla=True)
+                stayed, out = rdp_session(args, "G-RDP-12", token, user=args.win_user, password=win_password, nla=True)
                 expect(stayed, f"xfreerdp s'est arrêté : {out}")
                 return recorded_session(api, admin, f"{PREFIX}win-rebond", since, "rebond")
             report.check("G-RDP-12", "RDP natif, rebond (NLA de bout en bout)", jump)
@@ -363,9 +437,10 @@ def tests(args, state, api, report, win_password, targets):
                 if not token:
                     raise Skip("pas de jeton du coffre (G-RDP-09 a échoué)")
                 since = now_utc()
-                stayed, _ = rdp_session(args, token, seconds=15)
+                stayed, out = rdp_session(args, "G-RDP-13", token, seconds=15)
                 expect(not stayed, "le même fichier a rouvert une session")
                 expect(not sessions_since(api, admin, f"{PREFIX}win-coffre", since), "session ouverte avec un jeton usagé")
+                return {"detail": "connexion fermée par la Gate, aucune session", "preuve": "xfreerdp : " + out[-300:]}
             report.check("G-RDP-13", "Fichier .rdp à usage unique", single_use)
 
             def modes():
@@ -376,6 +451,7 @@ def tests(args, state, api, report, win_password, targets):
                     status, body, _ = api.call("GET", "/api/v1/serveurs", token=user)
                     flag = next(s for s in body["serveurs"] if s["nom"] == f"{PREFIX}win-coffre").get("rdp_natif")
                     expect(flag is False, "rdp_natif toujours vrai pour le coffre")
+                    return {"detail": "fichier refusé (403), entrée retirée du coffre", "preuve": "rdp set --modes rebond,enregistre\nPOST /serveurs/banc-win-coffre/rdp-natif → 403\nGET /serveurs → banc-win-coffre rdp_natif = false"}
                 finally:
                     gate("rdp", "set", "--modes", "rebond,coffre,enregistre")
             report.check("G-RDP-14", "Modes réglables", modes)
@@ -385,6 +461,7 @@ def tests(args, state, api, report, win_password, targets):
                 try:
                     status, _, _ = api.call("POST", f"/api/v1/serveurs/{PREFIX}win-coffre/rdp-natif", {}, token=user)
                     expect(status == 403, f"compte hors du groupe mais fichier donné ({status})")
+                    return {"detail": "fichier refusé (403)", "preuve": "group remove banc-groupe banc-user\nPOST /serveurs/banc-win-coffre/rdp-natif → 403\njournal : acces.refuse « aucune règle active »"}
                 finally:
                     gate("group", "member", f"{PREFIX}groupe", f"{PREFIX}user")
             report.check("G-RDP-16", "Sans règle : refusé", denied)
@@ -396,12 +473,16 @@ def tests(args, state, api, report, win_password, targets):
             since = now_utc()
             status, t, _ = api.call("POST", f"/api/v1/serveurs/{PREFIX}win-ssh/ticket", token=user)
             expect(status == 200, f"jeton : {status} {t}")
+            # Méthode « mot de passe », comme Portunia : en clavier interactif, la Gate attend le vrai mot de passe.
             out = run(["sshpass", "-p", t["ticket"], "ssh", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+                       "-o", "PreferredAuthentications=password", "-o", "PubkeyAuthentication=no",
                        "-p", str(t["port_ssh"]), f"{t['utilisateur_ssh']}@127.0.0.1", "whoami"])
             expect(args.win_user.lower() in out.lower(), f"whoami : {out.strip()}")
             time.sleep(2)
-            expect(sessions_since(api, admin, f"{PREFIX}win-ssh", since), "pas de session au journal")
-            return out.strip()
+            found = sessions_since(api, admin, f"{PREFIX}win-ssh", since)
+            expect(found, "pas de session au journal")
+            s = found[0]
+            return {"detail": out.strip(), "preuve": f"$ ssh -p {t['port_ssh']} {t['utilisateur_ssh']}@gate whoami\n{out.strip()}\n\nsession {s['id'][:8]} · {s['type']} ({s['detail']}) · enregistrée : {'oui' if s['enregistree'] else 'non'}"}
         report.check("G-SSH-01", "SSH au coffre par jeton (commande unique)", ssh_vault)
 
     if want("web") and args.web:
@@ -416,15 +497,19 @@ def tests(args, state, api, report, win_password, targets):
             status, page, _ = api.call("GET", "/", raw=True, headers={"Cookie": cookie})
             expect(status == 200, f"page d'accueil : {status}")
             time.sleep(1)
-            seen = {e["evenement"] for e in events_since(api, admin, f"{PREFIX}web", since)}
+            events = events_since(api, admin, f"{PREFIX}web", since)
+            seen = {e["evenement"] for e in events}
             expect("web.ouvert" in seen, f"journal sans web.ouvert ({seen})")
-            return f"{len(page)} octets, {sorted(seen)}"
+            # Capture de la page telle que l'utilisateur la voit, avec un second jeton.
+            status, t2, _ = api.call("POST", f"/api/v1/serveurs/{PREFIX}web/ticket", token=user)
+            capture = web_capture(args.api_port, t2.get("ticket", ""), "G-WEB-01") if status == 200 else None
+            return {"detail": f"{len(page)} octets, {sorted(seen)}", "preuve": journal_lines(events), "capture": capture}
         report.check("G-WEB-01", "Interface web par jeton", web)
 
     def chain():
         out = gate("audit", "--verify", "--last", "1")
         expect("Log intact" in out, out.strip()[-200:])
-        return out.splitlines()[0]
+        return {"detail": out.splitlines()[0], "preuve": "$ portunia-gate audit --verify\n" + out.splitlines()[0]}
     report.check("G-AUD-01", "Chaîne du journal intacte", chain)
 
 
@@ -452,7 +537,7 @@ def main():
     tests(args, state, api, report, win_password, targets)
     path = f"{HOME}/rapport-{started.strftime('%Y%m%d-%H%M')}.json"
     with open(path, "w") as f:
-        json.dump({"version": gate("--version").strip(), "date": started.isoformat(), "essais": report.rows}, f, indent=2, ensure_ascii=False)
+        json.dump({"version": gate("--version").strip(), "date": started.isoformat(), "windows": args.windows, "web": args.web, "captures": CAPTURES, "essais": report.rows}, f, indent=2, ensure_ascii=False)
     ok = sum(r["resultat"] == "ok" for r in report.rows)
     print(f"\n{ok}/{len(report.rows)} réussis ; rapport : {path}")
     sys.exit(1 if report.failed else 0)

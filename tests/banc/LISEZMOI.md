@@ -23,7 +23,7 @@ dans `/root/.ssh/authorized_keys`.
 ## Préparer le LXC
 
 ```bash
-apt update && apt install -y curl python3 xvfb sshpass openssh-client freerdp2-x11
+apt update && apt install -y curl python3 xvfb sshpass openssh-client freerdp3-x11 imagemagick chromium   # freerdp2-x11 sur Debian 12
 curl -fsSLO https://github.com/jpiperault/Portunia-Gate-releases/releases/latest/download/installer.sh
 bash installer.sh            # paquet .deb, répondre aux questions
 install -d -m 700 /root/.banc
