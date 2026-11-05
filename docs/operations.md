@@ -13,7 +13,7 @@ The `portunia-gate` command, installed by the wizard, works from any folder, wit
 | API certificate | `/var/lib/portunia-gate/api.crt` and `api.key` | Without it, Portunia shows a new fingerprint to accept. |
 | Signing key | `/var/lib/portunia-gate/signature.key` | Signs recordings. |
 | PostgreSQL database | `portunia-gate` database | Accounts, servers, rules, sessions, audit log. |
-| Recordings | `/var/lib/portunia-gate/enregistrements/YYYY/MM/` | `.cast` (SSH) and `.rdpcap` (Remote Desktop) session files. |
+| Recordings | `/var/lib/portunia-gate/enregistrements/YYYY/MM/` | `.cast` (SSH) and `.rdpcap` (Remote Desktop) session files, and next to them the `<session>-fichiers` folders: copies of files copied in Remote Desktop, when the `file_copies_mb` setting keeps them (Gate 0.28). |
 | Settings | `/etc/portunia-gate/portunia-gate.env` (package) or the repository's `.env` (Docker) | Ports, time zone, database access. |
 
 With Docker, `/var/lib/portunia-gate` lives in the container (`donnees` volume).
@@ -123,7 +123,8 @@ On the first connection, Portunia Gate remembers the server's key (SSH) or certi
 - Remote forwarding (`ssh -R`) is refused.
 - Sign-in from Portunia: accounts using a password (with or without a code). An "SSH key only" account connects with a standard SSH client.
 - One install per server for the `portunia-gate` command (it points to the last installed folder).
-- Remote Desktop: Vault mode and session replay are not available yet.
+- Remote Desktop: file copies kept by the Gate (`file_copies_mb`) are only reachable on the server, in the recordings folder; Portunia shows their name, size and SHA-256 fingerprint but does not download them.
+- Web interfaces (Gate 0.30): Recorded mode only, no credentials filled in by the Gate, pages opened logged (`web.ouvert`, `web.page`) but no line in the sessions list; in the portal, one web interface at a time per browser.
 
 ## Limits and session closing
 
