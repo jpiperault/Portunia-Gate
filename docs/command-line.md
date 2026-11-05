@@ -82,7 +82,7 @@ sudo portunia-gate target forget srv-ad-01                # server reinstalled: 
 sudo portunia-gate target delete fw-edge                  # secret erased; sessions and recordings stay
 ```
 
-- Remote Desktop (`--protocol rdp`): always give `--mode enregistre` or `--mode rebond` (the vault is not available yet for RDP). Port 3389 by default.
+- Remote Desktop (`--protocol rdp`): `--mode enregistre`, `--mode rebond`, or `--mode coffre` (0.29) with `--account` and `--password` (a vault RDP server keeps a password, not a key). Port 3389 by default.
 - The web portal shows `coffre` (SSH) and `enregistre` (SSH and RDP) servers; `rebond` servers open from Portunia, or with `ssh -J` / `ssh -L`.
 
 ## Access rules

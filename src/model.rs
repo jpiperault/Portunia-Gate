@@ -255,13 +255,14 @@ pub struct Target {
 }
 
 /// Protocole et mode compatibles. Bureau à distance : rebond (la Gate relaie la connexion
-/// chiffrée sans la lire) ou enregistré (la Gate relaie et enregistre ; identifiants
-/// Windows tapés par l'utilisateur). Le coffre arrive ensuite.
+/// chiffrée sans la lire), enregistré (la Gate relaie et enregistre ; identifiants Windows
+/// tapés par l'utilisateur) ou coffre (enregistré, et la Gate ouvre la session Windows avec
+/// le compte du coffre).
 pub fn check_protocol(protocole: &str, mode: &str) -> Result<()> {
     match protocole {
         "ssh" => Ok(()),
-        "rdp" if mode == "rebond" || mode == "enregistre" => Ok(()),
-        "rdp" => bail!(t!("Remote Desktop: jump and recorded modes for now (vault is coming)", "Bureau à distance : modes rebond et enregistré pour l'instant (le coffre arrive)")),
+        "rdp" if mode == "rebond" || mode == "enregistre" || mode == "coffre" => Ok(()),
+        "rdp" => bail!(t!("Remote Desktop: jump, recorded or vault mode", "Bureau à distance : mode rebond, enregistré ou coffre")),
         _ => bail!(t!("Unknown protocol: ssh or rdp", "Protocole inconnu : ssh ou rdp")),
     }
 }

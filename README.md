@@ -17,7 +17,7 @@ SSH and Remote Desktop gateway for [Portunia](https://github.com/jpiperault/Port
 | **Replay** | In Portunia, like a video: keystrokes as subtitles, idle time skipped, sensitive commands highlighted, search across all sessions. Typed passwords are masked; every replay is written to the audit log. |
 | **Audit log** | Sign-ins, failures, sessions, administration changes. Each event contains the fingerprint of the previous one: a deleted or edited line shows (`portunia-gate audit --verify`). |
 | **Portunia** | Portunia Gate extension: the Gate appears in the sidebar, its servers open with a one-time token, administrators manage everything from Portunia (servers and vault, accounts, groups, rules, settings) and auditors replay sessions and read the log. |
-| **Remote Desktop** | Windows servers (RDP) behind the Gate, opened from Portunia or the web portal. Jump and Recorded modes (see [Remote Desktop](#remote-desktop-rdp)). |
+| **Remote Desktop** | Windows servers (RDP) behind the Gate, opened from Portunia or the web portal. Jump, Recorded and Vault modes (see [Remote Desktop](#remote-desktop-rdp)). |
 | **Web portal** | For people without Portunia at hand: a sign-in page, a terminal and Remote Desktop in the browser, behind Cloudflare, with no open port. Turned on or off with one click in Portunia (see [Web portal](#web-portal)). |
 | **Other clients** | Any SSH client: OpenSSH, PuTTY, MobaXterm, WinSCP (SFTP). |
 
@@ -206,23 +206,23 @@ Sessions recorded before version 0.5 can be replayed but are not included in sea
 
 Windows servers are declared like the others: Administer › Servers and vault › **Add a server**, protocol **Remote Desktop (RDP)**, port 3389. They appear under the Gate in Portunia with an **RDP** badge and open in a Remote Desktop tab.
 
-In both modes, users type their Windows credentials each time; neither Portunia nor the Gate keeps them.
+In Jump and Recorded modes, users type their Windows credentials each time; neither Portunia nor the Gate keeps them. In Vault mode (0.29), the Gate signs in to Windows itself with the account it keeps: users type nothing and never see the password.
 
-| | **Jump** (0.6) | **Recorded** (0.8) |
-|---|---|---|
-| Path | Tunnel through the Gate's SSH port (2222), with a one-time token; the RDP connection is end-to-end encrypted. | The Gate's gateway (RDCleanPath, on the API or portal port) with a one-time token: the Gate opens the encrypted connection to the Windows server and relays the session. |
-| What the Gate sees | None of the content; it checks the rule and logs (`rebond.ouvert`, duration, bytes). | The session (to record it), but not the password: Windows authentication (NLA) happens between the client and the server. |
-| Recording | No. | Yes, signed file (`.rdpcap`): the image sent by the server, clicks, copy-pastes (text masked until an administrator reveals it) and keystrokes if the rule records them. Replay in Portunia (0.47 or later), like an SSH session. |
-| Clients | Portunia. | Portunia and the **web portal** (Remote Desktop in the browser). |
-| Server certificate | Checked by the client. | Checked by the Gate: fingerprint kept on first connection, connection refused if it changes (`cible.empreinte_differente`). |
+| | **Jump** (0.6) | **Recorded** (0.8) | **Vault** (0.29) |
+|---|---|---|---|
+| Path | Tunnel through the Gate's SSH port (2222), with a one-time token; the RDP connection is end-to-end encrypted. | The Gate's gateway (RDCleanPath, on the API or portal port) with a one-time token: the Gate opens the encrypted connection to the Windows server and relays the session. | Same as Recorded. |
+| What the Gate sees | None of the content; it checks the rule and logs (`rebond.ouvert`, duration, bytes). | The session (to record it), but not the password: Windows authentication (NLA) happens between the client and the server. | The session; the Gate performs the Windows authentication (NLA, NTLM) with the vault account, and the client authenticates to the Gate with its one-time token. The server must offer NLA. |
+| Recording | No. | Yes, signed file (`.rdpcap`): the image sent by the server, clicks, copy-pastes (text masked until an administrator reveals it) and keystrokes if the rule records them. Replay in Portunia (0.47 or later), like an SSH session. | Yes, as in Recorded. |
+| Clients | Portunia; the **web portal** too since 0.29, where the Gate relays without recording (a browser cannot tunnel end-to-end). | Portunia and the **web portal** (Remote Desktop in the browser). | Portunia and the web portal. |
+| Server certificate | Checked by the client. | Checked by the Gate: fingerprint kept on first connection, connection refused if it changes (`cible.empreinte_differente`). | Checked by the Gate, as in Recorded. |
 
 The Gate must reach port 3389 of the Windows servers. In Portunia, the Remote Desktop extension must be enabled; otherwise RDP servers stay visible, greyed out. An RDP server does not appear in the Gate's `ssh` menu and does not open as a terminal.
 
-**Vault** mode (Windows account supplied by the Gate, nothing to type) comes in a later version.
+A vault RDP server keeps a password (local account or `DOMAINaccount`), not a key. If the password changes on the server, the connection fails with `cible.coffre_refuse`: replace the secret.
 
 ## Web portal
 
-A web page to open your servers from any browser, without Portunia: sign-in, list of allowed servers, SSH terminal or Remote Desktop in a tab. It is not used for administration. SSH goes through the Gate's own SSH server with a one-time token: same rules, same vault, same recording, same log. Remote Desktop goes through the Gate's RDCleanPath gateway (servers in Recorded mode, see [Remote Desktop](#remote-desktop-rdp)). A web session is replayed in the audit like any other; its address is followed by "(web)".
+A web page to open your servers from any browser, without Portunia: sign-in, list of allowed servers, SSH terminal or Remote Desktop in a tab. It is not used for administration. SSH goes through the Gate's own SSH server with a one-time token: same rules, same vault, same recording, same log. Remote Desktop goes through the Gate's RDCleanPath gateway (every mode, see [Remote Desktop](#remote-desktop-rdp)). A web session is replayed in the audit like any other; its address is followed by "(web)".
 
 **Security**
 
@@ -233,7 +233,7 @@ A web page to open your servers from any browser, without Portunia: sign-in, lis
 | Accounts | Members of the **chosen group** only ("Accès web" by default). First sign-in and lost code: not on the portal, but with Portunia or the administrator. |
 | Session | "HttpOnly, Secure, SameSite=Strict" cookie, 1 hour by default; closed after 15 minutes without typing (warning 90 s before). |
 | Page | Nothing loaded from outside (except Turnstile), strict content security policy, cannot be framed by another site, public address checked on every sign-in. |
-| Servers | SSH in Vault or Recorded mode; Remote Desktop in Recorded mode (IronRDP web client in the page; Windows credentials typed in the page and sent to the server, never to the Gate). Jump servers (end-to-end) stay with Portunia. |
+| Servers | SSH in Vault or Recorded mode; Remote Desktop in every mode (IronRDP web client in the page): Recorded and Jump with Windows credentials typed in the page and sent to the server, never to the Gate (Jump: relayed without recording); Vault with nothing to type. SSH jump servers (end-to-end) stay with Portunia. |
 | Audit log | `portail.connexion`, `portail.echec`, `portail.active`, `portail.desactive`, `portail.modifie`, `portail.sessions_fermees`. |
 
 **Setup**
@@ -380,7 +380,7 @@ See also [docs/operations.md](docs/operations.md): backups, updates, logs, troub
 1. **Core**: SSH proxy, three modes, vault, accounts and TOTP, permissions, signed recording, chained audit log, Docker Compose.
 2. **Portunia integration**: API, adding the Gate in Portunia, servers in the sidebar, one-time tokens, first sign-in, full administration, keys generated and installed on vault servers. Setup wizard (0.3), Debian package (0.4).
 3. **Audit**: replay and search (0.5), live view and session termination, on-demand MP4 video, detachable player, configurable retention with disk estimate, syslog and CSV.
-4. **Remote Desktop**: jump (0.6), recorded with signed recording (0.8), replay (0.10), then vault (the Gate opens the Windows session with the vault account), rules (clipboard, sound).
+4. **Remote Desktop**: jump (0.6), recorded with signed recording (0.8), replay (0.10), vault (0.29: the Gate opens the Windows session with the vault account), then rules (clipboard, sound).
 5. **Web portal**: SSH (0.7) and Remote Desktop (0.8) in the browser behind Cloudflare, then passkeys, branding.
 6. **Remote assistance**: Portunia Assistance relay with a code (0.11), then invitation link, unattended access to your own PCs, file transfer, chat.
 7. **Operations**: built-in backup, apt repository for updates, ARM package, imports (Portunia, CSV), optional web console.

@@ -17,7 +17,7 @@ Passerelle SSH et Bureau à distance de [Portunia](https://github.com/jpiperault
 | **Relecture** | Dans Portunia, comme une vidéo : la frappe en sous-titres, les pauses sautées, les commandes sensibles repérées, la recherche dans toutes les sessions. Les mots de passe tapés sont masqués ; chaque relecture est inscrite au journal. |
 | **Journal d'audit** | Connexions, échecs, sessions, changements d'administration. Chaque événement contient l'empreinte du précédent : une ligne supprimée ou modifiée se voit (`portunia-gate audit --verify`). |
 | **Portunia** | Extension Portunia Gate : la Gate s'ajoute dans la barre latérale, ses serveurs s'ouvrent avec un jeton à usage unique, les administrateurs gèrent tout depuis Portunia (serveurs et coffre, comptes, groupes, règles, réglages) et les auditeurs relisent les sessions et le journal. |
-| **Bureau à distance** | Serveurs Windows (RDP) derrière la Gate, ouverts depuis Portunia ou le portail web. Modes rebond et enregistré (voir [Bureau à distance](#bureau-à-distance-rdp)). |
+| **Bureau à distance** | Serveurs Windows (RDP) derrière la Gate, ouverts depuis Portunia ou le portail web. Modes rebond, enregistré et coffre (voir [Bureau à distance](#bureau-à-distance-rdp)). |
 | **Portail web** | Pour qui n'a pas Portunia sous la main : une page de connexion et un terminal dans le navigateur, derrière Cloudflare, sans port ouvert. Activé ou coupé d'un clic dans Portunia (voir [Portail web](#portail-web)). |
 | **Autres clients** | N'importe quel client SSH : OpenSSH, PuTTY, MobaXterm, WinSCP (SFTP). |
 
@@ -219,23 +219,23 @@ Les sessions enregistrées avant la version 0.5 se relisent, mais n'entrent pas 
 
 Les serveurs Windows se déclarent comme les autres : Administrer › Serveurs et coffre › **Ajouter un serveur**, protocole **Bureau à distance (RDP)**, port 3389. Ils apparaissent sous la Gate dans Portunia avec un badge **RDP** et s'ouvrent dans un onglet Bureau à distance.
 
-Dans les deux modes, l'utilisateur tape ses identifiants Windows à chaque ouverture ; ni Portunia ni la Gate ne les gardent.
+En rebond et en enregistré, l'utilisateur tape ses identifiants Windows à chaque ouverture ; ni Portunia ni la Gate ne les gardent. En coffre (0.29), la Gate ouvre la session Windows elle-même avec le compte qu'elle garde : l'utilisateur ne tape rien et ne voit jamais le mot de passe.
 
-| | **Rebond** (0.6) | **Enregistré** (0.8) |
-|---|---|---|
-| Chemin | Tunnel par le port SSH de la Gate (2222), avec un jeton à usage unique ; la connexion RDP est chiffrée de bout en bout. | Passage de la Gate (RDCleanPath, sur le port de l'API ou du portail) avec un jeton à usage unique : la Gate ouvre la connexion chiffrée avec le serveur Windows et relaie la session. |
-| Ce que voit la Gate | Rien du contenu ; elle vérifie la règle et journalise (`rebond.ouvert`, durée, octets). | La session (pour l'enregistrer), mais pas le mot de passe : l'authentification Windows (NLA) se fait entre le client et le serveur. |
-| Enregistrement | Non. | Oui, fichier signé (`.rdpcap`) : l'image envoyée par le serveur, les clics, les copier-coller (texte masqué tant qu'un administrateur ne le révèle pas) et la frappe si la règle l'enregistre. Relecture dans Portunia (0.47 ou suivant), comme une session SSH. |
-| Clients | Portunia. | Portunia et le **portail web** (Bureau à distance dans le navigateur). |
-| Certificat du serveur | Vérifié par le client. | Vérifié par la Gate : empreinte gardée à la première connexion, connexion refusée si elle change (`cible.empreinte_differente`). |
+| | **Rebond** (0.6) | **Enregistré** (0.8) | **Coffre** (0.29) |
+|---|---|---|---|
+| Chemin | Tunnel par le port SSH de la Gate (2222), avec un jeton à usage unique ; la connexion RDP est chiffrée de bout en bout. | Passage de la Gate (RDCleanPath, sur le port de l'API ou du portail) avec un jeton à usage unique : la Gate ouvre la connexion chiffrée avec le serveur Windows et relaie la session. | Comme en enregistré. |
+| Ce que voit la Gate | Rien du contenu ; elle vérifie la règle et journalise (`rebond.ouvert`, durée, octets). | La session (pour l'enregistrer), mais pas le mot de passe : l'authentification Windows (NLA) se fait entre le client et le serveur. | La session ; la Gate mène l'authentification Windows (NLA, NTLM) avec le compte du coffre, et le client s'authentifie auprès d'elle avec son jeton à usage unique. Le serveur doit proposer NLA. |
+| Enregistrement | Non. | Oui, fichier signé (`.rdpcap`) : l'image envoyée par le serveur, les clics, les copier-coller (texte masqué tant qu'un administrateur ne le révèle pas) et la frappe si la règle l'enregistre. Relecture dans Portunia (0.47 ou suivant), comme une session SSH. | Oui, comme en enregistré. |
+| Clients | Portunia ; le **portail web** aussi depuis la 0.29, où la Gate relaie sans enregistrer (un navigateur ne peut pas faire de tunnel de bout en bout). | Portunia et le **portail web** (Bureau à distance dans le navigateur). | Portunia et le portail web. |
+| Certificat du serveur | Vérifié par le client. | Vérifié par la Gate : empreinte gardée à la première connexion, connexion refusée si elle change (`cible.empreinte_differente`). | Vérifié par la Gate, comme en enregistré. |
 
 La Gate doit joindre le port 3389 des serveurs Windows. Dans Portunia, l'extension Bureau à distance doit être activée ; sinon les serveurs RDP restent visibles, grisés. Un serveur RDP n'apparaît pas dans le menu `ssh` de la Gate et ne s'ouvre pas en terminal.
 
-Le mode **coffre** (compte Windows fourni par la Gate, sans rien taper) et la relecture des sessions RDP arrivent dans les versions suivantes.
-Le mode **coffre** (compte Windows fourni par la Gate, sans rien taper) arrive dans une prochaine version.
+Un serveur RDP au coffre garde un mot de passe (compte local ou `DOMAINEcompte`), pas une clé. Si le mot de passe change sur le serveur, la connexion échoue avec `cible.coffre_refuse` : remplacez le secret.
+
 ## Portail web
 
-Une page web pour ouvrir ses serveurs depuis n'importe quel navigateur, sans Portunia : connexion, liste des serveurs autorisés, terminal SSH ou Bureau à distance dans un onglet. Elle ne sert pas à l'administration. Le Bureau à distance passe par le passage RDCleanPath de la Gate (serveurs en mode enregistré, voir [Bureau à distance](#bureau-à-distance-rdp)). Le portail passe par le serveur SSH de la Gate, avec un jeton à usage unique : mêmes règles, même coffre, même enregistrement, même journal. Une session web se relit dans l'audit comme une autre ; son adresse est suivie de « (web) ».
+Une page web pour ouvrir ses serveurs depuis n'importe quel navigateur, sans Portunia : connexion, liste des serveurs autorisés, terminal SSH ou Bureau à distance dans un onglet. Elle ne sert pas à l'administration. Le Bureau à distance passe par le passage RDCleanPath de la Gate (tous les modes, voir [Bureau à distance](#bureau-à-distance-rdp)). Le portail passe par le serveur SSH de la Gate, avec un jeton à usage unique : mêmes règles, même coffre, même enregistrement, même journal. Une session web se relit dans l'audit comme une autre ; son adresse est suivie de « (web) ».
 
 **Sécurité**
 
@@ -246,7 +246,7 @@ Une page web pour ouvrir ses serveurs depuis n'importe quel navigateur, sans Por
 | Comptes | Seuls les membres du **groupe choisi** (« Accès web » par défaut). Première connexion et code perdu : pas sur le portail, mais avec Portunia ou l'administrateur. |
 | Session | Cookie « HttpOnly, Secure, SameSite=Strict », 1 heure par défaut ; fermeture après 15 minutes sans frappe (avertissement 90 s avant). |
 | Page | Rien de chargé depuis l'extérieur (sauf Turnstile), politique de contenu stricte, pas d'affichage dans un cadre d'un autre site, adresse publique vérifiée à chaque connexion. |
-| Serveurs | SSH en mode coffre ou enregistré ; Bureau à distance en mode enregistré (client RDP d'IronRDP dans la page, identifiants Windows tapés dans la page et envoyés au serveur, jamais à la Gate). Les serveurs en rebond (de bout en bout) restent avec Portunia. |
+| Serveurs | SSH en mode coffre ou enregistré ; Bureau à distance dans tous les modes (client RDP d'IronRDP dans la page) : enregistré et rebond avec les identifiants Windows tapés dans la page et envoyés au serveur, jamais à la Gate (rebond : relayé sans enregistrement) ; coffre sans rien taper. Les serveurs SSH en rebond (de bout en bout) restent avec Portunia. |
 | Journal | `portail.connexion`, `portail.echec`, `portail.active`, `portail.desactive`, `portail.modifie`, `portail.sessions_fermees`. |
 
 **Mise en place**
@@ -393,7 +393,7 @@ Voir aussi [docs/exploitation.fr.md](docs/exploitation.fr.md) : sauvegardes, mis
 1. **Socle** : proxy SSH, trois modes, coffre, comptes et TOTP, droits, enregistrement signé, journal chaîné, Docker Compose.
 2. **Intégration Portunia** : API, ajout de la Gate dans Portunia, serveurs dans la barre latérale, jetons à usage unique, première connexion, administration complète, clé générée et installée sur les serveurs du coffre. Assistant d'installation (0.3), paquet Debian (0.4).
 3. **Audit** : relecture et recherche (0.5), vue en direct et coupure, vidéo MP4 à la demande, lecteur détachable, conservation réglable avec estimation du disque, syslog et CSV.
-4. **Bureau à distance** : rebond (0.6), enregistré avec enregistrement signé (0.8), relecture (0.10), puis coffre (la Gate ouvre la session Windows avec le compte du coffre), règles (presse-papiers, son).
+4. **Bureau à distance** : rebond (0.6), enregistré avec enregistrement signé (0.8), relecture (0.10), coffre (0.29 : la Gate ouvre la session Windows avec le compte du coffre), puis règles (presse-papiers, son).
 5. **Portail web** : SSH (0.7) et Bureau à distance (0.8) dans le navigateur derrière Cloudflare, puis clés d'accès (passkeys), personnalisation.
 6. **Assistance à distance** : relais Portunia Assistance avec un code (0.11), puis lien d'invitation, accès sans surveillance à ses propres PC, transfert de fichiers, discussion.
 7. **Exploitation** : sauvegarde intégrée, dépôt apt pour les mises à jour, paquet ARM, imports (Portunia, CSV), console web activable.

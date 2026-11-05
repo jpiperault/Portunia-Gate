@@ -1039,11 +1039,10 @@ async fn logout(AxState(portal): Ctx, headers: HeaderMap) -> Response {
         .into_response()
 }
 
-/// Peut s'ouvrir dans le navigateur : SSH, hors mode rebond (de bout en bout, il faut Portunia).
+/// Peut s'ouvrir dans le navigateur : tout, sauf SSH en mode rebond (de bout en bout, il faut
+/// Portunia). Bureau à distance en rebond : la Gate relaie sans enregistrer.
 fn web_ready(t: &model::Target) -> Option<&'static str> {
-    if t.is_rdp() && t.mode == "coffre" {
-        Some(t!("Remote Desktop in vault mode: coming soon in the browser", "Bureau à distance en mode coffre : bientôt dans le navigateur"))
-    } else if t.mode == "rebond" {
+    if !t.is_rdp() && t.mode == "rebond" {
         Some(t!("Only available with Portunia (end-to-end relay)", "Disponible seulement avec Portunia (relais de bout en bout)"))
     } else {
         None
@@ -1173,7 +1172,8 @@ async fn desktop_ticket(AxState(portal): Ctx, ConnectInfo(peer): ConnectInfo<Soc
         };
         let ticket = crate::api::issue_ticket(&state.db, w.user.id, target.id, Some(&format!("{ip} (web)"))).await?;
         // « fichiers » : la page propose la copie de fichiers (la Gate la bloque sinon).
-        Ok::<_, anyhow::Error>(Json(json!({ "jeton": ticket, "compte": target.account, "fichiers": access.files })).into_response())
+        // « coffre » : la Gate ouvre la session Windows ; la page s'authentifie avec le jeton.
+        Ok::<_, anyhow::Error>(Json(json!({ "jeton": ticket, "compte": target.account, "fichiers": access.files, "coffre": target.vaulted() })).into_response())
     }
     .await;
     result.unwrap_or_else(internal)

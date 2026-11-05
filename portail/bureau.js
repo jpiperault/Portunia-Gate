@@ -16,6 +16,8 @@ const error = document.getElementById('erreur');
 const notice = document.getElementById('notice');
 let ui = null;
 let element = null;
+// Serveur en mode coffre : pas d'identifiants Windows à demander.
+let vault = false;
 
 function showNotice(title, text, actions) {
   document.getElementById('notice-titre').textContent = title;
@@ -85,10 +87,11 @@ async function open(user, password, domain) {
   const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
   const start = desktopSize();
   lastSize = `${start.width}x${start.height}`;
+  // Coffre : la Gate ouvre la session Windows ; la page s'authentifie auprès d'elle avec le jeton.
   const builder = ui.configBuilder()
-    .withUsername(user)
-    .withPassword(password)
-    .withServerDomain(domain)
+    .withUsername(data.coffre ? 'portunia' : user)
+    .withPassword(data.coffre ? data.jeton : password)
+    .withServerDomain(data.coffre ? '' : domain)
     .withDestination(nom)
     .withProxyAddress(`${scheme}://${location.host}/ws-rdp`)
     .withAuthToken(data.jeton)
@@ -259,16 +262,8 @@ function fullLabel() {
   fullButton.textContent = document.fullscreenElement ? T('Exit full screen', 'Quitter le plein écran') : T('Full screen', 'Plein écran');
 }
 
-form.addEventListener('submit', async (e) => {
-  e.preventDefault();
-  error.textContent = '';
-  const user = document.getElementById('utilisateur').value.trim();
-  const password = document.getElementById('mdp').value;
-  let domain = document.getElementById('domaine').value.trim();
-  if (!user || !password) { error.textContent = T('Give the Windows user and password.', 'Indiquez l\'utilisateur et le mot de passe Windows.'); return; }
-  // DOMAINE\utilisateur ou utilisateur@domaine : le domaine se déduit.
-  let account = user;
-  if (!domain && user.includes('\\')) [domain, account] = user.split('\\', 2);
+// Ouvre la session ; en cas d'échec, le formulaire revient avec l'explication.
+async function attempt(account, password, domain) {
   document.getElementById('ouvrir').disabled = true;
   try {
     await open(account, password, domain);
@@ -281,6 +276,20 @@ form.addEventListener('submit', async (e) => {
     document.getElementById('mdp').value = '';
     document.getElementById('ouvrir').disabled = false;
   }
+}
+
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  error.textContent = '';
+  const user = document.getElementById('utilisateur').value.trim();
+  const password = document.getElementById('mdp').value;
+  let domain = document.getElementById('domaine').value.trim();
+  if (vault) { await attempt('', '', ''); return; }
+  if (!user || !password) { error.textContent = T('Give the Windows user and password.', 'Indiquez l\'utilisateur et le mot de passe Windows.'); return; }
+  // DOMAINE\utilisateur ou utilisateur@domaine : le domaine se déduit.
+  let account = user;
+  if (!domain && user.includes('\\')) [domain, account] = user.split('\\', 2);
+  await attempt(account, password, domain);
 });
 
 document.getElementById('cad').addEventListener('click', () => ui?.ctrlAltDel());
@@ -301,6 +310,17 @@ document.getElementById('fermer').addEventListener('click', () => {
   if (!etat.connecte) { location.href = '/'; return; }
   const list = await fetch('/api/serveurs', { credentials: 'same-origin' }).then((r) => (r.ok ? r.json() : { serveurs: [] })).catch(() => ({ serveurs: [] }));
   const s = (list.serveurs || []).find((x) => x.nom === nom);
+  // Coffre : rien à demander, la session s'ouvre tout de suite (le bouton sert à réessayer).
+  if (s?.mode === 'coffre') {
+    vault = true;
+    for (const id of ['utilisateur', 'mdp', 'domaine']) {
+      const input = document.getElementById(id);
+      input.required = false;
+      input.closest('label')?.setAttribute('hidden', '');
+    }
+    await attempt('', '', '');
+    return;
+  }
   if (s?.compte) document.getElementById('utilisateur').value = s.compte;
   document.getElementById(s?.compte ? 'mdp' : 'utilisateur').focus();
 })();
