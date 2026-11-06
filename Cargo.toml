@@ -1,6 +1,6 @@
 [package]
 name = "portunia-gate"
-version = "0.40.0"
+version = "0.40.1"
 description = "Passerelle SSH et Bureau à distance de Portunia : accès contrôlés, coffre, enregistrement et journal d'audit"
 edition = "2021"
 publish = false

@@ -608,6 +608,17 @@ mod tests {
         assert!(human(1_500_000_000).starts_with("1.5"));
     }
 
+    /// PostgreSQL refuse un fichier qui commence par une marque d'ordre des octets (BOM) :
+    /// la 0.39.0 ne démarrait plus à cause de la migration 0015.
+    #[test]
+    fn migrations_sans_bom() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            let bytes = std::fs::read(e.path()).unwrap();
+            assert!(!bytes.starts_with(&[0xEF, 0xBB, 0xBF]), "BOM dans {}", e.path().display());
+        }
+    }
+
     #[test]
     fn suppression_d_un_enregistrement() {
         let dir = std::env::temp_dir().join(format!("portunia-gate-conservation-{}", std::process::id()));
