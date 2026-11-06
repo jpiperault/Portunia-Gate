@@ -190,6 +190,8 @@ def setup(args, state):
         if args.windows_ssh:
             gate("target", "add", f"{PREFIX}win-ssh", "--host", args.windows, "--protocol", "ssh", "--mode", "coffre", "--account", args.win_user, "--password", "--folder", FOLDER, stdin=win_password + "\n")
             targets.append(f"{PREFIX}win-ssh")
+            gate("target", "add", f"{PREFIX}win-ssh-rebond", "--host", args.windows, "--protocol", "ssh", "--mode", "rebond", "--account", args.win_user, "--folder", FOLDER)
+            targets.append(f"{PREFIX}win-ssh-rebond")
     if args.web:
         host, _, port = args.web.partition(":")
         gate("target", "add", f"{PREFIX}web", "--host", host, "--port", port or "443", "--protocol", "https", "--mode", "enregistre", "--folder", FOLDER)
@@ -199,7 +201,13 @@ def setup(args, state):
         gate("rule", "add", f"{PREFIX}regle", "--group", f"{PREFIX}groupe", "--targets", ",".join(targets), "--sftp", "--tunnels", "--files")
     gate("rdp", "set", "--port", str(args.rdp_port), "--modes", "rebond,coffre,enregistre", "--ticket-seconds", "120")
     gate("rdp", "on")
-    time.sleep(4)
+    if args.portal_port:
+        # Portail du banc : écoute HTTPS locale, réseau interne, groupe du banc, code exigé.
+        gate("portal", "set", "--group", f"{PREFIX}groupe", "--code", "on")
+        gate("portal", "expose", "internal", "--networks", "127.0.0.0/8")
+        gate("portal", "https", f"127.0.0.1:{args.portal_port}")
+        gate("portal", "on")
+    time.sleep(5)
     return win_password, targets
 
 
@@ -371,6 +379,426 @@ def web_capture(port, ticket, name):
     return os.path.basename(path) if os.path.exists(path) else None
 
 
+# ---------- Conversation dans un pseudo-terminal (ssh avec mot de passe et code) ----------
+
+def converse(cmd, answers, timeout=60):
+    """Lance `cmd` dans un pseudo-terminal et répond aux invites, dans l'ordre : `answers` est une
+    liste de (texte attendu, réponse ou fonction). Renvoie (sortie, code de sortie)."""
+    import pty
+    import select
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.execvpe(cmd[0], cmd, ENV)
+    text, pos, step = "", 0, 0
+    end = time.time() + timeout
+    while time.time() < end:
+        ready, _, _ = select.select([fd], [], [], 1)
+        if fd not in ready:
+            continue
+        try:
+            data = os.read(fd, 4096)
+        except OSError:
+            break
+        if not data:
+            break
+        text += data.decode(errors="replace")
+        if step < len(answers) and answers[step][0].lower() in text[pos:].lower():
+            answer = answers[step][1]
+            os.write(fd, ((answer() if callable(answer) else answer) + "\n").encode())
+            pos, step = len(text), step + 1
+    try:
+        done, status = os.waitpid(pid, os.WNOHANG)
+        if not done:
+            os.kill(pid, signal.SIGKILL)
+            _, status = os.waitpid(pid, 0)
+    except ChildProcessError:
+        status = 0
+    return text, os.waitstatus_to_exitcode(status) if hasattr(os, "waitstatus_to_exitcode") else status
+
+
+def fresh_code(state, account):
+    """Code TOTP d'un pas jamais servi (la Gate refuse un code déjà utilisé)."""
+    a = state["comptes"][account]
+    while int(time.time()) // 30 <= a.get("pas", 0):
+        time.sleep(1)
+    step = int(time.time()) // 30
+    a["pas"] = step
+    save_state(state)
+    return totp(a["totp"], step)
+
+
+SSH_OPTS = ["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", "-o", "LogLevel=ERROR"]
+
+
+def ssh_ticket(api, user, target):
+    status, t, _ = api.call("POST", f"/api/v1/serveurs/{target}/ticket", token=user)
+    expect(status == 200, f"jeton : {status} {t}")
+    return t
+
+
+# ---------- Essais SSH complémentaires ----------
+
+def ssh_more(args, state, api, report, admin, user, win_password):
+    target = f"{PREFIX}win-ssh"
+
+    def sftp():
+        since = now_utc()
+        t = ssh_ticket(api, user, target)
+        sample = f"banc {secrets.token_hex(8)}\n"
+        with open("/tmp/banc-envoi.txt", "w") as f:
+            f.write(sample)
+        batch = "put /tmp/banc-envoi.txt banc-envoi.txt\nls -l banc-envoi.txt\nget banc-envoi.txt /tmp/banc-retour.txt\nrm banc-envoi.txt\n"
+        out = run(["sshpass", "-p", t["ticket"], "sftp", *SSH_OPTS, "-o", "BatchMode=no", "-o", "PreferredAuthentications=password", "-P", str(t["port_ssh"]), "-b", "-", f"{t['utilisateur_ssh']}@127.0.0.1"], stdin=batch)
+        back = open("/tmp/banc-retour.txt").read()
+        expect(back == sample, "le fichier récupéré diffère de l'envoyé")
+        time.sleep(2)
+        found = sessions_since(api, admin, target, since)
+        expect(found and found[0]["type"] == "sftp", f"pas de session sftp ({[s['type'] for s in found]})")
+        return {"detail": "envoi, liste, récupération et suppression d'un fichier ; contenu identique",
+                "preuve": out.strip()[-600:] + f"\n\nsession {found[0]['id'][:8]} · {found[0]['type']} · enregistrée : {'oui' if found[0]['enregistree'] else 'non'}"}
+    report.check("G-SSH-02", "SFTP au coffre par jeton", sftp)
+
+    def tunnel():
+        since = now_utc()
+        t = ssh_ticket(api, user, target)
+        local = 13389
+        p = subprocess.Popen(["sshpass", "-p", t["ticket"], "ssh", *SSH_OPTS, "-o", "PreferredAuthentications=password", "-N",
+                              "-L", f"127.0.0.1:{local}:127.0.0.1:3389", "-p", str(t["port_ssh"]), f"{t['utilisateur_ssh']}@127.0.0.1"],
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=ENV, start_new_session=True)
+        try:
+            time.sleep(4)
+            import socket
+            with socket.create_connection(("127.0.0.1", local), timeout=10) as s:
+                # Demande X.224 minimale : le serveur RDP de Windows doit répondre par un paquet TPKT.
+                s.sendall(bytes([3, 0, 0, 19, 14, 0xE0, 0, 0, 0, 0, 0, 1, 0, 8, 0, 3, 0, 0, 0]))
+                answer = s.recv(64)
+            expect(answer[:1] == b"\x03", f"réponse inattendue à travers le tunnel : {answer[:8].hex()}")
+        finally:
+            stop(p)
+        time.sleep(2)
+        found = [s for s in sessions_since(api, admin, target, since) if s["type"] == "tunnel"]
+        expect(found, "pas de session « tunnel » au journal des sessions")
+        return {"detail": f"port 3389 du Windows joint par le tunnel ; réponse RDP {answer[:4].hex()}",
+                "preuve": f"ssh -N -L 127.0.0.1:{local}:127.0.0.1:3389 {t['utilisateur_ssh']}@gate\nconnexion à 127.0.0.1:{local} → réponse TPKT {answer[:19].hex()}\nsession {found[0]['id'][:8]} · tunnel ({found[0]['detail']})"}
+    report.check("G-SSH-03", "Tunnel (ssh -L) à travers un serveur au coffre", tunnel)
+
+    def direct():
+        a = state["comptes"][f"{PREFIX}user"]
+        out, code = converse(["ssh", *SSH_OPTS, "-o", "PreferredAuthentications=keyboard-interactive,password", "-p", "2222",
+                              f"{PREFIX}user%{target}@127.0.0.1", "whoami"],
+                             [("password", a["mot_de_passe"]), ("code", lambda: fresh_code(state, f"{PREFIX}user"))], timeout=90)
+        expect(args.win_user.lower() in out.lower(), f"pas de réponse de whoami (code {code}) : {out.strip()[-200:]}")
+        return {"detail": "mot de passe puis code TOTP, commande exécutée par le compte du coffre",
+                "preuve": "$ ssh -p 2222 banc-user%banc-win-ssh@gate whoami\n" + out.replace(a["mot_de_passe"], "••••").strip()[-500:]}
+    report.check("G-SSH-04", "Connexion directe : mot de passe et code TOTP", direct)
+
+    def jump():
+        since = now_utc()
+        a = state["comptes"][f"{PREFIX}user"]
+        hop = " ".join(["ssh", *SSH_OPTS, "-o", "PreferredAuthentications=keyboard-interactive,password", "-p", "2222", "-W", "%h:%p", f"{PREFIX}user@127.0.0.1"])
+        out, code = converse(["ssh", *SSH_OPTS, "-o", "PreferredAuthentications=keyboard-interactive,password",
+                              "-o", f"ProxyCommand={hop}", f"{args.win_user}@{args.windows}", "whoami"],
+                             [("password", a["mot_de_passe"]), ("code", lambda: fresh_code(state, f"{PREFIX}user")), ("password", win_password)], timeout=120)
+        expect(args.win_user.lower() in out.lower(), f"pas de réponse de whoami (code {code}) : {out.strip()[-300:]}")
+        time.sleep(2)
+        found = [s for s in sessions_since(api, admin, f"{PREFIX}win-ssh-rebond", since) if s["type"] == "rebond"]
+        expect(found, "pas de session de rebond au journal des sessions")
+        return {"detail": "rebond de bout en bout : la Gate relaie sans voir le contenu",
+                "preuve": f"$ ssh -J banc-user@gate:2222 {args.win_user}@{args.windows} whoami\n" + out.replace(a["mot_de_passe"], "••••").replace(win_password, "••••").strip()[-400:]
+                + f"\n\nsession {found[0]['id'][:8]} · rebond ({found[0]['detail']}) · {found[0]['octets']} octets"}
+    report.check("G-SSH-05", "Rebond de bout en bout (ssh -J)", jump)
+
+
+# ---------- Enregistrements ----------
+
+def audit_more(args, state, api, report, admin):
+    def recording(target, kind):
+        status, body, _ = api.call("GET", "/api/v1/admin/sessions?limite=200", token=admin)
+        expect(status == 200, f"sessions : {status}")
+        found = [s for s in body["sessions"] if s["serveur"] == target and s["type"] == kind and s["enregistree"] and s["fin"]]
+        if not found:
+            raise Skip(f"aucune session {kind} enregistrée sur {target}")
+        s = found[0]
+        status, rec, _ = api.call("GET", f"/api/v1/audit/sessions/{s['id']}/enregistrement", token=admin)
+        expect(status == 200, f"enregistrement : {status} {rec}")
+        return s, rec
+
+    def rdp_recording():
+        s, rec = recording(f"{PREFIX}win-coffre", "rdp")
+        expect(rec["signature"] == "verifiee", f"signature : {rec['signature']}")
+        expect(rec["rdp"]["images"] > 0 and rec["rdp"]["duree"] > 0, f"enregistrement vide : {rec['rdp']['images']} image(s)")
+        return {"detail": f"signature vérifiée, {rec['rdp']['images']} images sur {round(rec['rdp']['duree'])} s",
+                "preuve": f"session {s['id'][:8]} · {s['compte']} → {s['serveur']}\nempreinte SHA-256 {rec['empreinte']}\nsignature : {rec['signature']}\névénements : {json.dumps(rec['rdp']['compte'], ensure_ascii=False)}"}
+    report.check("G-AUD-02", "Enregistrement RDP signé et relisible", rdp_recording)
+
+    def ssh_recording():
+        s, rec = recording(f"{PREFIX}win-ssh", "exec")
+        expect(rec["signature"] == "verifiee", f"signature : {rec['signature']}")
+        expect(args.win_user.lower() in rec["cast"].lower(), "la sortie de whoami n'est pas dans l'enregistrement")
+        lines = [json.loads(l)[2] for l in rec["cast"].splitlines()[1:] if l.startswith("[")]
+        return {"detail": "signature vérifiée, sortie de la commande présente",
+                "preuve": f"session {s['id'][:8]} · {s['detail']}\nsignature : {rec['signature']}\ncontenu : {''.join(lines).strip()[:200]}"}
+    report.check("G-AUD-03", "Enregistrement SSH signé et relisible", ssh_recording)
+
+    def tampering():
+        s, rec = recording(f"{PREFIX}win-ssh", "exec")
+        import glob
+        files = glob.glob(f"/var/lib/portunia-gate/enregistrements/**/{s['id']}*", recursive=True)
+        files = [f for f in files if os.path.isfile(f) and not f.endswith((".sig", ".json"))]
+        if not files:
+            raise Skip("fichier d'enregistrement introuvable sur le disque")
+        path = files[0]
+        original = open(path, "rb").read()
+        try:
+            with open(path, "ab") as f:
+                f.write(b"\n")
+            status, altered, _ = api.call("GET", f"/api/v1/audit/sessions/{s['id']}/enregistrement", token=admin)
+            expect(status == 200 and altered["signature"] == "alteree", f"altération non détectée : {altered.get('signature') if isinstance(altered, dict) else altered}")
+        finally:
+            with open(path, "wb") as f:
+                f.write(original)
+        status, again, _ = api.call("GET", f"/api/v1/audit/sessions/{s['id']}/enregistrement", token=admin)
+        expect(again["signature"] == "verifiee", "signature pas retrouvée après remise en état")
+        return {"detail": "un octet ajouté au fichier : « alteree » ; fichier remis : « verifiee »",
+                "preuve": f"{path}\n+1 octet → signature : alteree\nremis à l'identique → signature : verifiee"}
+    report.check("G-AUD-04", "Altération d'un enregistrement détectée", tampering)
+
+
+# ---------- Portail web, piloté dans Chromium ----------
+
+class Tab:
+    """Un onglet de Chromium, piloté par le protocole de débogage (CDP)."""
+
+    def __init__(self, ws_url, target_id=None):
+        from websockets.sync.client import connect
+        self.id = target_id
+        self.ws = connect(ws_url, max_size=None, open_timeout=10)
+        self.n = 0
+        self.send("Page.enable")
+        self.send("Runtime.enable")
+
+    def send(self, method, params=None, timeout=60):
+        self.n += 1
+        self.ws.send(json.dumps({"id": self.n, "method": method, "params": params or {}}))
+        end = time.time() + timeout
+        while time.time() < end:
+            msg = json.loads(self.ws.recv(timeout=max(1, end - time.time())))
+            if msg.get("id") == self.n:
+                if "error" in msg:
+                    raise RuntimeError(f"{method} : {msg['error'].get('message')}")
+                return msg.get("result", {})
+        raise TimeoutError(method)
+
+    def js(self, expression):
+        r = self.send("Runtime.evaluate", {"expression": expression, "returnByValue": True, "awaitPromise": True})
+        if r.get("exceptionDetails"):
+            raise RuntimeError(r["exceptionDetails"].get("text", "erreur JavaScript"))
+        return r.get("result", {}).get("value")
+
+    def go(self, url, wait="document.readyState === 'complete'"):
+        self.send("Page.navigate", {"url": url})
+        time.sleep(1)
+        return self.until(wait, 30)
+
+    def until(self, condition, timeout=30):
+        end = time.time() + timeout
+        while time.time() < end:
+            try:
+                if self.js(f"!!({condition})"):
+                    return True
+            except RuntimeError:
+                pass
+            time.sleep(0.5)
+        return False
+
+    def type(self, text):
+        self.send("Input.insertText", {"text": text})
+
+    def key(self, key, code, keycode):
+        for kind in ("keyDown", "keyUp"):
+            self.send("Input.dispatchKeyEvent", {"type": kind, "key": key, "code": code, "windowsVirtualKeyCode": keycode})
+
+    def shot(self, name):
+        os.makedirs(CAPTURES, exist_ok=True)
+        data = self.send("Page.captureScreenshot", {"format": "png"})["data"]
+        with open(f"{CAPTURES}/{name}.png", "wb") as f:
+            f.write(base64.b64decode(data))
+        return f"{name}.png"
+
+
+class Browser(Tab):
+    """Chromium sans écran ; l'objet lui-même pilote le premier onglet."""
+
+    def __init__(self):
+        exe = shutil.which("chromium") or shutil.which("chromium-browser")
+        if not exe:
+            raise Skip("chromium absent")
+        self.profile = f"/tmp/banc-chromium-{os.getpid()}"
+        self.proc = subprocess.Popen([exe, "--headless=new", "--no-sandbox", "--disable-gpu", "--ignore-certificate-errors", "--hide-scrollbars",
+                                      "--window-size=1280,800", "--remote-debugging-port=9333", f"--user-data-dir={self.profile}", "about:blank"],
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        for _ in range(40):
+            try:
+                pages = json.loads(urllib.request.urlopen("http://127.0.0.1:9333/json", timeout=2).read())
+                url = next(p["webSocketDebuggerUrl"] for p in pages if p.get("type") == "page")
+                break
+            except Exception:  # noqa: BLE001 : Chromium démarre
+                time.sleep(0.5)
+        else:
+            raise RuntimeError("Chromium ne répond pas")
+        super().__init__(url)
+
+    def new_tab(self):
+        """Onglet de plus, dans la même session de navigation (mêmes cookies)."""
+        req = urllib.request.Request("http://127.0.0.1:9333/json/new?about:blank", method="PUT")
+        info = json.loads(urllib.request.urlopen(req, timeout=10).read())
+        return Tab(info["webSocketDebuggerUrl"], info["id"])
+
+    def close_tab(self, tab):
+        """Fermeture brutale de l'onglet, comme un utilisateur qui ferme l'onglet du navigateur."""
+        urllib.request.urlopen(f"http://127.0.0.1:9333/json/close/{tab.id}", timeout=10).read()
+
+    def close(self):
+        try:
+            self.ws.close()
+        finally:
+            stop(self.proc)
+            shutil.rmtree(self.profile, ignore_errors=True)
+
+
+def portal_tests(args, state, api, report, admin, win_password):
+    base = f"https://127.0.0.1:{args.portal_port}"
+    try:
+        browser = Browser()
+    except Skip as e:
+        def skipped():
+            raise e
+        report.check("G-POR-01", "Portail web", skipped)
+        return
+    a = state["comptes"][f"{PREFIX}user"]
+    try:
+        def login():
+            expect(browser.go(base + "/"), "page du portail injoignable")
+            expect(browser.until("document.getElementById('login')", 20), "pas de formulaire de connexion")
+            code = fresh_code(state, f"{PREFIX}user")
+            browser.js(f"""(() => {{ const set = (id, v) => {{ const e = document.getElementById(id); e.value = v; }};
+                set('login', {json.dumps(f'{PREFIX}user')}); set('pass', {json.dumps(a['mot_de_passe'])}); set('code', {json.dumps(code)});
+                document.querySelector('form button[type=submit]').click(); }})()""")
+            expect(browser.until("document.querySelectorAll('.srv').length > 0", 20), f"pas de liste de serveurs : {browser.js('document.body.innerText').strip()[:200]}")
+            names = browser.js("[...document.querySelectorAll('.srv b')].map(b => b.textContent)")
+            EVIDENCE["capture"] = browser.shot("G-POR-01")
+            return {"detail": f"{len(names)} serveurs affichés", "preuve": "\n".join(names)}
+        report.check("G-POR-01", "Portail : connexion (mot de passe et code) et serveurs", login)
+
+        def terminal():
+            since = now_utc()
+            expect(browser.go(f"{base}/session/{PREFIX}win-ssh"), "page du terminal injoignable")
+            time.sleep(6)
+            browser.js("document.querySelector('.xterm-helper-textarea')?.focus()")
+            browser.type("whoami")
+            browser.key("Enter", "Enter", 13)
+            ok = browser.until(f"document.querySelector('.xterm-rows')?.innerText.toLowerCase().includes({json.dumps(args.win_user.lower())})", 20)
+            EVIDENCE["capture"] = browser.shot("G-POR-02")
+            text = browser.js("document.querySelector('.xterm-rows')?.innerText || ''")
+            expect(ok, f"whoami sans réponse dans le terminal : {text.strip()[-200:]}")
+            browser.js("document.getElementById('fermer').click()")
+            time.sleep(3)
+            browser.go(base + "/?accueil")
+            found = sessions_since(api, admin, f"{PREFIX}win-ssh", since)
+            return {"detail": "terminal SSH dans le navigateur, commande exécutée", "preuve": text.strip()[-500:] + (f"\n\nsession {found[0]['id'][:8]} · {found[0]['type']} · adresse {found[0]['adresse']}" if found else "")}
+        report.check("G-POR-02", "Portail : terminal SSH (coffre)", terminal)
+
+        def desktop(ident, target, account=None, kind="rdp"):
+            def run_it():
+                since = now_utc()
+                expect(browser.go(f"{base}/bureau/{target}"), "page du bureau injoignable")
+                expect(browser.until("document.getElementById('ouvrir')", 15), "pas de bouton « Ouvrir la session »")
+                time.sleep(2)
+                if account:
+                    browser.js(f"document.getElementById('utilisateur').value = {json.dumps(account)}; document.getElementById('mdp').value = {json.dumps(win_password)};")
+                browser.js("document.getElementById('ouvrir').click()")
+                connected = browser.until("!document.getElementById('cad').disabled", 40)
+                time.sleep(15)
+                EVIDENCE["capture"] = browser.shot(ident)
+                expect(connected, f"session non ouverte : {browser.js('document.getElementById(\"erreur\")?.textContent || document.body.innerText').strip()[:200]}")
+                # Bouton « Fermer » de la page : la Gate doit fermer la session aussitôt.
+                browser.js("document.getElementById('fermer').click()")
+                closed_at = now_utc()
+                result = recorded_session_web(api, admin, target, since, kind)
+                ended = session_end(api, admin, target, since)
+                expect(ended and (ended - closed_at).total_seconds() < 10, f"session fermée {round((ended - closed_at).total_seconds()) if ended else '?'} s après « Fermer »")
+                browser.go(base + "/?accueil")
+                return result
+            return run_it
+        report.check("G-POR-03", "Portail : Bureau à distance au coffre (navigateur)", desktop("G-POR-03", f"{PREFIX}win-coffre"))
+        report.check("G-POR-04", "Portail : Bureau à distance enregistré (navigateur)", desktop("G-POR-04", f"{PREFIX}win-enr", args.win_user))
+        report.check("G-POR-05", "Portail : Bureau à distance en rebond (navigateur)", desktop("G-POR-05", f"{PREFIX}win-rebond", args.win_user, "rebond"))
+
+        def tab_closed():
+            since = now_utc()
+            tab = browser.new_tab()
+            tab.go(f"{base}/bureau/{PREFIX}win-coffre")
+            expect(tab.until("document.getElementById('ouvrir')", 15), "pas de bouton « Ouvrir la session »")
+            time.sleep(2)
+            tab.js("document.getElementById('ouvrir').click()")
+            expect(tab.until("!document.getElementById('cad').disabled", 40), "session non ouverte")
+            time.sleep(5)
+            browser.close_tab(tab)
+            closed_at = now_utc()
+            ended = None
+            for _ in range(60):
+                ended = session_end(api, admin, f"{PREFIX}win-coffre", since)
+                if ended:
+                    break
+                time.sleep(1)
+            expect(ended, "session toujours ouverte 60 s après la fermeture de l'onglet")
+            delay = (ended - closed_at).total_seconds()
+            expect(delay < 15, f"session fermée {round(delay)} s après la fermeture de l'onglet")
+            return {"detail": f"session fermée {max(0, round(delay))} s après la fermeture de l'onglet", "preuve": EVIDENCE.get("preuve", "")}
+        report.check("G-POR-07", "Portail : onglet fermé, session fermée", tab_closed)
+
+        if args.web:
+            def web():
+                since = now_utc()
+                browser.go(f"{base}/web/{PREFIX}web")
+                time.sleep(10)
+                EVIDENCE["capture"] = browser.shot("G-POR-06")
+                title = browser.js("document.title")
+                events = events_since(api, admin, f"{PREFIX}web", since)
+                expect(any(e["evenement"] == "web.ouvert" for e in events), "pas de web.ouvert au journal")
+                return {"detail": f"page « {title} » à travers le portail", "preuve": journal_lines(events)}
+            report.check("G-POR-06", "Portail : interface web", web)
+    finally:
+        browser.close()
+
+
+def session_end(api, admin, target, since):
+    """Fin de la première session de ce serveur ouverte depuis `since` (None : pas encore finie)."""
+    found = sessions_since(api, admin, target, since)
+    if found and found[0]["fin"]:
+        EVIDENCE["preuve"] = f"session {found[0]['id'][:8]} · {found[0]['type']} ({found[0]['detail']}) · début {found[0]['debut'][11:19]} · fin {found[0]['fin'][11:19]}"
+        return parse_date(found[0]["fin"])
+    return None
+
+
+def recorded_session_web(api, admin, target, since, kind):
+    found = []
+    for _ in range(30):
+        found = sessions_since(api, admin, target, since)
+        if found and found[0]["fin"]:
+            break
+        time.sleep(1)
+    expect(found, f"aucune session {target} au journal des sessions")
+    s = found[0]
+    EVIDENCE["preuve"] = (f"session {s['id'][:8]} · {s['compte']} → {s['serveur']} · {s['type']} ({s['detail']})\n"
+                          f"adresse {s['adresse']} · {s['octets']} octets · enregistrée : {'oui' if s['enregistree'] else 'non'}")
+    expect("(web)" in (s["adresse"] or ""), f"adresse sans « (web) » : {s['adresse']}")
+    expect(s["type"] == kind, f"type {s['type']} au lieu de {kind}")
+    if kind == "rdp":
+        expect(s["enregistree"], "session non enregistrée")
+    return f"{s['octets']} octets, {s['detail']}"
+
+
 def tests(args, state, api, report, win_password, targets):
     admin = login(api, state, f"{PREFIX}admin")
     user = login(api, state, f"{PREFIX}user")
@@ -506,6 +934,13 @@ def tests(args, state, api, report, win_password, targets):
             return {"detail": f"{len(page)} octets, {sorted(seen)}", "preuve": journal_lines(events), "capture": capture}
         report.check("G-WEB-01", "Interface web par jeton", web)
 
+    if want("ssh") and args.windows_ssh:
+        ssh_more(args, state, api, report, admin, user, win_password)
+    if want("portail") and args.windows and args.portal_port:
+        portal_tests(args, state, api, report, admin, win_password)
+    if want("audit"):
+        audit_more(args, state, api, report, admin)
+
     def chain():
         out = gate("audit", "--verify", "--last", "1")
         expect("Log intact" in out, out.strip()[-200:])
@@ -522,7 +957,8 @@ def main():
     parser.add_argument("--web", help="console web à publier, hôte:port (ex. l'interface de Proxmox, 8006)")
     parser.add_argument("--api-port", type=int, default=8443)
     parser.add_argument("--rdp-port", type=int, default=3390)
-    parser.add_argument("--only", help="parties : rdp, ssh, web (séparées par des virgules)")
+    parser.add_argument("--portal-port", type=int, default=8446, help="écoute HTTPS locale du portail pour les essais (0 : pas d'essais du portail)")
+    parser.add_argument("--only", help="parties : rdp, ssh, web, portail, audit (séparées par des virgules)")
     args = parser.parse_args()
     if os.geteuid() != 0:
         sys.exit("À lancer en root (sudo), sur la Gate de test.")

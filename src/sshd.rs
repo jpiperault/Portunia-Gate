@@ -58,7 +58,10 @@ pub async fn run(state: Arc<State>) -> Result<()> {
         auth_rejection_time_initial: Some(Duration::ZERO),
         max_auth_attempts: 6,
         inactivity_timeout: Some(Duration::from_secs(8 * 3600)),
-        keepalive_interval: Some(Duration::from_secs(30)),
+        // Pas de keepalive SSH : envoyé aussi pendant l'authentification, il fait couper OpenSSH
+        // (« bad message during authentication: type 80 ») quand l'utilisateur met plus de
+        // 30 s à taper son code. Un poste disparu est repéré par le keepalive TCP (voir `serve`).
+        keepalive_interval: None,
         ..Default::default()
     });
     tracing::info!("{} {}", t!("SSH listening on", "SSH en écoute sur"), state.config.ssh_listen);
@@ -91,6 +94,17 @@ pub async fn run(state: Arc<State>) -> Result<()> {
     }
 }
 
+/// Keepalive TCP : un poste disparu (réseau coupé, veille) ferme sa session en 2 minutes environ,
+/// sans message SSH qui gênerait l'authentification.
+fn tcp_keepalive(socket: &std::net::TcpStream) {
+    let keepalive = socket2::TcpKeepalive::new().with_time(Duration::from_secs(60)).with_interval(Duration::from_secs(15));
+    #[cfg(target_os = "linux")]
+    let keepalive = keepalive.with_retries(4);
+    if let Err(e) = socket2::SockRef::from(socket).set_tcp_keepalive(&keepalive) {
+        tracing::debug!("keepalive TCP : {e}");
+    }
+}
+
 fn duplicate(tcp: tokio::net::TcpStream) -> std::io::Result<(tokio::net::TcpStream, std::net::TcpStream)> {
     let std = tcp.into_std()?;
     let copy = std.try_clone()?;
@@ -105,6 +119,7 @@ where
     // Double du socket : fermer la session ne suffit pas tant que la négociation n'a pas abouti,
     // la tâche resterait en attente et garderait sa place.
     let Ok((tcp, socket)) = duplicate(tcp) else { return };
+    tcp_keepalive(&socket);
     let cut = || {
         let _ = socket.shutdown(std::net::Shutdown::Both);
     };
