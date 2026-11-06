@@ -46,6 +46,7 @@ sudo portunia-gate user totp marc                         # enrols (or re-enrols
 sudo portunia-gate user passwd marc                       # sets the password (no longer temporary)
 sudo portunia-gate user reset-password marc               # new temporary password, shown once
 sudo portunia-gate user reset-code marc                   # erases the code: a new one is enrolled at the next sign-in
+sudo portunia-gate user rdp-password marc                 # RDP password for mstsc without Portunia (shown once; --remove takes it away)
 sudo portunia-gate user disable marc                      # --undo re-enables
 sudo portunia-gate user delete marc                       # past sessions stay in the log
 ```
@@ -192,6 +193,8 @@ sudo portunia-gate rdp on                                   # listening within 3
 sudo portunia-gate rdp off                                  # sessions under way continue
 sudo portunia-gate rdp show                                 # state, port, modes, certificate shown to the clients
 ```
+
+Without Portunia (0.34): in mstsc, computer = the Gate's address and the native RDP port, user = `login%server` (or `login%server%code`), password = the account's RDP password (`user rdp-password`, or the web portal). Vault and Recorded servers; Recorded ones must accept a connection without NLA.
 
 With Docker, keep port 3390 inside the container and change the published one (`PORTUNIA_GATE_RDP_PORT` in `.env`), then `--address`. `PORTUNIA_GATE_RDP_BIND` limits listening to one address (0.0.0.0 by default).
 

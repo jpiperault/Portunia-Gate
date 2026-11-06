@@ -567,6 +567,9 @@ fn build_router(portal: Portal) -> Router {
         .route("/ws/{nom}", get(terminal))
         .route("/bureau/{nom}", get(page_desktop))
         .route("/api/rdp/{nom}", post(desktop_ticket))
+        // Client RDP ordinaire sans Portunia (mstsc) : instructions et mot de passe RDP.
+        .route("/api/rdp-natif", get(native_info))
+        .route("/api/rdp-natif/mot-de-passe", post(native_password_new).delete(native_password_remove))
         .route("/ws-rdp", get(desktop))
         // Assistance à distance : téléchargement de Portunia Assist et relais (sans compte).
         .route("/assistance", get(page_assist))
@@ -1199,6 +1202,78 @@ async fn desktop_ticket(AxState(portal): Ctx, ConnectInfo(peer): ConnectInfo<Soc
         // « fichiers » : la page propose la copie de fichiers (la Gate la bloque sinon).
         // « coffre » : la Gate ouvre la session Windows ; la page s'authentifie avec le jeton.
         Ok::<_, anyhow::Error>(Json(json!({ "jeton": ticket, "compte": target.account, "fichiers": access.files, "coffre": target.vaulted() })).into_response())
+    }
+    .await;
+    result.unwrap_or_else(internal)
+}
+
+/// Connexion avec un client RDP ordinaire (mstsc) : entrée ouverte ou non, adresse à taper,
+/// serveurs accessibles ainsi, mot de passe RDP défini ou non, code exigé ou non.
+async fn native_info(AxState(portal): Ctx, headers: HeaderMap) -> Response {
+    let result = async {
+        let state = &portal.state;
+        let s = settings(state).await?;
+        let Some(w) = web_session(&portal, &headers, &s).await? else {
+            return Ok(err(StatusCode::UNAUTHORIZED, t!("Session expired", "Session expirée")));
+        };
+        let native = crate::rdpnative::settings(state).await?;
+        // Adresse à taper : celle réglée pour les fichiers .rdp, sinon le nom du portail.
+        let address = if native.address.trim().is_empty() {
+            let host = headers.get(header::HOST).and_then(|v| v.to_str().ok()).unwrap_or_default();
+            let host = match host.rsplit_once(':') {
+                Some((h, p)) if !h.is_empty() && p.chars().all(|c| c.is_ascii_digit()) => h,
+                _ => host,
+            };
+            format!("{host}:{}", native.port)
+        } else {
+            native.address.trim().to_string()
+        };
+        let targets = model::allowed_targets(&state.db, w.user.id).await?;
+        let names: Vec<String> = targets.iter().filter(|t| t.is_rdp() && t.mode != "rebond" && native.allows(&t.mode)).map(|t| t.name.clone()).collect();
+        let password = model::rdp_password(&state.db, w.user.id).await?.map(|(_, at)| at);
+        let code = !w.user.policy(&state.db).await?.satisfied(&std::collections::BTreeSet::from([crate::auth::Factor::Password]));
+        Ok::<_, anyhow::Error>(
+            Json(json!({
+                "actif": native.enabled, "adresse": address, "login": w.user.login, "serveurs": names,
+                "mot_de_passe": password, "code": code,
+            }))
+            .into_response(),
+        )
+    }
+    .await;
+    result.unwrap_or_else(internal)
+}
+
+/// Nouveau mot de passe RDP du compte (l'ancien ne vaut plus), montré une seule fois.
+async fn native_password_new(AxState(portal): Ctx, headers: HeaderMap) -> Response {
+    let result = async {
+        let state = &portal.state;
+        let s = settings(state).await?;
+        if !same_site(&headers, &s.url) {
+            return Ok(err(StatusCode::FORBIDDEN, t!("Request refused", "Requête refusée")));
+        }
+        let Some(w) = web_session(&portal, &headers, &s).await? else {
+            return Ok(err(StatusCode::UNAUTHORIZED, t!("Session expired", "Session expirée")));
+        };
+        let password = crate::rdplogin::new_password(state, &w.user, &w.user.login).await?;
+        Ok::<_, anyhow::Error>(Json(json!({ "mot_de_passe": password })).into_response())
+    }
+    .await;
+    result.unwrap_or_else(internal)
+}
+
+async fn native_password_remove(AxState(portal): Ctx, headers: HeaderMap) -> Response {
+    let result = async {
+        let state = &portal.state;
+        let s = settings(state).await?;
+        if !same_site(&headers, &s.url) {
+            return Ok(err(StatusCode::FORBIDDEN, t!("Request refused", "Requête refusée")));
+        }
+        let Some(w) = web_session(&portal, &headers, &s).await? else {
+            return Ok(err(StatusCode::UNAUTHORIZED, t!("Session expired", "Session expirée")));
+        };
+        crate::rdplogin::remove_password(state, &w.user, &w.user.login).await?;
+        Ok::<_, anyhow::Error>(Json(json!({ "etat": "ok" })).into_response())
     }
     .await;
     result.unwrap_or_else(internal)

@@ -132,6 +132,72 @@ function remaining(iso) {
   return min >= 60 ? `${Math.floor(min / 60)} h ${String(min % 60).padStart(2, '0')}` : `${min} min`;
 }
 
+// Client RDP ordinaire (mstsc, Windows App, Remmina) sans Portunia : quoi taper, mot de passe RDP.
+function nativePanel(info) {
+  const when = (iso) => new Date(iso).toLocaleString(document.documentElement.lang);
+  const state = h('p', { class: 'native-hint' });
+  const shown = h('div', { class: 'native-pw', hidden: true });
+  const remove = h('button', { class: 'btn', type: 'button' }, T('Remove', 'Retirer'));
+  const create = h('button', { class: 'btn primary', type: 'button' });
+  const paint = () => {
+    state.textContent = info.mot_de_passe
+      ? T(`RDP password created on ${when(info.mot_de_passe)}.`, `Mot de passe RDP créé le ${when(info.mot_de_passe)}.`)
+      : T('You have no RDP password yet.', 'Vous n\'avez pas encore de mot de passe RDP.');
+    create.textContent = info.mot_de_passe ? T('New password', 'Nouveau mot de passe') : T('Create my RDP password', 'Créer mon mot de passe RDP');
+    remove.hidden = !info.mot_de_passe;
+  };
+  create.onclick = async () => {
+    if (info.mot_de_passe && !confirm(T('The current RDP password will stop working. Continue?', 'Le mot de passe RDP actuel ne marchera plus. Continuer ?'))) return;
+    create.disabled = true;
+    try {
+      const r = await api('POST', '/api/rdp-natif/mot-de-passe');
+      info.mot_de_passe = new Date().toISOString();
+      const code = h('code', {}, r.mot_de_passe);
+      const copy = h('button', { class: 'btn', type: 'button', onclick: () => navigator.clipboard?.writeText(r.mot_de_passe).then(() => { copy.textContent = T('Copied', 'Copié'); }, () => {}) }, T('Copy', 'Copier'));
+      shown.replaceChildren(code, copy, h('span', { class: 'native-hint' }, T('Shown only once: save it in the RDP client or a password manager.', 'Affiché une seule fois : enregistrez-le dans le client RDP ou un gestionnaire de mots de passe.')));
+      shown.hidden = false;
+    } catch (err) {
+      alert(err.message);
+    }
+    create.disabled = false;
+    paint();
+  };
+  remove.onclick = async () => {
+    if (!confirm(T('Remove your RDP password? You will no longer be able to connect with an RDP client this way.', 'Retirer votre mot de passe RDP ? Vous ne pourrez plus vous connecter ainsi avec un client RDP.'))) return;
+    try {
+      await api('DELETE', '/api/rdp-natif/mot-de-passe');
+      info.mot_de_passe = null;
+      shown.hidden = true;
+    } catch (err) {
+      alert(err.message);
+    }
+    paint();
+  };
+  paint();
+  const user = (srv) => `${info.login}%${srv}${info.code ? T('%code', '%code') : ''}`;
+  // Raccourci .rdp : adresse et utilisateur déjà remplis ; le mot de passe reste demandé.
+  const shortcut = (srv) => {
+    const text = [`full address:s:${info.adresse}`, `username:s:${info.login}%${srv}`, 'prompt for credentials:i:1', 'enablecredsspsupport:i:1', 'authentication level:i:2', ''].join('\r\n');
+    const a = h('a', { href: URL.createObjectURL(new Blob([text], { type: 'application/x-rdp' })), download: `${srv}.rdp` });
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  };
+  return h('details', { class: 'native' },
+    h('summary', {}, T('Connect with mstsc or Windows App (without Portunia)', 'Se connecter avec mstsc ou Windows App (sans Portunia)')),
+    h('div', { class: 'native-body' },
+      h('p', {}, T('In the Remote Desktop client, type:', 'Dans le client Bureau à distance, tapez :')),
+      h('ul', {},
+        h('li', {}, T('Computer: ', 'Ordinateur : '), h('code', {}, info.adresse)),
+        h('li', {}, T('User: ', 'Utilisateur : '), h('code', {}, user(T('server', 'serveur')))),
+        h('li', {}, T('Password: your RDP password (below)', 'Mot de passe : votre mot de passe RDP (ci-dessous)'))),
+      info.code ? h('p', { class: 'native-hint' }, T('Add the 6-digit code of your authentication app after a second %: julien%srv-ad-01%123456.', 'Ajoutez le code à 6 chiffres de votre application d\'authentification après un second % : julien%srv-ad-01%123456.')) : null,
+      h('div', { class: 'native-list' }, ...info.serveurs.map((srv) => h('div', { class: 'native-row' },
+        h('b', {}, srv), h('code', {}, user(srv)),
+        h('button', { class: 'btn', type: 'button', title: T('Shortcut for mstsc with the address and user filled in', 'Raccourci pour mstsc, adresse et utilisateur remplis'), onclick: () => shortcut(srv) }, '.rdp')))),
+      h('div', { class: 'native-actions' }, create, remove),
+      state, shown));
+}
+
 async function home(state) {
   let data;
   try {
@@ -182,9 +248,12 @@ async function home(state) {
   };
   search.addEventListener('input', render);
   render();
+  // Entrée RDP native ouverte et serveurs accessibles ainsi : panneau d'aide (Gate 0.34).
+  const native = await api('GET', '/api/rdp-natif').catch(() => null);
   app.replaceChildren(
     h('header', { class: 'top' }, brand(state.nom), h('span', { class: 'grow' }), timer, h('span', { class: 'who' }, data.login), langSwitch(), logout),
-    h('section', { class: 'home' }, h('div', { style: 'display:flex;gap:12px;flex-wrap:wrap;align-items:center' }, search, count), grid));
+    h('section', { class: 'home' }, h('div', { style: 'display:flex;gap:12px;flex-wrap:wrap;align-items:center' }, search, count), grid,
+      native?.actif && native.serveurs.length ? nativePanel(native) : null));
 }
 
 // ---------- Démarrage ----------

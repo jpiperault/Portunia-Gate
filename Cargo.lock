@@ -2571,7 +2571,7 @@ dependencies = [
 
 [[package]]
 name = "portunia-gate"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "anyhow",
  "argon2 0.5.3",
@@ -3761,8 +3761,6 @@ dependencies = [
 [[package]]
 name = "sspi"
 version = "0.23.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d3fa5e1405884e88be309bd801760caa84c654be746fe4261ab407496263692"
 dependencies = [
  "async-dnssd",
  "async-recursion",

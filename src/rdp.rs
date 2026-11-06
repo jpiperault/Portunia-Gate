@@ -143,13 +143,13 @@ pub(crate) fn selected_protocol(x224: &[u8]) -> Option<u32> {
 }
 
 /// Clé publique du certificat du serveur, liée à l'authentification CredSSP.
-fn public_key(der: &[u8]) -> Result<Vec<u8>> {
+pub(crate) fn public_key(der: &[u8]) -> Result<Vec<u8>> {
     let (_, cert) = x509_parser::parse_x509_certificate(der).map_err(|e| anyhow!("certificat du serveur illisible : {e}"))?;
     Ok(cert.public_key().subject_public_key.data.to_vec())
 }
 
 /// Longueur totale d'un message DER (CredSSP), si son en-tête est complet.
-fn der_len(buf: &[u8]) -> Result<Option<usize>> {
+pub(crate) fn der_len(buf: &[u8]) -> Result<Option<usize>> {
     if buf.len() < 2 {
         return Ok(None);
     }
@@ -203,7 +203,7 @@ async fn client_der(socket: &mut WebSocket, buf: &mut Vec<u8>) -> Result<Vec<u8>
     }
 }
 
-fn encode(request: &TsRequest) -> Result<Vec<u8>> {
+pub(crate) fn encode(request: &TsRequest) -> Result<Vec<u8>> {
     let mut out = Vec::with_capacity(usize::from(request.buffer_len()?));
     request.encode_ts_request(&mut out)?;
     Ok(out)

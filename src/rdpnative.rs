@@ -12,13 +12,17 @@
 //!   identifiants, seulement si le serveur accepte une connexion sans NLA (l'utilisateur les
 //!   tape alors dans l'écran de connexion de Windows).
 //!
+//! Sans fichier .rdp (Gate 0.34) : l'utilisateur tape « compte%serveur » (ou
+//! « compte%serveur%code ») et son mot de passe RDP ; la Gate vérifie le tout par NLA
+//! (voir rdplogin.rs), puis continue comme en coffre ou en enregistré.
+//!
 //! Dans ces deux derniers modes, le poste négocie avec la Gate un TLS simple, sans NLA, avec le
 //! certificat de l'API. Sa première trame (MCS Connect Initial) annonce le protocole qu'il croit
 //! négocié : la Gate y met celui choisi avec le serveur, sinon Windows coupe. Ensuite elle
 //! relaie et enregistre exactement comme le passage RDCleanPath.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     net::SocketAddr,
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -39,9 +43,11 @@ use uuid::Uuid;
 
 use crate::{
     audit,
+    auth::{self, Factor},
     keys::sha256_hex,
     model,
     rdp::{self, Allowed, ClientRx, ClientTx, Origin, HYBRID, HYBRID_EX, SSL},
+    rdplogin,
     State,
 };
 
@@ -322,7 +328,7 @@ async fn handle(state: &Arc<State>, mut tcp: TcpStream, peer: SocketAddr, permit
         .map_err(|_| anyhow!(t!("no RDP request", "pas de demande RDP")))??;
     let request = parse_request(&cr)?;
     let Some(token) = request.token.clone() else {
-        bail!(t!("connection without a Portunia .rdp file (no token)", "connexion sans fichier .rdp de Portunia (pas de jeton)"));
+        return login_entry(state, tcp, peer, permit, &request).await;
     };
     let s = settings(state).await?;
     let addr = format!("{} (natif)", peer.ip());
@@ -369,6 +375,178 @@ async fn handle(state: &Arc<State>, mut tcp: TcpStream, peer: SocketAddr, permit
         .await
         .map_err(|_| anyhow!(t!("the RDP client no longer answers", "le client RDP ne répond plus")))??;
     if !patch_selected_protocol(&mut first, protocol) {
+        tracing::warn!("{}", t!("native RDP: client data without the negotiated protocol (old client?)", "RDP natif : données du client sans le protocole négocié (client ancien ?)"));
+    }
+    let id = Uuid::new_v4();
+    let capture = rdp::start_recording(state, id, &a).await.map_err(|(_, e)| e)?;
+    let (rx, tx) = tokio::io::split(&mut client);
+    rdp::relay_session(state, id, &a, &Origin::Native, capture, o.tls, ClientRx::Native(rx), ClientTx::Native(tx), first).await
+}
+
+// ---------- Sans Portunia : « compte%serveur » et mot de passe RDP ----------
+
+/// Qui se connecte et vers quoi, trouvé pendant l'authentification NLA.
+struct Found {
+    user: model::User,
+    target: model::Target,
+    access: model::Access,
+    /// Pas du code à usage unique, consommé une fois le mot de passe vérifié.
+    totp_step: Option<i64>,
+}
+
+/// Réponse X.224 de la Gate elle-même, avec ce protocole choisi.
+fn confirm(protocol: u32) -> Vec<u8> {
+    let mut out = vec![3, 0, 0, 19, 14, 0xD0, 0, 0, 0x12, 0x34, 0, 0x02, 0x03, 8, 0];
+    out.extend_from_slice(&protocol.to_le_bytes());
+    out
+}
+
+/// Clé publique du certificat présenté aux postes (liée à l'authentification NLA).
+fn gate_public_key(state: &State) -> Result<Vec<u8>> {
+    let files = crate::tls::files(&state.config.data_dir);
+    let chain = std::fs::read(&files.cert)?;
+    let leaf = CertificateDer::pem_slice_iter(&chain).next().ok_or_else(|| anyhow!(t!("empty API certificate", "certificat de l'API vide")))?.map_err(|e| anyhow!("{e}"))?;
+    rdp::public_key(&leaf)
+}
+
+/// Compte, code et serveur tapés dans le client ; le mot de passe RDP attendu si tout va.
+async fn resolve(state: &State, account: &str, ip: &str, s: &Settings) -> Option<(Found, String)> {
+    let db = &state.db;
+    let refuse = |login: String, target: String, why: &'static str| async move {
+        audit::note(db, &login, "acces.refuse", json!({ "cible": target, "type": "rdp natif", "raison": why, "adresse": format!("{ip} (natif)") })).await;
+    };
+    let Some(c) = rdplogin::parse_combo(account) else {
+        refuse(account.chars().take(64).collect(), String::new(), "identifiant sans « %serveur »").await;
+        return None;
+    };
+    if let crate::limits::Verdict::Blocked { first } = state.limits.attempt(&c.login, ip) {
+        if first {
+            refuse(c.login.clone(), c.target.clone(), "trop d'essais").await;
+        }
+        return None;
+    }
+    let Some(user) = model::user_by_login(db, &c.login).await.ok().flatten().filter(|u| !u.disabled) else {
+        refuse(c.login.clone(), c.target.clone(), "compte inconnu ou désactivé").await;
+        return None;
+    };
+    let Some((sealed, _)) = model::rdp_password(db, user.id).await.ok().flatten() else {
+        refuse(c.login.clone(), c.target.clone(), "pas de mot de passe RDP").await;
+        return None;
+    };
+    let password = state.keys.open(&format!("rdp:{}", user.id), &sealed).ok().and_then(|p| String::from_utf8(p).ok())?;
+    // Code à usage unique : exigé sauf si la politique du compte se contente d'un mot de passe.
+    let needs_code = !user.policy(db).await.ok()?.satisfied(&BTreeSet::from([Factor::Password]));
+    let totp_step = match (&c.code, &user.totp_secret) {
+        (Some(code), Some(secret)) => {
+            let secret = state.keys.open(&format!("totp:{}", user.id), secret).ok()?;
+            let Some(step) = auth::totp_check(&secret, code, user.totp_last_step) else {
+                refuse(c.login.clone(), c.target.clone(), "code faux").await;
+                return None;
+            };
+            Some(step)
+        }
+        (Some(_), None) => {
+            refuse(c.login.clone(), c.target.clone(), "code donné, mais aucun code enrôlé").await;
+            return None;
+        }
+        (None, _) if needs_code => {
+            refuse(c.login.clone(), c.target.clone(), "code manquant (compte%serveur%code)").await;
+            return None;
+        }
+        (None, _) => None,
+    };
+    // Serveur : par son nom, sinon par son adresse, parmi ceux autorisés en ce moment.
+    let targets = model::allowed_targets(db, user.id).await.ok()?;
+    let target = targets.iter().find(|t| t.name.eq_ignore_ascii_case(&c.target)).or_else(|| targets.iter().find(|t| t.host.eq_ignore_ascii_case(&c.target))).cloned();
+    let Some(target) = target.filter(|t| t.is_rdp()) else {
+        refuse(c.login.clone(), c.target.clone(), "serveur Windows inconnu ou non autorisé").await;
+        return None;
+    };
+    // Rebond : chiffrement de bout en bout, impossible une fois la Gate authentifiée à la place du serveur.
+    if target.mode == "rebond" || !s.allows(&target.mode) {
+        refuse(c.login.clone(), target.name.clone(), "mode non ouvert à cette entrée (rebond : fichier .rdp de Portunia)").await;
+        return None;
+    }
+    let access = model::access(db, user.id, target.id).await.ok().flatten()?;
+    Some((Found { user, target, access, totp_step }, password))
+}
+
+/// Première trame du poste, peut-être déjà en partie lue avec la fin de l'authentification.
+async fn read_first(client: &mut (impl AsyncRead + Unpin), leftover: Vec<u8>) -> Result<Vec<u8>> {
+    let mut chained = std::io::Cursor::new(leftover).chain(&mut *client);
+    let pdu = tokio::time::timeout(Duration::from_secs(30), rdp::read_tpkt(&mut chained, 64 * 1024))
+        .await
+        .map_err(|_| anyhow!(t!("the RDP client no longer answers", "le client RDP ne répond plus")))??;
+    let (cursor, _) = chained.into_inner();
+    if (cursor.position() as usize) < cursor.get_ref().len() {
+        bail!(t!("unexpected data from the RDP client", "données inattendues du client RDP"));
+    }
+    Ok(pdu)
+}
+
+/// Connexion sans fichier .rdp : la Gate négocie TLS et NLA avec le poste en son nom, puis
+/// ouvre le serveur comme en coffre (compte du coffre) ou en enregistré (sans NLA vers le
+/// serveur : l'utilisateur ouvre sa session Windows dans l'écran de connexion).
+async fn login_entry(state: &Arc<State>, mut tcp: TcpStream, peer: SocketAddr, permit: tokio::sync::OwnedSemaphorePermit, request: &Request) -> Result<()> {
+    let db = &state.db;
+    let ip = peer.ip().to_string();
+    if request.protocols() & (HYBRID | HYBRID_EX) == 0 {
+        bail!(t!(
+            "connection without a Portunia .rdp file and without NLA: the RDP client must use NLA (user « account%server »)",
+            "connexion sans fichier .rdp de Portunia et sans NLA : le client RDP doit utiliser NLA (utilisateur « compte%serveur »)"
+        ));
+    }
+    let s = settings(state).await?;
+    tcp.write_all(&confirm(HYBRID)).await?;
+    let key = gate_public_key(state)?;
+    let mut client = tokio::time::timeout(Duration::from_secs(15), tls_acceptor(state)?.accept(tcp))
+        .await
+        .map_err(|_| anyhow!(t!("the RDP client did not finish TLS", "le client RDP n'a pas fini la négociation TLS")))??;
+    let found: Arc<Mutex<Option<Found>>> = Arc::default();
+    let lookup: rdplogin::Lookup = {
+        let (state, found, ip) = (state.clone(), found.clone(), ip.clone());
+        Box::new(move |account: &str| {
+            let result = tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(resolve(&state, account, &ip, &s)));
+            result.map(|(f, password)| {
+                *found.lock().unwrap_or_else(|e| e.into_inner()) = Some(f);
+                password
+            })
+        })
+    };
+    let leftover = match tokio::time::timeout(Duration::from_secs(60), rdplogin::accept(&mut client, key, lookup)).await {
+        Ok(result) => result?,
+        Err(_) => bail!(t!("the RDP client did not finish authenticating", "le client RDP n'a pas fini de s'authentifier")),
+    };
+    let Some(f) = found.lock().unwrap_or_else(|e| e.into_inner()).take() else {
+        bail!(t!("authentication without an account", "authentification sans compte"));
+    };
+    // Mot de passe vérifié : erreurs oubliées, code consommé (une seule fois).
+    state.limits.success(&f.user.login, &ip);
+    let addr = format!("{ip} (natif)");
+    if let Some(step) = f.totp_step {
+        if !model::consume_totp_step(db, f.user.id, step).await? {
+            audit::note(db, &f.user.login, "acces.refuse", json!({ "cible": f.target.name, "type": "rdp natif", "raison": "code déjà utilisé", "adresse": addr })).await;
+            bail!(t!("code already used", "code déjà utilisé"));
+        }
+    }
+    drop(permit);
+    let a = Allowed { user: f.user, target: f.target, access: f.access, addr };
+    rdp::check_space(state, &a).await.map_err(|(_, e)| e)?;
+    let account = if a.target.vaulted() { Some(rdp::vault_account(state, &a).await.map_err(|(_, e)| e)?) } else { None };
+    let wanted = if account.is_some() { SSL | HYBRID | HYBRID_EX } else { SSL };
+    let mut o = match rdp::open_server(db, &a, &build_request(Some(neg_request(wanted)))).await {
+        Ok(o) => o,
+        Err((_, e)) => {
+            let hint = if account.is_none() { " (mode enregistré : le serveur doit accepter une connexion sans NLA, sinon passez-le en coffre)" } else { "" };
+            audit::note(db, &a.user.login, "acces.refuse", json!({ "cible": a.target.name, "type": "rdp natif", "raison": format!("{e:#}{hint}"), "adresse": a.addr })).await;
+            return Err(e);
+        }
+    };
+    if let Some((account, password)) = account {
+        rdp::gate_login(db, &a, &mut o, &account, password).await.map_err(|(_, e)| e)?;
+    }
+    let mut first = read_first(&mut client, leftover).await?;
+    if !patch_selected_protocol(&mut first, o.protocol()) {
         tracing::warn!("{}", t!("native RDP: client data without the negotiated protocol (old client?)", "RDP natif : données du client sans le protocole négocié (client ancien ?)"));
     }
     let id = Uuid::new_v4();
@@ -498,6 +676,25 @@ mod tests {
         let mut short = core[..200].to_vec();
         short[2] = 200;
         assert!(!patch_selected_protocol(&mut short, HYBRID_EX));
+    }
+
+    #[test]
+    fn reponse_de_la_gate() {
+        let c = confirm(HYBRID);
+        assert_eq!(c.len(), 19);
+        assert_eq!(u16::from_be_bytes([c[2], c[3]]), 19);
+        assert_eq!(rdp::selected_protocol(&c), Some(HYBRID));
+    }
+
+    #[tokio::test]
+    async fn premiere_trame_apres_l_authentification() {
+        // Début de la trame déjà lu avec l'authentification, la suite sur la connexion.
+        let pdu = [3u8, 0, 0, 7, 2, 0xF0, 0x80];
+        let mut rest: &[u8] = &pdu[3..];
+        assert_eq!(read_first(&mut rest, pdu[..3].to_vec()).await.unwrap(), pdu);
+        // Rien de lu d'avance.
+        let mut all: &[u8] = &pdu;
+        assert_eq!(read_first(&mut all, Vec::new()).await.unwrap(), pdu);
     }
 
     #[test]

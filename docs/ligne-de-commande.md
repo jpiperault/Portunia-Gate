@@ -46,6 +46,7 @@ sudo portunia-gate user totp marc                         # enrôle (ou réenrô
 sudo portunia-gate user passwd marc                       # fixe le mot de passe (il n'est plus provisoire)
 sudo portunia-gate user reset-password marc               # nouveau mot de passe provisoire, affiché une fois
 sudo portunia-gate user reset-code marc                   # efface le code : un nouveau s'enrôle à la prochaine connexion
+sudo portunia-gate user rdp-password marc                 # mot de passe RDP pour mstsc sans Portunia (affiché une fois ; --remove le retire)
 sudo portunia-gate user disable marc                      # --undo réactive
 sudo portunia-gate user delete marc                       # les sessions passées restent au journal
 ```
@@ -192,6 +193,8 @@ sudo portunia-gate rdp on                                  # en écoute sous 3 s
 sudo portunia-gate rdp off                                 # les sessions en cours continuent
 sudo portunia-gate rdp show                                # état, port, modes, certificat présenté aux clients
 ```
+
+Sans Portunia (0.34) : dans mstsc, ordinateur = adresse de la Gate et port du RDP natif, utilisateur = `compte%serveur` (ou `compte%serveur%code`), mot de passe = mot de passe RDP du compte (`user rdp-password`, ou le portail web). Serveurs en coffre et en enregistré ; ceux en enregistré doivent accepter une connexion sans NLA.
 
 Avec Docker, gardez le port 3390 dans le conteneur et changez celui qui est publié (`PORTUNIA_GATE_RDP_PORT` dans `.env`), puis `--address`. `PORTUNIA_GATE_RDP_BIND` limite l'écoute à une adresse (0.0.0.0 par défaut).
 

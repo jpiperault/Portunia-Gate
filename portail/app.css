@@ -84,6 +84,19 @@ input.code { letter-spacing: .3em; font-family: var(--mono); }
 .assist-steps { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 6px; font-size: 14px; }
 .assist-dl { text-align: center; text-decoration: none; padding: 11px 16px; font-size: 15px; }
 
+/* Client RDP ordinaire sans Portunia (mstsc) */
+.native { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; font-size: 13.5px; }
+.native summary { cursor: pointer; font-weight: 600; }
+.native-body { display: flex; flex-direction: column; gap: 10px; margin-top: 10px; }
+.native-body p, .native-body ul { margin: 0; }
+.native-hint { color: var(--muted); font-size: 12.5px; margin: 0; }
+.native-list { display: flex; flex-direction: column; gap: 6px; }
+.native-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.native-row b { min-width: 120px; }
+.native-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.native-pw { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.native code { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 2px 6px; overflow-wrap: anywhere; }
+
 /* Copie de fichiers du Bureau à distance */
 .files-panel { position: fixed; right: max(16px, env(safe-area-inset-right, 0px)); top: 64px; width: min(360px, calc(100vw - 32px)); max-height: calc(100vh - 140px); overflow: auto; background: var(--card); color: var(--text); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; box-shadow: 0 10px 30px rgb(0 0 0 / .35); z-index: 4; font-size: 13px; }
 .files-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }

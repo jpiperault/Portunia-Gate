@@ -24,6 +24,7 @@ mod rdp;
 mod rdpcap;
 mod rdpclip;
 mod rdpnative;
+mod rdplogin;
 mod recording;
 mod replay;
 mod sshd;
@@ -366,6 +367,13 @@ enum UserCmd {
     ResetPassword { login: String },
     /// Erases the TOTP code: a new one is enrolled at the next sign-in in Portunia, or with « user totp ». Closes their sessions.
     ResetCode { login: String },
+    /// RDP password for an ordinary RDP client without Portunia (mstsc, user « login%server »): a new one, shown once, or --remove.
+    RdpPassword {
+        login: String,
+        /// Removes it: the account can no longer connect this way.
+        #[arg(long)]
+        remove: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1396,6 +1404,23 @@ async fn user_cmd(state: &State, cmd: UserCmd) -> Result<()> {
                     "À la prochaine connexion dans Portunia, l'utilisateur choisit le sien. Sans Portunia : sudo portunia-gate user passwd. Ses sessions ouvertes se ferment sous 30 secondes."
                 )
             );
+        }
+        UserCmd::RdpPassword { login, remove } => {
+            let user = find(login).await?;
+            if remove {
+                rdplogin::remove_password(state, &user, "console").await?;
+                println!("{}", t!("RDP password removed.", "Mot de passe RDP retiré."));
+            } else {
+                let password = rdplogin::new_password(state, &user, "console").await?;
+                println!("{}", t!(format!("RDP password of {} (shown only once): {password}", user.login), format!("Mot de passe RDP de {} (affiché une seule fois) : {password}", user.login)));
+                println!(
+                    "{}",
+                    t!(
+                        "In mstsc: Computer = the Gate's address and native RDP port; User = login%server (or login%server%code). Native RDP must be on (« portunia-gate rdp on »).",
+                        "Dans mstsc : Ordinateur = adresse de la Gate et port du RDP natif ; Utilisateur = compte%serveur (ou compte%serveur%code). Le RDP natif doit être ouvert (« portunia-gate rdp on »)."
+                    )
+                );
+            }
         }
         UserCmd::ResetCode { login } => {
             let user = find(login).await?;

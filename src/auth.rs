@@ -17,6 +17,14 @@ pub fn temp_password() -> Result<String> {
     Ok(chars.chunks(4).map(|c| c.iter().collect::<String>()).collect::<Vec<_>>().join("-"))
 }
 
+/// Mot de passe RDP : 20 caractères sans ambiguïté, par groupes de 5 (environ 110 bits).
+pub fn rdp_password() -> Result<String> {
+    const ALPHABET: &[u8] = b"abcdefghjkmnpqrstuvwxyzACDEFGHJKLMNPQRTUVWXY34679";
+    let bytes = crate::keys::random::<20>()?;
+    let chars: Vec<char> = bytes.iter().map(|b| ALPHABET[*b as usize % ALPHABET.len()] as char).collect();
+    Ok(chars.chunks(5).map(|c| c.iter().collect::<String>()).collect::<Vec<_>>().join("-"))
+}
+
 pub fn hash_password(password: &str) -> Result<String> {
     if password.chars().count() < 10 {
         bail!(t!("The password must have at least 10 characters", "Le mot de passe doit contenir au moins 10 caractères"));

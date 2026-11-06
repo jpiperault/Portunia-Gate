@@ -1,6 +1,6 @@
 [package]
 name = "portunia-gate"
-version = "0.33.0"
+version = "0.34.0"
 description = "Passerelle SSH et Bureau à distance de Portunia : accès contrôlés, coffre, enregistrement et journal d'audit"
 edition = "2021"
 publish = false
@@ -73,3 +73,7 @@ assets = [
 
 [profile.release]
 strip = true
+
+# sspi retouché : serveur SPNEGO qui demande l'identité au bon moment (vendor/sspi/PORTUNIA.md).
+[patch.crates-io]
+sspi = { path = "vendor/sspi" }

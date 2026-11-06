@@ -174,6 +174,25 @@ pub async fn consume_totp_step(db: &PgPool, user: Uuid, step: i64) -> Result<boo
     Ok(done.rows_affected() == 1)
 }
 
+/// Mot de passe RDP scellé du compte, et sa date ; aucun : entrée RDP sans Portunia fermée
+/// pour ce compte.
+pub async fn rdp_password(db: &PgPool, user: Uuid) -> Result<Option<(Vec<u8>, DateTime<Utc>)>> {
+    let row: Option<(Option<Vec<u8>>, Option<DateTime<Utc>>)> = sqlx::query_as("SELECT rdp_password, rdp_password_at FROM users WHERE id = $1")
+        .bind(user)
+        .fetch_optional(db)
+        .await?;
+    Ok(row.and_then(|(p, at)| Some((p?, at.unwrap_or_else(Utc::now)))))
+}
+
+pub async fn set_rdp_password(db: &PgPool, user: Uuid, sealed: Option<Vec<u8>>) -> Result<()> {
+    sqlx::query("UPDATE users SET rdp_password = $2, rdp_password_at = CASE WHEN $2 IS NULL THEN NULL ELSE now() END WHERE id = $1")
+        .bind(user)
+        .bind(sealed)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
 pub async fn user_key_owner(db: &PgPool, fingerprint: &str) -> Result<Option<Uuid>> {
     Ok(sqlx::query_scalar("SELECT user_id FROM user_keys WHERE fingerprint = $1")
         .bind(fingerprint)
