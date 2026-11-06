@@ -290,6 +290,11 @@ fn client_answer(server_x224: &[u8], protocol: u32) -> Option<Vec<u8>> {
 /// Première trame du poste (MCS Connect Initial) : le protocole qu'il croit négocié devient
 /// celui choisi avec le serveur. Bloc CS_CORE (type 0xC001, version 0x0008000x), champ
 /// serverSelectedProtocol à l'octet 212. false : bloc absent ou trop court (client ancien).
+///
+/// Le pipeline graphique RDP 8 (RNS_UD_CS_SUPPORT_DYNVC_GFX_PROTOCOL, 0x0100 dans
+/// earlyCapabilityFlags, octet 144) est retiré : la session étant enregistrée, Windows doit
+/// envoyer l'image en mises à jour classiques, que la relecture sait décoder (l'image par le
+/// canal dynamique « Microsoft::Windows::RDS::Graphics » donnait un écran noir à la relecture).
 fn patch_selected_protocol(pdu: &mut [u8], protocol: u32) -> bool {
     let mut i = 0;
     while i + 8 <= pdu.len() {
@@ -297,6 +302,7 @@ fn patch_selected_protocol(pdu: &mut [u8], protocol: u32) -> bool {
             let len = u16::from_le_bytes([pdu[i + 2], pdu[i + 3]]) as usize;
             if len >= 216 && i + len <= pdu.len() {
                 pdu[i + 212..i + 216].copy_from_slice(&protocol.to_le_bytes());
+                pdu[i + 145] &= !0x01;
                 return true;
             }
         }
@@ -667,11 +673,14 @@ mod tests {
         core[0..4].copy_from_slice(&[0x01, 0xC0, 216, 0]);
         core[4..8].copy_from_slice(&[0x0C, 0x00, 0x08, 0x00]);
         core[212..216].copy_from_slice(&SSL.to_le_bytes());
+        // earlyCapabilityFlags de xfreerdp 3 (GFX annoncé).
+        core[144..146].copy_from_slice(&0x0FB2u16.to_le_bytes());
         let mut pdu = vec![9u8; 40];
         pdu.extend_from_slice(&core);
         pdu.extend_from_slice(&[0x02, 0xC0, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
         assert!(patch_selected_protocol(&mut pdu, HYBRID_EX));
         assert_eq!(u32::from_le_bytes(pdu[40 + 212..40 + 216].try_into().unwrap()), HYBRID_EX);
+        assert_eq!(u16::from_le_bytes(pdu[40 + 144..40 + 146].try_into().unwrap()), 0x0EB2, "GFX retiré, le reste gardé");
         // Bloc trop court (client ancien) : rien n'est touché.
         let mut short = core[..200].to_vec();
         short[2] = 200;
