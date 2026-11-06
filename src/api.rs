@@ -108,6 +108,7 @@ pub async fn run(state: Arc<State>) -> anyhow::Result<()> {
         .route("/api/v1/admin/portail/tester", post(admin_portal_check))
         .route("/api/v1/admin/portail/certificat", put(admin_cert_import).delete(admin_cert_remove))
         .route("/api/v1/admin/portail/acme", put(admin_acme_update))
+        .route("/api/v1/admin/acces-cloudflare", get(admin_cf_access).put(admin_cf_access_update))
         .route("/api/v1/admin/portail/acme/renouveler", post(admin_acme_renew))
         .route("/api/v1/admin/portail/relais/{id}", delete(admin_relay_remove))
         .route("/api/v1/audit/sessions", get(audit_sessions))
@@ -184,6 +185,8 @@ async fn gate_info(state: &State) -> anyhow::Result<Value> {
         "memo_mot_de_passe": remember_allowed(state).await?,
         "duree_session_h": session_hours(state).await?,
         "relecture_propres": own_sessions_allowed(state).await?,
+        // Accès de l'extérieur par Cloudflare en TCP (cloudflared sur le poste) : noms d'hôte publiés.
+        "cloudflare": crate::cfaccess::hosts(state).await.ok().filter(|h| !h.is_empty()),
     }))
 }
 
@@ -2476,6 +2479,43 @@ async fn admin_portal(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
         "connexions_jour": logins,
         "echecs_jour": failures,
     })))
+}
+
+async fn admin_cf_access(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
+    admin(&api, &headers).await?;
+    let state = &api.state;
+    let tunnel = crate::tunnel::token(state).await?.and_then(|t| crate::tunnel::parse(&t).ok()).map(|(_, i)| i.tunnel);
+    Ok(Json(json!({
+        "hotes": crate::cfaccess::hosts(state).await?,
+        // Publication par l'API Cloudflare possible seulement avec le tunnel lancé par la Gate.
+        "tunnel_gere": tunnel,
+        "rdp_natif_actif": crate::rdpnative::settings(state).await?.enabled,
+    })))
+}
+
+#[derive(Deserialize)]
+struct CfAccessBody {
+    #[serde(default)]
+    api: String,
+    #[serde(default)]
+    ssh: String,
+    #[serde(default)]
+    rdp: String,
+    /// Jeton d'API Cloudflare pour publier routes et DNS ; absent : noms enregistrés seulement.
+    jeton_api: Option<String>,
+}
+
+async fn admin_cf_access_update(AxState(api): Ctx, headers: HeaderMap, Json(body): Json<CfAccessBody>) -> ApiResult {
+    let actor = admin(&api, &headers).await?;
+    let state = &api.state;
+    let wanted = crate::cfaccess::Hosts { api: body.api, ssh: body.ssh, rdp: body.rdp };
+    let bad = |e: anyhow::Error| err(StatusCode::BAD_REQUEST, &e.to_string());
+    let (hosts, done) = match body.jeton_api.filter(|t| !t.trim().is_empty()) {
+        Some(token) => crate::cfaccess::publish(state, &token, &wanted).await.map_err(bad)?,
+        None => (crate::cfaccess::set_hosts(state, &wanted).await.map_err(bad)?, Vec::new()),
+    };
+    audit::note(&state.db, &actor.login, "acces_cloudflare.modifie", json!({ "hotes": hosts, "publie": !done.is_empty() })).await;
+    Ok(Json(json!({ "hotes": hosts, "fait": done })))
 }
 
 #[derive(Deserialize)]

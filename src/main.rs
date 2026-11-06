@@ -11,6 +11,7 @@ mod assist;
 mod audit;
 mod auth;
 mod cert;
+mod cfaccess;
 mod config;
 mod health;
 mod http;
@@ -330,6 +331,19 @@ enum PortalCmd {
         /// Removes the token: the Gate stops its tunnel.
         #[arg(long, conflicts_with = "token")]
         remove: bool,
+    },
+    /// Access from outside through Cloudflare in TCP (cloudflared on the workstation): host names of
+    /// the API, SSH and native RDP; without options, shows them. Empty value: nothing for that service.
+    Tcp {
+        #[arg(long)]
+        api: Option<String>,
+        #[arg(long)]
+        ssh: Option<String>,
+        #[arg(long)]
+        rdp: Option<String>,
+        /// Also publishes them in the Gate's tunnel and the DNS: asks a Cloudflare API token (not kept).
+        #[arg(long)]
+        publish: bool,
     },
     /// Lists the dedicated relays.
     RelayList,
@@ -2553,6 +2567,41 @@ async fn portal_cmd(state: &State, cmd: PortalCmd) -> Result<()> {
             let a = acme::config(state).await?;
             if a.actif {
                 println!("Let's Encrypt : {} ({})", a.domaines.join(", "), a.methode);
+            }
+            return Ok(());
+        }
+        PortalCmd::Tcp { api, ssh, rdp, publish } => {
+            let mut hosts = cfaccess::hosts(state).await?;
+            let changed = api.is_some() || ssh.is_some() || rdp.is_some() || publish;
+            if let Some(v) = api {
+                hosts.api = v;
+            }
+            if let Some(v) = ssh {
+                hosts.ssh = v;
+            }
+            if let Some(v) = rdp {
+                hosts.rdp = v;
+            }
+            if changed {
+                let saved = if publish {
+                    let token = prompt_secret(t!("Cloudflare API token (Cloudflare Tunnel › Edit, DNS › Edit): ", "Jeton d'API Cloudflare (Cloudflare Tunnel › Edit, DNS › Edit) : "))?;
+                    let (saved, done) = cfaccess::publish(state, &token, &hosts).await?;
+                    for line in done {
+                        println!("✓ {line}");
+                    }
+                    saved
+                } else {
+                    cfaccess::set_hosts(state, &hosts).await?
+                };
+                audit::log(&state.db, "console", "acces_cloudflare.modifie", json!({ "hotes": saved, "publie": publish })).await?;
+                hosts = saved;
+            }
+            let show = |h: &str| if h.is_empty() { "—".to_string() } else { h.to_string() };
+            println!("API : {}", show(&hosts.api));
+            println!("SSH : {}", show(&hosts.ssh));
+            println!("RDP : {}", show(&hosts.rdp));
+            if !hosts.rdp.is_empty() && !rdpnative::settings(state).await?.enabled {
+                println!("{}", t!("(native RDP is off: sudo portunia-gate rdp on)", "(RDP natif coupé : sudo portunia-gate rdp on)"));
             }
             return Ok(());
         }

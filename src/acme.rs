@@ -509,7 +509,7 @@ async fn challenge_errors(order: &mut instant_acme::Order) -> Option<String> {
 
 // ---------- Cloudflare DNS ----------
 
-fn cloudflare_call(token: &str, method: &str, path: &str, body: Option<Value>) -> Result<Value> {
+pub(crate) fn cloudflare_call(token: &str, method: &str, path: &str, body: Option<Value>) -> Result<Value> {
     let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(20)).build();
     let req = agent
         .request(method, &format!("{CLOUDFLARE_API}{path}"))
@@ -529,8 +529,8 @@ fn cloudflare_call(token: &str, method: &str, path: &str, body: Option<Value>) -
             bail!(
                 "{} ({detail})",
                 t!(
-                    "Cloudflare refuses the token: it needs Zone › DNS › Edit on this zone",
-                    "Cloudflare refuse le jeton : il lui faut Zone › DNS › Edit sur cette zone"
+                    "Cloudflare refuses the token: it needs Zone › DNS › Edit on this zone (and Account › Cloudflare Tunnel › Edit to publish tunnel routes)",
+                    "Cloudflare refuse le jeton : il lui faut Zone › DNS › Edit sur cette zone (et Account › Cloudflare Tunnel › Edit pour publier des routes du tunnel)"
                 )
             );
         }
@@ -547,7 +547,7 @@ fn json_of(r: ureq::Response) -> Value {
 }
 
 /// Zone Cloudflare qui porte ce nom : le plus long suffixe trouvé.
-fn zone_for(token: &str, name: &str) -> Result<String> {
+pub(crate) fn zone_for(token: &str, name: &str) -> Result<String> {
     let labels: Vec<&str> = name.split('.').collect();
     for i in 0..labels.len().saturating_sub(1) {
         let candidate = labels[i..].join(".");
