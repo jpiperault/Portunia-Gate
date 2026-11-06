@@ -137,6 +137,32 @@ pub struct Settings {
     pub code_always: bool,
     pub turnstile_site: String,
     pub turnstile_secret: Option<String>,
+    /// Adresse de l'entrée interne (https://gate.lan:8446) ; vide : celle que demande le navigateur.
+    pub internal_url: String,
+    /// Code exigé par l'entrée interne (par défaut comme l'entrée externe).
+    pub internal_code_always: bool,
+}
+
+impl Settings {
+    /// Adresse attendue des pages de cette entrée (vide : l'hôte demandé par le navigateur).
+    pub fn url_for(&self, entry: Entry) -> &str {
+        match entry {
+            Entry::Internal => &self.internal_url,
+            Entry::External => &self.url,
+        }
+    }
+
+    pub fn code_for(&self, entry: Entry) -> bool {
+        match entry {
+            Entry::Internal => self.internal_code_always,
+            Entry::External => self.code_always,
+        }
+    }
+
+    /// Turnstile (contrôle anti-robots de Cloudflare) : entrée externe seulement.
+    pub fn turnstile_for(&self, entry: Entry) -> Option<&str> {
+        self.turnstile_secret.as_deref().filter(|_| entry == Entry::External && !self.turnstile_site.is_empty())
+    }
 }
 
 async fn text_setting(state: &State, key: &str, default: &str) -> Result<String> {
@@ -155,14 +181,17 @@ pub async fn settings(state: &State) -> Result<Settings> {
         }
         _ => None,
     };
+    let code_always = get("portail_code_toujours").await?.and_then(|v| v.as_bool()).unwrap_or(true);
     Ok(Settings {
+        internal_url: text_setting(state, "portail_interne_url", "").await?,
+        internal_code_always: get("portail_interne_code_toujours").await?.and_then(|v| v.as_bool()).unwrap_or(code_always),
         enabled: get("portail_actif").await?.and_then(|v| v.as_bool()).unwrap_or(false),
         url: text_setting(state, "portail_url", "").await?,
         group: text_setting(state, "portail_groupe", "Accès web").await?,
         hours: get("portail_duree_h").await?.and_then(|v| v.as_i64()).unwrap_or(1).clamp(1, 12),
         idle_min: get("portail_inactivite_min").await?.and_then(|v| v.as_i64()).unwrap_or(15).clamp(5, 240),
         clipboard: get("portail_presse_papiers").await?.and_then(|v| v.as_bool()).unwrap_or(true),
-        code_always: get("portail_code_toujours").await?.and_then(|v| v.as_bool()).unwrap_or(true),
+        code_always,
         turnstile_site: text_setting(state, "portail_turnstile_site", "").await?,
         turnstile_secret: secret,
     })
@@ -207,7 +236,25 @@ impl Mode {
 
 pub const DEFAULT_HEADER: &str = "X-Forwarded-For";
 
+/// Entrée par laquelle une requête arrive au portail : le réseau de l'entreprise, ou l'entrée
+/// externe (Cloudflare, HTTPS direct, proxy ou relais). Décidée par la Gate, jamais par le navigateur.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Entry {
+    Internal,
+    External,
+}
+
+impl Entry {
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Internal => "interne",
+            Self::External => "externe",
+        }
+    }
+}
+
 /// Réglages d'exposition gardés en mémoire : lus à chaque requête, sans passer par la base.
+/// `mode` est l'entrée externe (Internal : aucune) ; l'entrée interne s'y ajoute quand elle est ouverte.
 #[derive(Clone, Debug, Default)]
 pub struct Exposure {
     pub mode: Mode,
@@ -215,8 +262,12 @@ pub struct Exposure {
     pub proxies: Vec<String>,
     /// Mode proxy : en-tête qui porte l'adresse réelle.
     pub header: String,
-    /// Modes interne et direct : réseaux admis.
+    /// Mode direct : réseaux admis.
     pub networks: Vec<String>,
+    /// Entrée interne ouverte en plus de l'entrée externe.
+    pub internal: bool,
+    /// Entrée interne : réseaux admis (vide : les réseaux privés).
+    pub internal_networks: Vec<String>,
     /// Mode Cloudflare : voisins dont cloudflared peut venir, en plus de la machine elle-même.
     pub tunnel_peers: Vec<String>,
 }
@@ -233,16 +284,29 @@ fn is_private(ip: IpAddr) -> bool {
 }
 
 impl Exposure {
-    /// Cette adresse peut-elle joindre le portail ? `tls` : par l'écoute HTTPS.
-    fn admits(&self, tls: bool, ip: IpAddr) -> bool {
+    /// L'entrée interne est-elle ouverte (seule, en mode interne, ou avec une entrée externe) ?
+    pub fn internal_open(&self) -> bool {
+        self.internal || self.mode == Mode::Internal
+    }
+
+    /// Par quelle entrée cette adresse joint-elle le portail (aucune : refusée) ? `tls` : par
+    /// l'écoute HTTPS. Les sources déclarées de l'entrée externe (proxys, Cloudflare) passent
+    /// d'abord : un proxy de la DMZ a une adresse privée sans être un poste interne.
+    fn entry(&self, tls: bool, ip: IpAddr) -> Option<Entry> {
         match self.mode {
-            Mode::Cloudflare => !tls || from_cloudflare(ip),
-            Mode::Proxy => listed(&self.proxies, ip),
-            Mode::Relay => false,
-            Mode::Direct => self.networks.is_empty() || listed(&self.networks, ip),
-            Mode::Internal if self.networks.is_empty() => is_private(ip),
-            Mode::Internal => listed(&self.networks, ip),
+            // Écoute HTTP locale : celle de cloudflared.
+            Mode::Cloudflare if !tls => return Some(Entry::External),
+            Mode::Cloudflare if from_cloudflare(ip) => return Some(Entry::External),
+            Mode::Proxy if listed(&self.proxies, ip) => return Some(Entry::External),
+            _ => {}
         }
+        if self.internal_open() && (if self.internal_networks.is_empty() { is_private(ip) } else { listed(&self.internal_networks, ip) }) {
+            return Some(Entry::Internal);
+        }
+        if self.mode == Mode::Direct && (self.networks.is_empty() || listed(&self.networks, ip)) {
+            return Some(Entry::External);
+        }
+        None
     }
 
     /// Adresse réelle du navigateur : l'en-tête n'est cru que venant d'une source déclarée.
@@ -300,14 +364,42 @@ async fn read_exposure(state: &State) -> Result<Exposure> {
     let list = |value: Option<serde_json::Value>| -> Vec<String> {
         value.and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default()
     };
-    let mode = text_setting(state, "portail_mode", "cloudflare").await?;
+    let mode = Mode::parse(&text_setting(state, "portail_mode", "cloudflare").await?).unwrap_or_default();
+    let networks = list(model::setting(&state.db, "portail_reseaux").await?);
+    let internal_networks = match model::setting(&state.db, "portail_interne_reseaux").await? {
+        Some(v) => list(Some(v)),
+        // Avant les deux entrées, le mode interne gardait ses réseaux dans « portail_reseaux ».
+        None if mode == Mode::Internal => networks.clone(),
+        None => Vec::new(),
+    };
     Ok(Exposure {
-        mode: Mode::parse(&mode).unwrap_or_default(),
+        mode,
         proxies: list(model::setting(&state.db, "portail_proxys").await?),
         header: text_setting(state, "portail_entete", DEFAULT_HEADER).await?,
-        networks: list(model::setting(&state.db, "portail_reseaux").await?),
+        networks,
+        internal: model::setting(&state.db, "portail_interne").await?.and_then(|v| v.as_bool()).unwrap_or(false),
+        internal_networks,
         tunnel_peers: state.config.portal_tunnel_peers.clone(),
     })
+}
+
+/// Exposition telle que notée au journal.
+pub fn exposure_note(e: &Exposure) -> Value {
+    json!({
+        "mode": e.mode.id(),
+        "proxys": e.proxies,
+        "entete": e.header,
+        "reseaux": e.networks,
+        "interne": e.internal_open(),
+        "interne_reseaux": e.internal_networks,
+    })
+}
+
+/// Changement de l'entrée interne ; ce qui est absent reste tel quel.
+#[derive(Default)]
+pub struct InternalChange<'a> {
+    pub open: Option<bool>,
+    pub networks: Option<&'a [String]>,
 }
 
 pub async fn reload_exposure(state: &State) -> Result<()> {
@@ -322,10 +414,28 @@ pub fn exposure(state: &State) -> Exposure {
 
 /// Change l'exposition (ce qui est absent reste tel quel). Commun à Portunia et à la ligne de
 /// commande. Renvoie l'état obtenu, ou le message à montrer.
-pub async fn set_exposure(state: &State, mode: Option<&str>, proxies: Option<&[String]>, header: Option<&str>, networks: Option<&[String]>) -> Result<Exposure> {
+pub async fn set_exposure(state: &State, mode: Option<&str>, proxies: Option<&[String]>, header: Option<&str>, networks: Option<&[String]>, internal: InternalChange<'_>) -> Result<Exposure> {
     let mut next = read_exposure(state).await?;
     if let Some(text) = mode {
         next.mode = Mode::parse(text).ok_or_else(|| anyhow!(t!("Mode: cloudflare, internal, direct, proxy or relay", "Mode : cloudflare, interne, direct, proxy ou relais")))?;
+    }
+    if let Some(open) = internal.open {
+        next.internal = open;
+    }
+    // Ancienne forme (Portunia et commandes d'avant les deux entrées) : « interne » et ses réseaux.
+    let legacy = internal.networks.is_none() && next.mode == Mode::Internal && mode.is_some();
+    if let Some(items) = internal.networks.or(if legacy { networks } else { None }) {
+        next.internal_networks = parse_networks(items).map_err(|bad| anyhow!(t!(format!("Invalid address: {bad}"), format!("Adresse invalide : {bad}"))))?;
+    }
+    if next.mode == Mode::Internal {
+        // « interne » seul : pas d'entrée externe, l'entrée interne ouverte.
+        if internal.open == Some(false) {
+            bail!(t!(
+                "No external entry: the internal entry cannot be closed (close the portal instead)",
+                "Pas d'entrée externe : l'entrée interne ne peut pas être fermée (fermez plutôt le portail)"
+            ));
+        }
+        next.internal = true;
     }
     if let Some(items) = proxies {
         next.proxies = parse_networks(items).map_err(|bad| anyhow!(t!(format!("Invalid address: {bad}"), format!("Adresse invalide : {bad}"))))?;
@@ -349,6 +459,8 @@ pub async fn set_exposure(state: &State, mode: Option<&str>, proxies: Option<&[S
     model::set_setting(&state.db, "portail_proxys", json!(next.proxies)).await?;
     model::set_setting(&state.db, "portail_entete", json!(next.header)).await?;
     model::set_setting(&state.db, "portail_reseaux", json!(next.networks)).await?;
+    model::set_setting(&state.db, "portail_interne", json!(next.internal)).await?;
+    model::set_setting(&state.db, "portail_interne_reseaux", json!(next.internal_networks)).await?;
     reload_exposure(state).await?;
     Ok(next)
 }
@@ -630,10 +742,12 @@ fn client_ip(portal: &Portal, peer: SocketAddr, headers: &HeaderMap) -> String {
 }
 
 /// En-têtes de sécurité sur toutes les réponses ; ce que le mode d'exposition n'admet pas est refusé.
-async fn guard(AxState(portal): Ctx, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: axum::extract::Request, next: Next) -> Response {
-    if !portal.relayed && !exposure(&portal.state).admits(portal.tls, peer.ip().to_canonical()) {
+async fn guard(AxState(portal): Ctx, ConnectInfo(peer): ConnectInfo<SocketAddr>, mut req: axum::extract::Request, next: Next) -> Response {
+    let entry = if portal.relayed { Some(Entry::External) } else { exposure(&portal.state).entry(portal.tls, peer.ip().to_canonical()) };
+    let Some(entry) = entry else {
         return (StatusCode::FORBIDDEN, t!("Access restricted", "Accès restreint")).into_response();
-    }
+    };
+    req.extensions_mut().insert(entry);
     let mut res = next.run(req).await;
     // Page d'un serveur web relayé : ses propres règles de sécurité, pas celles du portail.
     if res.extensions().get::<crate::webproxy::Proxied>().is_some() {
@@ -909,7 +1023,7 @@ pub(crate) async fn in_group(db: &sqlx::PgPool, user: Uuid, group: &str) -> Resu
     .await?)
 }
 
-async fn status(AxState(portal): Ctx, headers: HeaderMap) -> Response {
+async fn status(AxState(portal): Ctx, axum::Extension(entry): axum::Extension<Entry>, headers: HeaderMap) -> Response {
     let result = async {
         let state = &portal.state;
         let s = settings(state).await?;
@@ -918,9 +1032,10 @@ async fn status(AxState(portal): Ctx, headers: HeaderMap) -> Response {
             "actif": s.enabled,
             "nom": text_setting(state, "nom", "Portunia Gate").await?,
             "banniere": text_setting(state, "banniere", crate::sshd::default_banner()).await?,
-            "turnstile": (!s.turnstile_site.is_empty() && s.turnstile_secret.is_some()).then_some(s.turnstile_site.clone()),
+            "turnstile": s.turnstile_for(entry).map(|_| s.turnstile_site.clone()),
             "presse_papiers": s.clipboard,
-            "code_facultatif": !s.code_always,
+            "code_facultatif": !s.code_for(entry),
+            "entree": entry.id(),
             "inactivite_min": s.idle_min,
             "connecte": session.map(|w| json!({ "login": w.user.login, "expire": w.expires })),
         }))
@@ -972,7 +1087,7 @@ async fn turnstile_ok(secret: &str, response: &str, ip: &str) -> bool {
     .unwrap_or(false)
 }
 
-async fn login(AxState(portal): Ctx, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap, Json(body): Json<LoginBody>) -> Response {
+async fn login(AxState(portal): Ctx, axum::Extension(entry): axum::Extension<Entry>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap, Json(body): Json<LoginBody>) -> Response {
     let ip = client_ip(&portal, peer, &headers);
     let result = async {
         let state = &portal.state;
@@ -980,7 +1095,7 @@ async fn login(AxState(portal): Ctx, ConnectInfo(peer): ConnectInfo<SocketAddr>,
         if !s.enabled {
             return Ok(err(StatusCode::SERVICE_UNAVAILABLE, t!("Portal closed", "Portail fermé")));
         }
-        if !same_site(&headers, &s.url) {
+        if !same_site(&headers, s.url_for(entry)) {
             return Ok(err(StatusCode::FORBIDDEN, t!("Request refused", "Requête refusée")));
         }
         let login = body.login.trim().to_string();
@@ -990,7 +1105,7 @@ async fn login(AxState(portal): Ctx, ConnectInfo(peer): ConnectInfo<SocketAddr>,
             }
             return Ok(err(StatusCode::TOO_MANY_REQUESTS, t!("Too many attempts: try again in a few minutes", "Trop d'essais : réessayez dans quelques minutes")));
         }
-        if let Some(secret) = s.turnstile_secret.as_deref().filter(|_| !s.turnstile_site.is_empty()) {
+        if let Some(secret) = s.turnstile_for(entry) {
             if !turnstile_ok(secret, &body.turnstile, &ip).await {
                 return Ok(err(StatusCode::FORBIDDEN, t!("Anti-bot check failed: reload the page", "Vérification anti-robots échouée : rechargez la page")));
             }
@@ -1007,7 +1122,7 @@ async fn login(AxState(portal): Ctx, ConnectInfo(peer): ConnectInfo<SocketAddr>,
         let password_only = BTreeSet::from([auth::Factor::Password]);
         let need_code = match &user.auth_policy {
             Some(text) => !auth::Policy::parse(text)?.satisfied(&password_only),
-            None => s.code_always,
+            None => s.code_for(entry),
         };
         // Première connexion et code perdu : pas depuis Internet.
         if user.must_change_password || (need_code && user.totp_secret.is_none()) {
@@ -1042,7 +1157,7 @@ async fn login(AxState(portal): Ctx, ConnectInfo(peer): ConnectInfo<SocketAddr>,
             .bind(&ip)
             .execute(&state.db)
             .await?;
-        audit::note(&state.db, &user.login, "portail.connexion", json!({ "facteurs": if need_code { json!(["mot de passe", "code"]) } else { json!(["mot de passe"]) }, "adresse": ip })).await;
+        audit::note(&state.db, &user.login, "portail.connexion", json!({ "facteurs": if need_code { json!(["mot de passe", "code"]) } else { json!(["mot de passe"]) }, "adresse": ip, "entree": entry.id() })).await;
         let cookie = format!("{COOKIE}={token}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age={}", s.hours * 3600);
         Ok::<_, anyhow::Error>(
             (
@@ -1113,6 +1228,7 @@ struct Size {
 
 async fn terminal(
     AxState(portal): Ctx,
+    axum::Extension(entry): axum::Extension<Entry>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Path(nom): Path<String>,
@@ -1126,7 +1242,7 @@ async fn terminal(
         // Une page d'un autre site ne doit pas pouvoir ouvrir de terminal avec le cookie.
         if let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) {
             let host = headers.get(header::HOST).and_then(|v| v.to_str().ok()).unwrap_or_default();
-            let expected = s.url.trim_end_matches('/');
+            let expected = s.url_for(entry).trim_end_matches('/');
             let same = if expected.is_empty() { origin.ends_with(&format!("//{host}")) } else { origin.trim_end_matches('/') == expected };
             if !same {
                 return Ok(Err(err(StatusCode::FORBIDDEN, t!("Origin refused", "Origine refusée"))));
@@ -1183,12 +1299,12 @@ fn origin_ok(headers: &HeaderMap, public_url: &str) -> bool {
 
 /// Jeton à usage unique pour ouvrir un serveur Bureau à distance depuis la page : le client
 /// RDP du navigateur le présente au passage (/ws-rdp).
-async fn desktop_ticket(AxState(portal): Ctx, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap, Path(nom): Path<String>) -> Response {
+async fn desktop_ticket(AxState(portal): Ctx, axum::Extension(entry): axum::Extension<Entry>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap, Path(nom): Path<String>) -> Response {
     let ip = client_ip(&portal, peer, &headers);
     let result = async {
         let state = &portal.state;
         let s = settings(state).await?;
-        if !same_site(&headers, &s.url) {
+        if !same_site(&headers, s.url_for(entry)) {
             return Ok(err(StatusCode::FORBIDDEN, t!("Request refused", "Requête refusée")));
         }
         let Some(w) = web_session(&portal, &headers, &s).await? else {
@@ -1275,11 +1391,11 @@ struct PortalApproval {
     ticket: String,
 }
 
-async fn portal_approval_request(AxState(portal): Ctx, headers: HeaderMap, Json(body): Json<PortalApproval>) -> Response {
+async fn portal_approval_request(AxState(portal): Ctx, axum::Extension(entry): axum::Extension<Entry>, headers: HeaderMap, Json(body): Json<PortalApproval>) -> Response {
     let result = async {
         let state = &portal.state;
         let s = settings(state).await?;
-        if !same_site(&headers, &s.url) {
+        if !same_site(&headers, s.url_for(entry)) {
             return Ok(err(StatusCode::FORBIDDEN, t!("Request refused", "Requête refusée")));
         }
         let Some(w) = web_session(&portal, &headers, &s).await? else {
@@ -1294,11 +1410,11 @@ async fn portal_approval_request(AxState(portal): Ctx, headers: HeaderMap, Json(
     result.unwrap_or_else(internal)
 }
 
-async fn portal_approval_cancel(AxState(portal): Ctx, headers: HeaderMap, axum::extract::Path(id): axum::extract::Path<uuid::Uuid>) -> Response {
+async fn portal_approval_cancel(AxState(portal): Ctx, axum::Extension(entry): axum::Extension<Entry>, headers: HeaderMap, axum::extract::Path(id): axum::extract::Path<uuid::Uuid>) -> Response {
     let result = async {
         let state = &portal.state;
         let s = settings(state).await?;
-        if !same_site(&headers, &s.url) {
+        if !same_site(&headers, s.url_for(entry)) {
             return Ok(err(StatusCode::FORBIDDEN, t!("Request refused", "Requête refusée")));
         }
         let Some(w) = web_session(&portal, &headers, &s).await? else {
@@ -1314,11 +1430,11 @@ async fn portal_approval_cancel(AxState(portal): Ctx, headers: HeaderMap, axum::
 }
 
 /// Nouveau mot de passe RDP du compte (l'ancien ne vaut plus), montré une seule fois.
-async fn native_password_new(AxState(portal): Ctx, headers: HeaderMap) -> Response {
+async fn native_password_new(AxState(portal): Ctx, axum::Extension(entry): axum::Extension<Entry>, headers: HeaderMap) -> Response {
     let result = async {
         let state = &portal.state;
         let s = settings(state).await?;
-        if !same_site(&headers, &s.url) {
+        if !same_site(&headers, s.url_for(entry)) {
             return Ok(err(StatusCode::FORBIDDEN, t!("Request refused", "Requête refusée")));
         }
         let Some(w) = web_session(&portal, &headers, &s).await? else {
@@ -1331,11 +1447,11 @@ async fn native_password_new(AxState(portal): Ctx, headers: HeaderMap) -> Respon
     result.unwrap_or_else(internal)
 }
 
-async fn native_password_remove(AxState(portal): Ctx, headers: HeaderMap) -> Response {
+async fn native_password_remove(AxState(portal): Ctx, axum::Extension(entry): axum::Extension<Entry>, headers: HeaderMap) -> Response {
     let result = async {
         let state = &portal.state;
         let s = settings(state).await?;
-        if !same_site(&headers, &s.url) {
+        if !same_site(&headers, s.url_for(entry)) {
             return Ok(err(StatusCode::FORBIDDEN, t!("Request refused", "Requête refusée")));
         }
         let Some(w) = web_session(&portal, &headers, &s).await? else {
@@ -1349,14 +1465,14 @@ async fn native_password_remove(AxState(portal): Ctx, headers: HeaderMap) -> Res
 }
 
 /// Passage RDCleanPath du client RDP du navigateur.
-async fn desktop(AxState(portal): Ctx, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
+async fn desktop(AxState(portal): Ctx, axum::Extension(entry): axum::Extension<Entry>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
     let addr = client_ip(&portal, peer, &headers);
     let s = match settings(&portal.state).await {
         Ok(s) if s.enabled => s,
         Ok(_) => return err(StatusCode::SERVICE_UNAVAILABLE, t!("Portal closed", "Portail fermé")),
         Err(e) => return internal(e),
     };
-    if !origin_ok(&headers, &s.url) {
+    if !origin_ok(&headers, s.url_for(entry)) {
         return err(StatusCode::FORBIDDEN, t!("Origin refused", "Origine refusée"));
     }
     let session = match web_session(&portal, &headers, &s).await {
@@ -1586,21 +1702,46 @@ mod tests {
     #[test]
     fn qui_peut_joindre_le_portail() {
         let cloudflare = Exposure::default();
-        assert!(cloudflare.admits(false, ip("127.0.0.1")));
-        assert!(!cloudflare.admits(true, ip("8.8.8.8")));
+        assert!(cloudflare.entry(false, ip("127.0.0.1")).is_some());
+        assert!(cloudflare.entry(true, ip("8.8.8.8")).is_none());
         let proxy = behind_proxy();
-        assert!(proxy.admits(true, ip("10.0.5.10")));
-        assert!(!proxy.admits(false, ip("127.0.0.1")));
-        assert!(!proxy.admits(true, ip("10.0.6.1")));
-        assert!(!Exposure { mode: Mode::Proxy, ..Default::default() }.admits(true, ip("10.0.5.10")), "liste vide : personne");
+        assert!(proxy.entry(true, ip("10.0.5.10")).is_some());
+        assert!(proxy.entry(false, ip("127.0.0.1")).is_none());
+        assert!(proxy.entry(true, ip("10.0.6.1")).is_none());
+        assert!(Exposure { mode: Mode::Proxy, ..Default::default() }.entry(true, ip("10.0.5.10")).is_none(), "liste vide : personne");
         let internal = Exposure { mode: Mode::Internal, ..Default::default() };
-        assert!(internal.admits(true, ip("192.168.1.2")));
-        assert!(!internal.admits(true, ip("8.8.8.8")));
-        let restricted = Exposure { mode: Mode::Internal, networks: vec!["10.0.0.0/8".into()], ..Default::default() };
-        assert!(!restricted.admits(true, ip("192.168.1.2")));
-        assert!(!Exposure { mode: Mode::Relay, ..Default::default() }.admits(false, ip("127.0.0.1")), "mode relais : aucun accès direct");
-        assert!(Exposure { mode: Mode::Direct, ..Default::default() }.admits(true, ip("8.8.8.8")));
-        assert!(!Exposure { mode: Mode::Direct, networks: vec!["203.0.113.0/24".into()], ..Default::default() }.admits(true, ip("8.8.8.8")));
+        assert!(internal.entry(true, ip("192.168.1.2")).is_some());
+        assert!(internal.entry(true, ip("8.8.8.8")).is_none());
+        let restricted = Exposure { mode: Mode::Internal, internal_networks: vec!["10.0.0.0/8".into()], ..Default::default() };
+        assert!(restricted.entry(true, ip("192.168.1.2")).is_none());
+        assert!(Exposure { mode: Mode::Relay, ..Default::default() }.entry(false, ip("127.0.0.1")).is_none(), "mode relais : aucun accès direct");
+        assert!(Exposure { mode: Mode::Direct, ..Default::default() }.entry(true, ip("8.8.8.8")).is_some());
+        assert!(Exposure { mode: Mode::Direct, networks: vec!["203.0.113.0/24".into()], ..Default::default() }.entry(true, ip("8.8.8.8")).is_none());
+    }
+
+    #[test]
+    fn deux_entrees() {
+        // Cloudflare et l'entrée interne ensemble.
+        let both = Exposure { internal: true, ..Default::default() };
+        assert_eq!(both.entry(false, ip("127.0.0.1")), Some(Entry::External), "cloudflared");
+        assert_eq!(both.entry(true, ip("104.16.1.1")), Some(Entry::External));
+        assert_eq!(both.entry(true, ip("192.168.1.2")), Some(Entry::Internal));
+        assert_eq!(both.entry(true, ip("8.8.8.8")), None);
+        // Proxy de la DMZ en adresse privée : externe, même si les réseaux privés sont internes.
+        let proxy = Exposure { internal: true, ..behind_proxy() };
+        assert_eq!(proxy.entry(true, ip("10.0.5.10")), Some(Entry::External));
+        assert_eq!(proxy.entry(true, ip("10.0.6.1")), Some(Entry::Internal));
+        // HTTPS direct ouvert à tous : le réseau interne reste l'entrée interne.
+        let direct = Exposure { mode: Mode::Direct, internal: true, internal_networks: vec!["192.168.0.0/16".into()], ..Default::default() };
+        assert_eq!(direct.entry(true, ip("192.168.1.2")), Some(Entry::Internal));
+        assert_eq!(direct.entry(true, ip("10.1.1.1")), Some(Entry::External));
+        assert_eq!(direct.entry(true, ip("8.8.8.8")), Some(Entry::External));
+        // Relais : l'entrée interne reste directe.
+        let relay = Exposure { mode: Mode::Relay, internal: true, ..Default::default() };
+        assert_eq!(relay.entry(true, ip("192.168.1.2")), Some(Entry::Internal));
+        assert_eq!(relay.entry(true, ip("8.8.8.8")), None);
+        // Sans entrée interne, un poste du réseau n'entre pas en mode Cloudflare.
+        assert_eq!(Exposure::default().entry(true, ip("192.168.1.2")), None);
     }
 
     #[test]

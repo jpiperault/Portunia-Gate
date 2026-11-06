@@ -179,11 +179,14 @@ sudo portunia-gate portal close-sessions                  # ends web sessions wi
 sudo portunia-gate portal test                            # does this Gate answer at the public address?
 ```
 
-How browsers reach the portal:
+How browsers reach the portal: one external entry (Cloudflare, direct HTTPS, proxy or relay) and, at the same time, an internal entry for the company network. The Gate decides the entry from the connection (trusted proxies and Cloudflare addresses are always external); Turnstile applies to the external entry only, and each portal sign-in logs its entry.
 
 ```bash
-sudo portunia-gate portal expose cloudflare               # cloudflare, internal, direct, proxy or relay
-sudo portunia-gate portal expose internal --networks 10.0.0.0/8,192.168.0.0/16
+sudo portunia-gate portal expose cloudflare               # external entry: cloudflare, direct, proxy or relay
+sudo portunia-gate portal expose --internal on            # internal entry as well (empty networks: private networks)
+sudo portunia-gate portal expose --internal-networks 10.0.0.0/8,192.168.91.0/24
+sudo portunia-gate portal set --internal-url https://gate.lan:8446 --internal-code off   # address on the network; code per account
+sudo portunia-gate portal expose internal                 # no external entry: internal entry only
 sudo portunia-gate portal expose proxy --trusted 10.0.5.10,10.0.5.11 --header X-Forwarded-For
 sudo portunia-gate portal tunnel -                        # Cloudflare tunnel token read on standard input; --remove stops it
 sudo portunia-gate portal tunnel                          # tunnel state

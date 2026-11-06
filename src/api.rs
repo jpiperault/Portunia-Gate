@@ -2445,6 +2445,13 @@ async fn admin_portal(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
         "proxys": exposed.proxies,
         "entete": exposed.header,
         "reseaux": exposed.networks,
+        // Entrée interne, ouverte en même temps que l'entrée externe (mode) ou seule (mode interne).
+        "interne": {
+            "actif": exposed.internal_open(),
+            "reseaux": exposed.internal_networks,
+            "url": s.internal_url,
+            "code_toujours": s.internal_code_always,
+        },
         "relais": crate::relay::report(state).await?,
         "actif": s.enabled,
         "url": s.url,
@@ -2492,6 +2499,12 @@ struct PortalBody {
     tunnel_jeton: Option<String>,
     /// Écoute HTTPS du portail (« 8446 », « 0.0.0.0:8446 ») ; vide : la ferme ; absent : la garde.
     https: Option<String>,
+    /// Entrée interne, en plus de l'entrée externe.
+    interne_actif: Option<bool>,
+    interne_reseaux: Option<Vec<String>>,
+    /// Adresse de l'entrée interne (https://…) ; vide : l'hôte demandé par le navigateur.
+    interne_url: Option<String>,
+    interne_code_toujours: Option<bool>,
 }
 
 async fn admin_portal_update(AxState(api): Ctx, headers: HeaderMap, Json(body): Json<PortalBody>) -> ApiResult {
@@ -2506,6 +2519,18 @@ async fn admin_portal_update(AxState(api): Ctx, headers: HeaderMap, Json(body): 
         }
         model::set_setting(db, "portail_url", json!(url)).await?;
         changed.insert("url".into(), json!(url));
+    }
+    if let Some(url) = body.interne_url {
+        let url = url.trim().trim_end_matches('/').to_string();
+        if !url.is_empty() && !url.starts_with("https://") {
+            return Err(err(StatusCode::BAD_REQUEST, t!("Internal address: https://…", "Adresse interne : https://…")));
+        }
+        model::set_setting(db, "portail_interne_url", json!(url)).await?;
+        changed.insert("interne_url".into(), json!(url));
+    }
+    if let Some(v) = body.interne_code_toujours {
+        model::set_setting(db, "portail_interne_code_toujours", json!(v)).await?;
+        changed.insert("interne_code_toujours".into(), json!(v));
     }
     if let Some(g) = body.groupe {
         model::set_setting(db, "portail_groupe", json!(g.trim())).await?;
@@ -2550,13 +2575,20 @@ async fn admin_portal_update(AxState(api): Ctx, headers: HeaderMap, Json(body): 
         let info = crate::tunnel::set_token(state, &token).await.map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
         audit::note(db, &actor.login, "portail.tunnel", json!({ "tunnel": info.map(|i| i.tunnel) })).await;
     }
-    if body.mode.is_some() || body.proxys.is_some() || body.entete.is_some() || body.reseaux.is_some() {
+    if body.mode.is_some() || body.proxys.is_some() || body.entete.is_some() || body.reseaux.is_some() || body.interne_actif.is_some() || body.interne_reseaux.is_some() {
         let before = crate::portal::exposure(state);
-        let after = crate::portal::set_exposure(state, body.mode.as_deref(), body.proxys.as_deref(), body.entete.as_deref(), body.reseaux.as_deref())
+        let internal = crate::portal::InternalChange { open: body.interne_actif, networks: body.interne_reseaux.as_deref() };
+        let after = crate::portal::set_exposure(state, body.mode.as_deref(), body.proxys.as_deref(), body.entete.as_deref(), body.reseaux.as_deref(), internal)
             .await
             .map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
-        if before.mode != after.mode || before.proxies != after.proxies || before.header != after.header || before.networks != after.networks {
-            audit::note(db, &actor.login, "portail.exposition", json!({ "mode": after.mode.id(), "proxys": after.proxies, "entete": after.header, "reseaux": after.networks })).await;
+        if before.mode != after.mode
+            || before.proxies != after.proxies
+            || before.header != after.header
+            || before.networks != after.networks
+            || before.internal_open() != after.internal_open()
+            || before.internal_networks != after.internal_networks
+        {
+            audit::note(db, &actor.login, "portail.exposition", crate::portal::exposure_note(&after)).await;
         }
     }
     if let Some(on) = body.actif {

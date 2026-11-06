@@ -239,6 +239,12 @@ enum PortalCmd {
         /// Asks the Turnstile secret key (empty entry: erases it).
         #[arg(long)]
         turnstile_secret: bool,
+        /// Address of the internal entry (https://…); empty: the host asked by the browser.
+        #[arg(long)]
+        internal_url: Option<String>,
+        /// Authenticator code on the internal entry: on, or off (accounts' own combinations still apply).
+        #[arg(long, value_parser = parse_switch)]
+        internal_code: Option<bool>,
     },
     /// Closes all web sessions without closing the portal (within 30 seconds).
     CloseSessions,
@@ -273,15 +279,21 @@ enum PortalCmd {
     },
     /// Changes how browsers reach the portal; what is not given stays as it is.
     Expose {
-        /// cloudflare, internal, direct, proxy or relay.
+        /// External entry: cloudflare, direct, proxy or relay; internal: no external entry.
         mode: Option<String>,
+        /// Internal entry (company network), open as well as the external one: on or off.
+        #[arg(long, value_parser = parse_switch)]
+        internal: Option<bool>,
+        /// Internal entry: allowed networks, comma-separated (empty: private networks).
+        #[arg(long)]
+        internal_networks: Option<String>,
         /// Proxy mode: trusted proxies, comma-separated addresses or networks.
         #[arg(long)]
         trusted: Option<String>,
         /// Proxy mode: header holding the visitor's address.
         #[arg(long)]
         header: Option<String>,
-        /// Internal and direct modes: allowed networks, comma-separated (empty: the default).
+        /// Direct mode: allowed networks, comma-separated (empty: everyone).
         #[arg(long)]
         networks: Option<String>,
     },
@@ -2340,7 +2352,7 @@ async fn portal_cmd(state: &State, cmd: PortalCmd) -> Result<()> {
             }
             return Ok(());
         }
-        PortalCmd::Set { url, group, duration, idle, clipboard, code, turnstile_site, turnstile_secret } => {
+        PortalCmd::Set { url, group, duration, idle, clipboard, code, turnstile_site, turnstile_secret, internal_url, internal_code } => {
             let mut changed = serde_json::Map::new();
             if let Some(url) = url {
                 let url = url.trim().trim_end_matches('/').to_string();
@@ -2372,6 +2384,16 @@ async fn portal_cmd(state: &State, cmd: PortalCmd) -> Result<()> {
             }
             if let Some(site) = turnstile_site {
                 changed.insert("turnstile_site".into(), json!(site.trim()));
+            }
+            if let Some(url) = internal_url {
+                let url = url.trim().trim_end_matches('/').to_string();
+                if !url.is_empty() && !url.starts_with("https://") {
+                    bail!(t!("Internal address: https://…", "Adresse interne : https://…"));
+                }
+                changed.insert("interne_url".into(), json!(url));
+            }
+            if let Some(v) = internal_code {
+                changed.insert("interne_code_toujours".into(), json!(v));
             }
             // Tout est vérifié avant d'écrire : une valeur refusée ne laisse rien à moitié changé.
             for (key, value) in &changed {
@@ -2620,17 +2642,31 @@ async fn portal_cmd(state: &State, cmd: PortalCmd) -> Result<()> {
             portal::reload_exposure(state).await?;
             portal::exposure(state)
         }
-        PortalCmd::Expose { mode, trusted, header, networks } => {
-            let e = portal::set_exposure(state, mode.as_deref(), trusted.map(|v| vec![v]).as_deref(), header.as_deref(), networks.map(|v| vec![v]).as_deref()).await?;
-            audit::log(&state.db, "console", "portail.exposition", json!({ "mode": e.mode.id(), "proxys": e.proxies, "entete": e.header, "reseaux": e.networks })).await?;
+        PortalCmd::Expose { mode, internal, internal_networks, trusted, header, networks } => {
+            let inner = internal_networks.map(|v| vec![v]);
+            let change = portal::InternalChange { open: internal, networks: inner.as_deref() };
+            let e = portal::set_exposure(state, mode.as_deref(), trusted.map(|v| vec![v]).as_deref(), header.as_deref(), networks.map(|v| vec![v]).as_deref(), change).await?;
+            audit::log(&state.db, "console", "portail.exposition", portal::exposure_note(&e)).await?;
             println!("✓ {}", t!("Saved: applied within 30 seconds", "Enregistré : appliqué sous 30 secondes"));
             e
         }
     };
-    println!("{} {}", t!("Mode:", "Mode :"), e.mode.id());
+    let s = portal::settings(state).await?;
+    println!("{} {}", t!("External entry:", "Entrée externe :"), if e.mode == portal::Mode::Internal { "—".to_string() } else { e.mode.id().to_string() });
     println!("{} {}", t!("Trusted proxies:", "Proxys de confiance :"), e.proxies.join(", "));
     println!("{} {}", t!("Address header:", "En-tête de l'adresse :"), e.header);
-    println!("{} {}", t!("Allowed networks:", "Réseaux autorisés :"), e.networks.join(", "));
+    println!("{} {}", t!("Allowed networks (direct):", "Réseaux autorisés (direct) :"), e.networks.join(", "));
+    if e.internal_open() {
+        println!(
+            "{} {} · {} · {}",
+            t!("Internal entry:", "Entrée interne :"),
+            if e.internal_networks.is_empty() { t!("private networks", "réseaux privés").to_string() } else { e.internal_networks.join(", ") },
+            if s.internal_url.is_empty() { "—" } else { &s.internal_url },
+            if s.internal_code_always { t!("code required", "code exigé") } else { t!("code per account", "code selon le compte") }
+        );
+    } else {
+        println!("{} {}", t!("Internal entry:", "Entrée interne :"), t!("closed", "fermée"));
+    }
     Ok(())
 }
 
