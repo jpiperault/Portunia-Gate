@@ -311,11 +311,15 @@ pub async fn purge(state: &State, actor: &str) -> Result<(u64, u64)> {
     let root = state.config.recordings_dir();
     let mut sessions = 0u64;
     let mut bytes = 0u64;
+    // Fichiers qui n'ont pas pu être supprimés : la session garde son enregistrement (sinon le
+    // fichier resterait sur le disque sans que rien n'y renvoie), et on ne les reprend pas ici.
+    let mut failed: Vec<uuid::Uuid> = Vec::new();
     loop {
         let rows: Vec<(uuid::Uuid, String)> = sqlx::query_as(
-            "SELECT id, recording FROM sessions WHERE recording IS NOT NULL AND ended_at IS NOT NULL AND ended_at < now() - make_interval(days => $1::int) ORDER BY ended_at LIMIT 500",
+            "SELECT id, recording FROM sessions WHERE recording IS NOT NULL AND ended_at IS NOT NULL AND ended_at < now() - make_interval(days => $1::int) AND NOT (id = ANY($2)) ORDER BY ended_at LIMIT 500",
         )
         .bind(days as i32)
+        .bind(&failed)
         .fetch_all(&state.db)
         .await?;
         if rows.is_empty() {
@@ -324,15 +328,21 @@ pub async fn purge(state: &State, actor: &str) -> Result<(u64, u64)> {
         for (id, recording) in rows {
             let path = PathBuf::from(&recording);
             // Seulement sous le dossier des enregistrements.
-            if path.starts_with(&root) && !recording.contains("..") {
-                bytes += remove_recording(&path);
-            }
+            let freed = if path.starts_with(&root) && !recording.contains("..") { remove_recording(&path) } else { None };
+            let Some(freed) = freed else {
+                failed.push(id);
+                continue;
+            };
+            bytes += freed;
             sqlx::query("UPDATE sessions SET recording = NULL, texte = NULL WHERE id = $1").bind(id).execute(&state.db).await?;
             sessions += 1;
         }
     }
-    if sessions > 0 {
-        audit::log(&state.db, actor, "enregistrement.purge", json!({ "sessions": sessions, "octets": bytes, "jours": days })).await?;
+    if !failed.is_empty() {
+        tracing::warn!("{}", t!(format!("recordings retention: {} file(s) could not be deleted (rights?)", failed.len()), format!("conservation des enregistrements : {} fichier(s) impossibles à supprimer (droits ?)", failed.len())));
+    }
+    if sessions > 0 || !failed.is_empty() {
+        audit::log(&state.db, actor, "enregistrement.purge", json!({ "sessions": sessions, "octets": bytes, "jours": days, "echecs": failed.len() })).await?;
         if let Ok(s) = tokio::task::spawn_blocking(move || walk(&root)).await {
             with_live(|l| l.storage = Some(s));
         }
@@ -340,22 +350,23 @@ pub async fn purge(state: &State, actor: &str) -> Result<(u64, u64)> {
     Ok((sessions, bytes))
 }
 
-/// Fichier d'enregistrement et copies de fichiers (« <session>-fichiers ») ; octets libérés.
-fn remove_recording(path: &Path) -> u64 {
+/// Fichier d'enregistrement et copies de fichiers (« <session>-fichiers ») ; octets libérés,
+/// ou rien si un fichier présent n'a pas pu être supprimé.
+fn remove_recording(path: &Path) -> Option<u64> {
     let mut freed = 0;
     if let Ok(m) = std::fs::metadata(path) {
-        if std::fs::remove_file(path).is_ok() {
-            freed += m.len();
-        }
+        std::fs::remove_file(path).ok()?;
+        freed += m.len();
     }
     if let Some(stem) = path.file_stem() {
         let copies = path.with_file_name(format!("{}-fichiers", stem.to_string_lossy()));
         if copies.is_dir() {
-            freed += walk(&copies).octets;
-            let _ = std::fs::remove_dir_all(&copies);
+            let size = walk(&copies).octets;
+            std::fs::remove_dir_all(&copies).ok()?;
+            freed += size;
         }
     }
-    freed
+    Some(freed)
 }
 
 // ---------- Rapport ----------
@@ -628,7 +639,8 @@ mod tests {
         std::fs::write(dir.join("2026/01/s1-fichiers/001-a.txt"), vec![0u8; 20]).unwrap();
         std::fs::write(dir.join("2026/01/s2.cast"), vec![0u8; 7]).unwrap();
         assert_eq!(walk(&dir).octets, 127);
-        assert_eq!(remove_recording(&dir.join("2026/01/s1.rdpcap")), 120);
+        assert_eq!(remove_recording(&dir.join("2026/01/s1.rdpcap")), Some(120));
+        assert_eq!(remove_recording(&dir.join("2026/01/absent.cast")), Some(0), "déjà supprimé : rien à faire");
         let left = walk(&dir);
         assert_eq!((left.octets, left.fichiers), (7, 1));
         std::fs::remove_dir_all(&dir).unwrap();

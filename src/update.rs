@@ -528,8 +528,11 @@ fn now_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
-fn journal_tail() -> String {
-    sh(Command::new("journalctl").args(["-u", "portunia-gate", "-n", "12", "--no-pager", "-o", "cat"])).unwrap_or_default()
+/// Dernières erreurs du service depuis `since` (secondes Unix) : ce qu'a dit la nouvelle version.
+fn journal_tail(since: u64) -> String {
+    let text = sh(Command::new("journalctl").args(["-u", "portunia-gate", "--since", &format!("@{since}"), "-n", "40", "--no-pager", "-o", "cat"])).unwrap_or_default();
+    let errors: Vec<&str> = text.lines().filter(|l| l.contains("Error") || l.contains("Erreur") || l.contains("ERROR") || l.contains("panicked")).collect();
+    errors.iter().rev().take(3).rev().copied().collect::<Vec<_>>().join(" | ")
 }
 
 /// `portunia-gate update run` : exécuté par portunia-gate-update.service (root).
@@ -631,8 +634,8 @@ fn attempt(config: &Config, dir: &Path, r: &Request, run: &mut Runner) -> Result
                 run.line(t!(format!("{} started and answers.", r.version), format!("La {} a démarré et répond.", r.version)).into());
                 return Ok(Done::Updated);
             }
-            let tail = journal_tail();
-            format!("{} {tail}", t!(format!("version {} did not start within {} s.", r.version, START_WAIT.as_secs()), format!("la version {} n'a pas démarré en {} s.", r.version, START_WAIT.as_secs())))
+            let tail = journal_tail(since);
+            format!("{} {tail}",t!(format!("version {} did not start within {} s.", r.version, START_WAIT.as_secs()), format!("la version {} n'a pas démarré en {} s.", r.version, START_WAIT.as_secs())))
         }
     };
     run.line(why.clone());
