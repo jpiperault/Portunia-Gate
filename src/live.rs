@@ -178,6 +178,13 @@ impl Registry {
         found
     }
 
+    /// Message pour les sessions d'un compte vers un serveur (fin d'un accès approuvé).
+    pub fn notify_user_target(&self, user: Uuid, target: Uuid, text: &str) {
+        for e in self.entries.lock().unwrap().values().filter(|e| e.user == user && e.target.as_ref().is_some_and(|t| t.0 == target)) {
+            e.notice.send_replace(Some(text.to_string()));
+        }
+    }
+
     /// Message pour l'utilisateur d'une session (terminaux SSH seulement).
     pub fn notify_session(&self, session: Uuid, text: &str) {
         for e in self.entries.lock().unwrap().values().filter(|e| e.session == Some(session)) {

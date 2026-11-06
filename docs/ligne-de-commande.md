@@ -100,11 +100,34 @@ sudo portunia-gate rule edit presta --expires 2027-03-31 --hours ""    # "" effa
 sudo portunia-gate rule edit prod --rename production --group Admins
 sudo portunia-gate rule edit windows --files off             # copie de fichiers de nouveau bloquée
 sudo portunia-gate rule delete presta                     # les sessions qu'elle permettait se ferment sous 30 s
+sudo portunia-gate rule approval prod on --approvers Responsables   # accès seulement après approbation ("" : administrateurs)
+```
+
+Approbation des accès (0.38) :
+
+```bash
+sudo portunia-gate approval list                          # demandes en attente et accès en cours
+sudo portunia-gate approval grant 3f2a9c1e --minutes 120 --comment "changement CHG-42"
+sudo portunia-gate approval deny 3f2a9c1e --comment "pas pendant la clôture"
+sudo portunia-gate approval revoke 3f2a9c1e               # retire un accès accordé : ses sessions se ferment sous 30 s
 ```
 
 `--sftp`, `--tunnels` (serveurs SSH en coffre) et `--record-input` (attention : capte les mots de passe tapés) concernent le SSH.
 
 `--files` concerne le Bureau à distance en mode enregistré : copie de fichiers par le presse-papiers, dans les deux sens (depuis le portail web : déposer des fichiers sur le bureau ou « Envoyer des fichiers », puis coller dans Windows ; copier des fichiers dans Windows pour les télécharger). Sans elle, la Gate bloque la copie de fichiers ; le texte copié passe toujours. Avec elle, chaque fichier est inscrit au journal (`fichier.copie` : sens, nom, taille, SHA-256) et apparaît dans l'enregistrement ; les tentatives bloquées sont notées `fichier.bloque`. En mode rebond, le flux est chiffré de bout en bout : la Gate ne peut ni le voir ni le bloquer (stratégie de groupe Windows).
+
+## Notifications
+
+```bash
+sudo portunia-gate notify show
+sudo portunia-gate notify set --smtp-host smtp.exemple.fr --smtp-port 587 --smtp-security starttls \
+  --smtp-user gate --smtp-password --from "Portunia Gate <gate@exemple.fr>"
+sudo portunia-gate notify set --teams-url https://… --webhook-url https://… --webhook-secret   # secret affiché une fois
+sudo portunia-gate notify test vous@exemple.fr            # courriel, puis Teams et webhook s'ils sont réglés
+sudo portunia-gate user email marc marc@exemple.fr        # adresse d'un compte ("" la retire)
+```
+
+Sécurité : `starttls` (587), `tls` (465) ou `aucune` (25). Utilisées par l'approbation des accès (courriel aux approbateurs et au demandeur).
 
 ## Réglages généraux
 

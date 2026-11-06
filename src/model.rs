@@ -456,6 +456,8 @@ pub async fn pin_host_key(db: &PgPool, target: Uuid, fingerprint: &str) -> Resul
 
 #[derive(sqlx::FromRow, Clone, Debug)]
 struct RuleRow {
+    /// Accès seulement après approbation (0.38).
+    approval: bool,
     allow_sftp: bool,
     allow_tunnels: bool,
     record_input: bool,
@@ -508,7 +510,7 @@ pub struct Access {
 
 pub async fn access(db: &PgPool, user: Uuid, target: Uuid) -> Result<Option<Access>> {
     let rows: Vec<RuleRow> = sqlx::query_as(
-        "SELECT r.allow_sftp, r.allow_tunnels, r.record_input, r.allow_files, r.days, r.hour_from, r.hour_to, r.expires_at
+        "SELECT r.approval, r.allow_sftp, r.allow_tunnels, r.record_input, r.allow_files, r.days, r.hour_from, r.hour_to, r.expires_at
          FROM rules r
          JOIN rule_targets rt ON rt.rule_id = r.id
          JOIN group_members gm ON gm.group_id = r.group_id
@@ -518,7 +520,11 @@ pub async fn access(db: &PgPool, user: Uuid, target: Uuid) -> Result<Option<Acce
     .bind(target)
     .fetch_all(db)
     .await?;
-    let active: Vec<&RuleRow> = rows.iter().filter(|r| r.active_now()).collect();
+    let mut active: Vec<&RuleRow> = rows.iter().filter(|r| r.active_now()).collect();
+    // Règle avec approbation : ne compte qu'avec un accès accordé et pas encore terminé.
+    if active.iter().any(|r| r.approval) && !approved(db, user, target).await? {
+        active.retain(|r| !r.approval);
+    }
     if active.is_empty() {
         return Ok(None);
     }
@@ -528,6 +534,17 @@ pub async fn access(db: &PgPool, user: Uuid, target: Uuid) -> Result<Option<Acce
         record_input: active.iter().any(|r| r.record_input),
         files: active.iter().any(|r| r.allow_files),
     }))
+}
+
+/// Accès accordé par un approbateur et pas encore terminé.
+pub async fn approved(db: &PgPool, user: Uuid, target: Uuid) -> Result<bool> {
+    Ok(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM approvals WHERE user_id = $1 AND target_id = $2 AND status = 'accordee' AND until > now())",
+    )
+    .bind(user)
+    .bind(target)
+    .fetch_one(db)
+    .await?)
 }
 
 /// Cibles accessibles maintenant, pour le menu.
@@ -769,6 +786,7 @@ mod tests {
     #[test]
     fn plages_horaires() {
         let all = RuleRow {
+            approval: false,
             allow_sftp: false,
             allow_tunnels: false,
             record_input: false,

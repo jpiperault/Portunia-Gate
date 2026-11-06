@@ -100,11 +100,34 @@ sudo portunia-gate rule edit contractor --expires 2027-03-31 --hours ""  # "" cl
 sudo portunia-gate rule edit prod --rename production --group Admins
 sudo portunia-gate rule edit windows --files off             # file copy blocked again
 sudo portunia-gate rule delete contractor                 # sessions it allowed close within 30 s
+sudo portunia-gate rule approval prod on --approvers Managers   # access only after approval ("" : administrators)
+```
+
+Access approval (0.38):
+
+```bash
+sudo portunia-gate approval list                          # requests waiting and accesses under way
+sudo portunia-gate approval grant 3f2a9c1e --minutes 120 --comment "change CHG-42"
+sudo portunia-gate approval deny 3f2a9c1e --comment "not during closing"
+sudo portunia-gate approval revoke 3f2a9c1e               # withdraws a granted access: its sessions close within 30 s
 ```
 
 `--sftp`, `--tunnels` (vault SSH servers) and `--record-input` (careful: captures typed passwords) apply to SSH.
 
 `--files` applies to Remote Desktop in recorded mode: copying files through the clipboard, in both directions (from the web portal: drop files on the desktop or « Send files », then paste in Windows; copy files in Windows to download them). Without it, the Gate blocks file copy; copied text still passes. With it, each file is written to the audit log (`fichier.copie`: direction, name, size, SHA-256) and shows in the recording; blocked attempts are logged as `fichier.bloque`. In jump mode the stream is encrypted end to end: the Gate can neither see nor block it (use a Windows group policy).
+
+## Notifications
+
+```bash
+sudo portunia-gate notify show
+sudo portunia-gate notify set --smtp-host smtp.example.com --smtp-port 587 --smtp-security starttls \
+  --smtp-user gate --smtp-password --from "Portunia Gate <gate@example.com>"
+sudo portunia-gate notify set --teams-url https://… --webhook-url https://… --webhook-secret   # secret shown once
+sudo portunia-gate notify test you@example.com            # e-mail, then Teams and webhook if set
+sudo portunia-gate user email marc marc@example.com       # an account's address ("" removes it)
+```
+
+Security: `starttls` (587), `tls` (465) or `aucune` (25). Used by access approval (e-mail to the approvers and to the requester).
 
 ## General settings
 

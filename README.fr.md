@@ -253,6 +253,20 @@ Le journal note `rdp_natif.fichier` (fichier préparé), puis les événements h
 
 **Sessions natives et relecture (0.34.1).** Les sessions natives en coffre et en enregistré sont toujours enregistrées : la Gate retire donc l'annonce du pipeline graphique RDP 8 (GFX) faite par le client. Windows envoie alors l'image en mises à jour classiques, que la relecture décode. Par le canal GFX, la relecture restait noire.
 
+## Approbation des accès
+
+Depuis la 0.38, une règle peut exiger une approbation : ses serveurs ne s'ouvrent qu'une fois l'accès accordé par un approbateur, pour une durée. Réglage : dans la règle, *Accès seulement après approbation* et le groupe des **approbateurs** (vide : les administrateurs) ; `sudo portunia-gate rule approval NOM on --approvers GROUPE`.
+
+- **Demander** : l'utilisateur donne un motif (et un numéro de ticket facultatif) dans Portunia (menu de la Gate › **Approbations**) ou dans le portail web (*Serveurs sur approbation*). Les approbateurs sont prévenus (courriel, Teams, webhook, et Portunia, qui interroge la Gate chaque minute).
+- **Décider** : un approbateur accorde pour une durée (30 minutes à 3 jours dans Portunia, 5 minutes à 7 jours en ligne de commande) ou refuse, avec un commentaire. Personne n'approuve sa propre demande. Une demande sans réponse expire au bout de 24 heures.
+- **Fin** : l'utilisateur est prévenu 10 minutes avant (dans le terminal SSH), puis ses sessions se ferment. Un approbateur peut **retirer** un accès à tout moment ; l'utilisateur peut annuler sa demande.
+- **Journal** : `approbation.demandee`, `approbation.accordee`, `approbation.refusee`, `approbation.annulee`, `approbation.terminee`, `approbation.sans_reponse`.
+- **En ligne de commande** : `approval list`, `approval grant ID --minutes 60`, `approval deny ID`, `approval revoke ID` (la console agit comme un administrateur).
+
+## Notifications
+
+Courriel (SMTP), Microsoft Teams (webhook « Workflows » d'un canal) et webhook JSON signé, utilisés par l'approbation des accès : Administrer › Réglages › **Notifications** (avec un essai), ou `sudo portunia-gate notify set --smtp-host smtp.exemple.fr --smtp-user gate --smtp-password --from "Portunia Gate <gate@exemple.fr>"`, puis `notify test vous@exemple.fr`. L'adresse e-mail de chaque compte se règle dans sa fiche ou avec `user email COMPTE ADRESSE`. Le webhook reçoit `{"evenement", "date", "gate", "detail"}` avec `X-Portunia-Gate-Date` (secondes Unix) et `X-Portunia-Gate-Signature: sha256=<HMAC-SHA256 de "date.corps">`. Un envoi qui échoue est noté au journal (`notification.echec`) et ne bloque jamais rien.
+
 ## Interfaces web
 
 Depuis la 0.30, les consoles d'administration (vCenter, iDRAC, iLO, pare-feu, NAS…) se déclarent comme des serveurs de protocole `https` ou `http`, en mode enregistré. La Gate relaie chaque requête (règle revérifiée toutes les 30 s), note chaque page ouverte (`web.page`) et épingle le certificat du serveur comme pour le Bureau à distance. Depuis Portunia, elles s'ouvrent dans une fenêtre dédiée par un relais local vers l'API de la Gate (session web de 8 heures) ; depuis le portail web, dans un onglet à l'adresse `/web/<nom>/` (une interface web à la fois par navigateur ; l'application partage l'adresse du portail, n'y publiez que des applications de confiance). Les cookies de la Gate et l'adresse du visiteur n'atteignent jamais le serveur ; les WebSocket passent. Depuis la 0.32, le mode coffre aussi : la Gate connecte l'utilisateur avec le compte du coffre. Elle remplit le formulaire de connexion dans la page (applications JavaScript comprises) avec un jeton à usage unique au lieu du mot de passe, et remplace le jeton par le mot de passe en route vers le serveur : le mot de passe n'arrive jamais dans le navigateur. Ou bien elle envoie l'authentification HTTP (Basic). Chaque usage est noté au journal (`web.coffre`).

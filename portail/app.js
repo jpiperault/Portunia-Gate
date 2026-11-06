@@ -198,6 +198,36 @@ function nativePanel(info) {
       state, shown));
 }
 
+// Serveurs sur approbation (Gate 0.38) : demande avec motif, état de la demande.
+function approvalPanel(info, reload) {
+  const when = (iso) => new Date(iso).toLocaleString(document.documentElement.lang, { dateStyle: 'short', timeStyle: 'short' });
+  const status = { attente: T('waiting for an approver', 'en attente d\'un approbateur'), accordee: T('granted', 'accordé'), refusee: T('refused', 'refusé'), annulee: T('cancelled', 'annulé'), expiree: T('expired', 'expiré') };
+  const rows = info.a_demander.map((s) => {
+    if (s.demande) {
+      const cancel = h('button', { class: 'btn', type: 'button', onclick: async () => {
+        try { await api('POST', `/api/approbations/${s.demande.id}/annuler`); reload(); } catch (e) { alert(e.message); }
+      } }, T('Cancel', 'Annuler'));
+      return h('div', { class: 'appr-row' }, h('b', {}, s.serveur), h('span', { class: 'appr-state' }, T(`Asked ${when(s.demande.demande)}: `, `Demandé le ${when(s.demande.demande)} : `), status.attente), cancel);
+    }
+    const reason = h('input', { class: 'input', placeholder: T('Reason (required)', 'Motif (obligatoire)'), maxlength: '500' });
+    const ticket = h('input', { class: 'input appr-ticket', placeholder: T('Ticket (optional)', 'Ticket (facultatif)'), maxlength: '100' });
+    const send = h('button', { class: 'btn primary', type: 'button', onclick: async () => {
+      if (!reason.value.trim()) { reason.focus(); return; }
+      send.disabled = true;
+      try { await api('POST', '/api/approbations', { serveur: s.serveur, motif: reason.value, ticket: ticket.value }); reload(); }
+      catch (e) { alert(e.message); send.disabled = false; }
+    } }, T('Ask for access', 'Demander l\'accès'));
+    return h('div', { class: 'appr-row' }, h('b', {}, s.serveur), s.description ? h('span', { class: 'native-hint' }, s.description) : null, reason, ticket, send);
+  });
+  const recent = info.mes_demandes.filter((r) => r.etat !== 'attente').slice(0, 5).map((r) =>
+    h('div', { class: 'native-hint' }, `${r.serveur} · ${status[r.etat] ?? r.etat}${r.decide_par ? T(` by ${r.decide_par}`, ` par ${r.decide_par}`) : ''}${r.jusqua && r.etat === 'accordee' ? T(` until ${when(r.jusqua)}`, ` jusqu'au ${when(r.jusqua)}`) : ''}${r.commentaire ? ` — ${r.commentaire}` : ''}`));
+  return h('details', { class: 'native', open: true },
+    h('summary', {}, T('Servers on approval', 'Serveurs sur approbation')),
+    h('div', { class: 'native-body' },
+      h('p', { class: 'native-hint' }, T('An approver must grant access, for a duration, before you can open these servers.', 'Un approbateur doit accorder l\'accès, pour une durée, avant que vous puissiez ouvrir ces serveurs.')),
+      ...rows, ...recent));
+}
+
 async function home(state) {
   let data;
   try {
@@ -250,9 +280,11 @@ async function home(state) {
   render();
   // Entrée RDP native ouverte et serveurs accessibles ainsi : panneau d'aide (Gate 0.34).
   const native = await api('GET', '/api/rdp-natif').catch(() => null);
+  const approvals = await api('GET', '/api/approbations').catch(() => null);
   app.replaceChildren(
     h('header', { class: 'top' }, brand(state.nom), h('span', { class: 'grow' }), timer, h('span', { class: 'who' }, data.login), langSwitch(), logout),
     h('section', { class: 'home' }, h('div', { style: 'display:flex;gap:12px;flex-wrap:wrap;align-items:center' }, search, count), grid,
+      approvals?.a_demander?.length ? approvalPanel(approvals, () => home(state)) : null,
       native?.actif && native.serveurs.length ? nativePanel(native) : null));
 }
 

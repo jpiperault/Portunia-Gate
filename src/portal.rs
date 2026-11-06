@@ -569,6 +569,9 @@ fn build_router(portal: Portal) -> Router {
         .route("/api/rdp/{nom}", post(desktop_ticket))
         // Client RDP ordinaire sans Portunia (mstsc) : instructions et mot de passe RDP.
         .route("/api/rdp-natif", get(native_info))
+        // Approbation : serveurs à demander, demandes du compte.
+        .route("/api/approbations", get(portal_approvals).post(portal_approval_request))
+        .route("/api/approbations/{id}/annuler", post(portal_approval_cancel))
         .route("/api/rdp-natif/mot-de-passe", post(native_password_new).delete(native_password_remove))
         .route("/ws-rdp", get(desktop))
         // Assistance à distance : téléchargement de Portunia Assist et relais (sans compte).
@@ -1239,6 +1242,72 @@ async fn native_info(AxState(portal): Ctx, headers: HeaderMap) -> Response {
             }))
             .into_response(),
         )
+    }
+    .await;
+    result.unwrap_or_else(internal)
+}
+
+/// Serveurs que le compte peut demander, et ses demandes récentes.
+async fn portal_approvals(AxState(portal): Ctx, headers: HeaderMap) -> Response {
+    let result = async {
+        let state = &portal.state;
+        let s = settings(state).await?;
+        let Some(w) = web_session(&portal, &headers, &s).await? else {
+            return Ok(err(StatusCode::UNAUTHORIZED, t!("Session expired", "Session expirée")));
+        };
+        let open: Vec<serde_json::Value> = crate::approval::requestable(&state.db, &w.user)
+            .await?
+            .into_iter()
+            .map(|(t, pending)| json!({ "serveur": t.name, "description": t.description, "demande": pending.map(|p| p.json()) }))
+            .collect();
+        let mine: Vec<serde_json::Value> = crate::approval::mine(&state.db, w.user.id).await?.iter().take(10).map(|r| r.json()).collect();
+        Ok::<_, anyhow::Error>(Json(json!({ "a_demander": open, "mes_demandes": mine })).into_response())
+    }
+    .await;
+    result.unwrap_or_else(internal)
+}
+
+#[derive(serde::Deserialize)]
+struct PortalApproval {
+    serveur: String,
+    motif: String,
+    #[serde(default)]
+    ticket: String,
+}
+
+async fn portal_approval_request(AxState(portal): Ctx, headers: HeaderMap, Json(body): Json<PortalApproval>) -> Response {
+    let result = async {
+        let state = &portal.state;
+        let s = settings(state).await?;
+        if !same_site(&headers, &s.url) {
+            return Ok(err(StatusCode::FORBIDDEN, t!("Request refused", "Requête refusée")));
+        }
+        let Some(w) = web_session(&portal, &headers, &s).await? else {
+            return Ok(err(StatusCode::UNAUTHORIZED, t!("Session expired", "Session expirée")));
+        };
+        Ok::<_, anyhow::Error>(match crate::approval::request(state, &w.user, &body.serveur, &body.motif, &body.ticket, "portail").await {
+            Ok(r) => Json(r.json()).into_response(),
+            Err(e) => err(StatusCode::BAD_REQUEST, &e.to_string()),
+        })
+    }
+    .await;
+    result.unwrap_or_else(internal)
+}
+
+async fn portal_approval_cancel(AxState(portal): Ctx, headers: HeaderMap, axum::extract::Path(id): axum::extract::Path<uuid::Uuid>) -> Response {
+    let result = async {
+        let state = &portal.state;
+        let s = settings(state).await?;
+        if !same_site(&headers, &s.url) {
+            return Ok(err(StatusCode::FORBIDDEN, t!("Request refused", "Requête refusée")));
+        }
+        let Some(w) = web_session(&portal, &headers, &s).await? else {
+            return Ok(err(StatusCode::UNAUTHORIZED, t!("Session expired", "Session expirée")));
+        };
+        Ok::<_, anyhow::Error>(match crate::approval::cancel(state, &w.user, id).await {
+            Ok(()) => Json(json!({ "etat": "ok" })).into_response(),
+            Err(e) => err(StatusCode::BAD_REQUEST, &e.to_string()),
+        })
     }
     .await;
     result.unwrap_or_else(internal)

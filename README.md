@@ -240,6 +240,20 @@ The log records `rdp_natif.fichier` (file prepared), then the usual session even
 
 **Native sessions and replay (0.34.1).** Native Vault and Recorded sessions are always recorded, so the Gate withdraws the client's RDP 8 graphics pipeline (GFX) announcement: Windows then sends the picture as classic updates, which the replay decodes. Through the GFX channel, the replay stayed black.
 
+## Access approval
+
+Since 0.38 a rule can require an approval: its servers open only once an approver has granted access, for a duration. Settings: in the rule, *Access only after approval* and the **approvers** group (empty: the administrators); `sudo portunia-gate rule approval NAME on --approvers GROUP`.
+
+- **Asking**: the user gives a reason (and an optional ticket number) in Portunia (Gate menu › **Approvals**) or in the web portal (*Servers on approval*). The approvers are notified (e-mail, Teams, webhook, and Portunia, which checks every minute).
+- **Deciding**: an approver grants for a duration (30 minutes to 3 days in Portunia, 5 minutes to 7 days on the command line) or refuses, with a comment. Nobody approves their own request. A request without an answer expires after 24 hours.
+- **End**: the user is told 10 minutes before (in the SSH terminal), then their sessions close. An approver can **withdraw** an access at any time; the user can cancel their request.
+- **Log**: `approbation.demandee`, `approbation.accordee`, `approbation.refusee`, `approbation.annulee`, `approbation.terminee`, `approbation.sans_reponse`.
+- **Command line**: `approval list`, `approval grant ID --minutes 60`, `approval deny ID`, `approval revoke ID` (the console acts as an administrator).
+
+## Notifications
+
+E-mail (SMTP), Microsoft Teams (a channel's « Workflows » webhook) and a signed JSON webhook, used by access approval: Administer › Settings › **Notifications** (with a test), or `sudo portunia-gate notify set --smtp-host smtp.example.com --smtp-user gate --smtp-password --from "Portunia Gate <gate@example.com>"`, then `notify test you@example.com`. Each account's e-mail address is set in its form or with `user email LOGIN ADDRESS`. The webhook receives `{"evenement", "date", "gate", "detail"}` with `X-Portunia-Gate-Date` (Unix seconds) and `X-Portunia-Gate-Signature: sha256=<HMAC-SHA256 of "date.body">`. A failed sending is logged (`notification.echec`) and never blocks anything.
+
 ## Web interfaces
 
 Since 0.30, administration consoles (vCenter, iDRAC, iLO, firewalls, NAS…) are declared as servers with protocol `https` or `http`, in recorded mode. The Gate relays every request (rule checked again every 30 s), logs each page opened (`web.page`) and pins the server's certificate like for Remote Desktop. From Portunia they open in a dedicated window through a local relay to the Gate API (8-hour web session); from the web portal in a tab at `/web/<name>/` (one web interface at a time per browser; the application shares the portal's address, so only publish trusted applications there). The Gate's cookies and the visitor's address never reach the server; WebSockets go through. Since 0.32, vault mode as well: the Gate signs the user in with the vault account. It fills the sign-in form in the page (JavaScript applications included) with a one-time token instead of the password, and swaps the token for the password on the way to the server, so the password never reaches the browser; or it sends HTTP authentication (Basic). Each use is logged (`web.coffre`).

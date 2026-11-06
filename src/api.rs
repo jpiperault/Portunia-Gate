@@ -115,6 +115,13 @@ pub async fn run(state: Arc<State>) -> anyhow::Result<()> {
         .route("/api/v1/audit/sessions/{id}/flux", get(audit_rdp_stream))
         // Vue en direct : sessions ouvertes, et les couper.
         .route("/api/v1/audit/direct", get(audit_live))
+        // Approbation des accès : demander, décider, annuler.
+        .route("/api/v1/approbations", get(approvals_list).post(approvals_request))
+        .route("/api/v1/approbations/{id}/decision", post(approvals_decide))
+        .route("/api/v1/approbations/{id}/annuler", post(approvals_cancel))
+        // Notifications (courriel, Teams, webhook) : réglages et essai.
+        .route("/api/v1/admin/notifications", get(admin_notify).put(admin_notify_update))
+        .route("/api/v1/admin/notifications/essai", post(admin_notify_test))
         .route("/api/v1/audit/sessions/{id}/couper", post(audit_cut))
         // Export d'une relecture (vidéo, sous-titres, transcription, .cast) : noté au journal.
         .route("/api/v1/audit/sessions/{id}/export", post(audit_export))
@@ -833,12 +840,13 @@ struct UserRow {
     must_change_password: bool,
     groups: Vec<String>,
     keys: i64,
+    email: String,
 }
 
 async fn admin_users(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
     admin(&api, &headers).await?;
     let rows: Vec<UserRow> = sqlx::query_as(
-        "SELECT u.id, u.login, u.role, u.auth_policy, u.disabled, u.totp_secret IS NOT NULL AS enrolled, u.must_change_password,
+        "SELECT u.id, u.login, u.role, u.auth_policy, u.disabled, u.totp_secret IS NOT NULL AS enrolled, u.must_change_password, u.email,
                 COALESCE(array_agg(g.name ORDER BY g.name) FILTER (WHERE g.name IS NOT NULL), '{}') AS groups,
                 (SELECT count(*) FROM user_keys k WHERE k.user_id = u.id) AS keys
          FROM users u LEFT JOIN group_members m ON m.user_id = u.id LEFT JOIN groups g ON g.id = m.group_id
@@ -851,7 +859,7 @@ async fn admin_users(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
         .map(|u| {
             json!({
                 "id": u.id, "login": u.login, "role": u.role, "politique": u.auth_policy, "desactive": u.disabled,
-                "code_enrole": u.enrolled, "mot_de_passe_provisoire": u.must_change_password, "groupes": u.groups, "cles": u.keys,
+                "code_enrole": u.enrolled, "mot_de_passe_provisoire": u.must_change_password, "groupes": u.groups, "cles": u.keys, "email": u.email,
             })
         })
         .collect();
@@ -869,6 +877,17 @@ struct UserBody {
     groupes: Vec<String>,
     #[serde(default)]
     desactive: bool,
+    /// Adresse e-mail (notifications) ; absente : inchangée.
+    email: Option<String>,
+}
+
+/// Adresse e-mail vérifiée (vide : aucune).
+fn clean_email(v: &str) -> Result<String, ApiError> {
+    let v = v.trim();
+    if !v.is_empty() && v.parse::<lettre::Address>().is_err() {
+        return Err(err(StatusCode::BAD_REQUEST, t!("Not an e-mail address", "Ce n'est pas une adresse e-mail")));
+    }
+    Ok(v.to_string())
 }
 
 async fn set_groups(db: &sqlx::PgPool, user: Uuid, groups: &[String]) -> anyhow::Result<()> {
@@ -918,6 +937,9 @@ async fn admin_user_create(AxState(api): Ctx, headers: HeaderMap, Json(body): Js
         .execute(db)
         .await?;
     set_groups(db, id, &body.groupes).await?;
+    if let Some(email) = &body.email {
+        sqlx::query("UPDATE users SET email = $2 WHERE id = $1").bind(id).bind(clean_email(email)?).execute(db).await?;
+    }
     audit::note(
         db,
         &actor.login,
@@ -951,6 +973,9 @@ async fn admin_user_update(AxState(api): Ctx, headers: HeaderMap, Path(id): Path
         .execute(db)
         .await?;
     set_groups(db, id, &body.groupes).await?;
+    if let Some(email) = &body.email {
+        sqlx::query("UPDATE users SET email = $2 WHERE id = $1").bind(id).bind(clean_email(email)?).execute(db).await?;
+    }
     if body.desactive {
         model::revoke_logins(db, id).await?;
     }
@@ -1107,16 +1132,19 @@ struct RuleRow {
     hour_to: Option<i16>,
     expires_at: Option<DateTime<Utc>>,
     targets: Vec<String>,
+    approval: bool,
+    approvers: Option<String>,
 }
 
 async fn admin_rules(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
     admin(&api, &headers).await?;
     let rows: Vec<RuleRow> = sqlx::query_as(
         "SELECT r.id, r.name, g.name AS group_name, r.allow_sftp, r.allow_tunnels, r.record_input, r.allow_files, r.days, r.hour_from, r.hour_to, r.expires_at,
-                COALESCE(array_agg(t.name ORDER BY t.name) FILTER (WHERE t.name IS NOT NULL), '{}') AS targets
-         FROM rules r JOIN groups g ON g.id = r.group_id
+                COALESCE(array_agg(t.name ORDER BY t.name) FILTER (WHERE t.name IS NOT NULL), '{}') AS targets,
+                r.approval, ag.name AS approvers
+         FROM rules r JOIN groups g ON g.id = r.group_id LEFT JOIN groups ag ON ag.id = r.approver_group
          LEFT JOIN rule_targets rt ON rt.rule_id = r.id LEFT JOIN targets t ON t.id = rt.target_id
-         GROUP BY r.id, g.name ORDER BY r.name",
+         GROUP BY r.id, g.name, ag.name ORDER BY r.name",
     )
     .fetch_all(&api.state.db)
     .await?;
@@ -1128,6 +1156,7 @@ async fn admin_rules(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
                 "id": r.id, "nom": r.name, "groupe": r.group_name, "cibles": r.targets, "sftp": r.allow_sftp,
                 "tunnels": r.allow_tunnels, "frappe": r.record_input, "fichiers": r.allow_files, "jours": r.days, "heure_debut": r.hour_from,
                 "heure_fin": r.hour_to, "expire": r.expires_at, "etat": state,
+                "approbation": r.approval, "approbateurs": r.approvers,
             })
         })
         .collect();
@@ -1153,6 +1182,25 @@ struct RuleBody {
     heure_fin: Option<i16>,
     /// Date de fin (AAAA-MM-JJ), incluse.
     expire: Option<String>,
+    /// Accès seulement après approbation (0.38). Absent : inchangé.
+    approbation: Option<bool>,
+    /// Groupe des approbateurs ; vide : les administrateurs. Absent : inchangé.
+    approbateurs: Option<String>,
+}
+
+/// Approbation d'une règle (après création ou modification).
+async fn rule_approval(db: &sqlx::PgPool, id: Uuid, body: &RuleBody) -> Result<(), ApiError> {
+    if let Some(on) = body.approbation {
+        sqlx::query("UPDATE rules SET approval = $2 WHERE id = $1").bind(id).bind(on).execute(db).await.map_err(anyhow::Error::from)?;
+    }
+    if let Some(name) = &body.approbateurs {
+        let group = match name.trim() {
+            "" => None,
+            n => Some(model::group_id(db, n).await?),
+        };
+        sqlx::query("UPDATE rules SET approver_group = $2 WHERE id = $1").bind(id).bind(group).execute(db).await.map_err(anyhow::Error::from)?;
+    }
+    Ok(())
 }
 
 fn all_days() -> i16 {
@@ -1215,6 +1263,7 @@ async fn admin_rule_create(AxState(api): Ctx, headers: HeaderMap, Json(body): Js
         },
     )
     .await?;
+    rule_approval(db, id, &body).await?;
     audit::note(db, &actor.login, "regle.creee", json!({ "regle": body.nom, "groupe": body.groupe, "cibles": body.cibles, "sftp": body.sftp, "tunnels": body.tunnels, "frappe": body.frappe, "fichiers": body.fichiers.unwrap_or(false) })).await;
     Ok(Json(json!({ "id": id })))
 }
@@ -1256,6 +1305,7 @@ async fn admin_rule_update(AxState(api): Ctx, headers: HeaderMap, Path(id): Path
             .await?;
     }
     tx.commit().await?;
+    rule_approval(db, id, &body).await?;
     api.state.live.recheck();
     audit::note(db, &actor.login, "regle.modifiee", json!({ "regle": body.nom, "groupe": body.groupe, "cibles": body.cibles, "sftp": body.sftp, "tunnels": body.tunnels, "frappe": body.frappe, "jours": body.jours, "fichiers": body.fichiers, "heures": hours, "expire": body.expire })).await;
     Ok(Json(json!({ "etat": "ok" })))
@@ -1793,6 +1843,133 @@ struct CutBody {
     /// Désactiver aussi le compte (administrateurs seulement).
     #[serde(default)]
     desactiver: bool,
+}
+
+async fn admin_notify(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
+    admin(&api, &headers).await?;
+    Ok(Json(crate::notify::public(&crate::notify::settings(&api.state).await?)))
+}
+
+#[derive(Deserialize)]
+struct NotifyBody {
+    smtp_hote: Option<String>,
+    smtp_port: Option<u16>,
+    smtp_securite: Option<String>,
+    smtp_compte: Option<String>,
+    /// Nouveau mot de passe SMTP ; absent : inchangé ; vide : retiré.
+    smtp_mot_de_passe: Option<String>,
+    smtp_expediteur: Option<String>,
+    teams_url: Option<String>,
+    webhook_url: Option<String>,
+    /// true : nouveau secret de signature, renvoyé une seule fois.
+    nouveau_secret_webhook: Option<bool>,
+}
+
+async fn admin_notify_update(AxState(api): Ctx, headers: HeaderMap, Json(body): Json<NotifyBody>) -> ApiResult {
+    let actor = admin(&api, &headers).await?;
+    let state = &api.state;
+    let mut s = crate::notify::settings(state).await?;
+    if let Some(v) = body.smtp_hote { s.smtp_host = v.trim().to_string(); }
+    if let Some(v) = body.smtp_port { s.smtp_port = v; }
+    if let Some(v) = body.smtp_securite { s.smtp_security = v.trim().to_lowercase(); }
+    if let Some(v) = body.smtp_compte { s.smtp_user = v.trim().to_string(); }
+    if let Some(v) = body.smtp_mot_de_passe { s.smtp_password = Some(v).filter(|p| !p.is_empty()); }
+    if let Some(v) = body.smtp_expediteur { s.smtp_from = v.trim().to_string(); }
+    if let Some(v) = body.teams_url { s.teams_url = v.trim().to_string(); }
+    if let Some(v) = body.webhook_url { s.webhook_url = v.trim().to_string(); }
+    let mut secret = None;
+    if body.nouveau_secret_webhook == Some(true) {
+        use base64::Engine;
+        let fresh = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(crate::keys::random::<32>()?);
+        s.webhook_secret = Some(fresh.clone());
+        secret = Some(fresh);
+    }
+    crate::notify::save(state, &s).await.map_err(|e| err(StatusCode::BAD_REQUEST, e.to_string()))?;
+    audit::note(&state.db, &actor.login, "notifications.modifiees", crate::notify::public(&s)).await;
+    Ok(Json(json!({ "etat": "ok", "secret_webhook": secret })))
+}
+
+#[derive(Deserialize)]
+struct NotifyTest {
+    /// Adresse du courriel d'essai (absente : pas de courriel).
+    email: Option<String>,
+}
+
+/// Essai : courriel à l'adresse donnée, Teams et webhook s'ils sont réglés. Résultat par canal.
+async fn admin_notify_test(AxState(api): Ctx, headers: HeaderMap, Json(body): Json<NotifyTest>) -> ApiResult {
+    admin(&api, &headers).await?;
+    let state = &api.state;
+    let s = crate::notify::settings(state).await?;
+    let gate = setting_str(state, "nom", "Portunia Gate").await?;
+    let text = t!("Test message from the Gate: notifications work.", "Message d'essai de la Gate : les notifications fonctionnent.");
+    let subject = format!("[{gate}] {}", t!("Test", "Essai"));
+    let result = |r: anyhow::Result<()>| match r {
+        Ok(()) => json!({ "ok": true }),
+        Err(e) => json!({ "ok": false, "erreur": format!("{e:#}") }),
+    };
+    let mail = match body.email.filter(|e| !e.trim().is_empty()) {
+        Some(to) => Some(result(crate::notify::mail(&s, &[to], &subject, text).await)),
+        None => None,
+    };
+    let teams = (!s.teams_url.is_empty()).then_some(());
+    let teams = match teams { Some(()) => Some(result(crate::notify::teams(&s, &subject, text).await)), None => None };
+    let hook = match s.webhook_url.is_empty() { false => Some(result(crate::notify::webhook(&s, &gate, "essai", &json!({ "message": text })).await)), true => None };
+    Ok(Json(json!({ "courriel": mail, "teams": teams, "webhook": hook })))
+}
+
+/// Approbations vues par le compte : ses demandes, les serveurs qu'il peut demander, ce qu'il
+/// peut décider et les accès accordés qu'il peut retirer.
+async fn approvals_list(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
+    let user = caller(&api, &headers).await?;
+    let db = &api.state.db;
+    let mine: Vec<Value> = crate::approval::mine(db, user.id).await?.iter().map(|r| r.json()).collect();
+    let open: Vec<Value> = crate::approval::requestable(db, &user)
+        .await?
+        .into_iter()
+        .map(|(t, pending)| json!({ "serveur": t.name, "description": t.description, "protocole": t.protocole, "demande": pending.map(|p| p.json()) }))
+        .collect();
+    let decide: Vec<Value> = crate::approval::to_decide(db, &user).await?.iter().map(|r| r.json()).collect();
+    let granted: Vec<Value> = crate::approval::granted_by_me_or_mine(db, &user).await?.iter().map(|r| r.json()).collect();
+    Ok(Json(json!({ "mes_demandes": mine, "a_demander": open, "a_traiter": decide, "en_cours": granted })))
+}
+
+#[derive(Deserialize)]
+struct ApprovalBody {
+    serveur: String,
+    motif: String,
+    #[serde(default)]
+    ticket: String,
+}
+
+async fn approvals_request(AxState(api): Ctx, headers: HeaderMap, Json(body): Json<ApprovalBody>) -> ApiResult {
+    let user = caller(&api, &headers).await?;
+    let r = crate::approval::request(&api.state, &user, &body.serveur, &body.motif, &body.ticket, "portunia")
+        .await
+        .map_err(|e| err(StatusCode::BAD_REQUEST, e.to_string()))?;
+    Ok(Json(r.json()))
+}
+
+#[derive(Deserialize)]
+struct DecisionBody {
+    accorder: bool,
+    #[serde(default)]
+    minutes: i64,
+    #[serde(default)]
+    commentaire: String,
+}
+
+async fn approvals_decide(AxState(api): Ctx, headers: HeaderMap, Path(id): Path<Uuid>, Json(body): Json<DecisionBody>) -> ApiResult {
+    let user = caller(&api, &headers).await?;
+    let r = crate::approval::decide(&api.state, &user, id, body.accorder, body.minutes, &body.commentaire)
+        .await
+        .map_err(|e| err(StatusCode::BAD_REQUEST, e.to_string()))?;
+    Ok(Json(r.json()))
+}
+
+async fn approvals_cancel(AxState(api): Ctx, headers: HeaderMap, Path(id): Path<Uuid>) -> ApiResult {
+    let user = caller(&api, &headers).await?;
+    crate::approval::cancel(&api.state, &user, id).await.map_err(|e| err(StatusCode::BAD_REQUEST, e.to_string()))?;
+    Ok(Json(json!({ "etat": "ok" })))
 }
 
 #[derive(Deserialize)]

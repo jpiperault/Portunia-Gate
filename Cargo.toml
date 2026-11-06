@@ -1,6 +1,6 @@
 [package]
 name = "portunia-gate"
-version = "0.37.0"
+version = "0.38.0"
 description = "Passerelle SSH et Bureau à distance de Portunia : accès contrôlés, coffre, enregistrement et journal d'audit"
 edition = "2021"
 publish = false
@@ -17,6 +17,8 @@ ironrdp-rdcleanpath = "0.3"
 sspi = { version = "0.23", default-features = false }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 ureq = { version = "2", default-features = false, features = ["tls"] }
+# Courriel des notifications (approbation, alertes) : SMTP avec rustls (ring).
+lettre = { version = "=0.11.23", default-features = false, features = ["builder", "smtp-transport", "tokio1", "tokio1-rustls", "ring", "webpki-roots"] }
 argon2 = { version = "0.5", default-features = false, features = ["alloc", "password-hash"] }
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }

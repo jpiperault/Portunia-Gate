@@ -32,6 +32,8 @@ mod target;
 mod tls;
 mod tunnel;
 mod webproxy;
+mod approval;
+mod notify;
 mod webvault;
 mod websession;
 
@@ -157,6 +159,12 @@ enum Command {
     /// Native RDP entry: mstsc, Remmina, FreeRDP or Windows App with a single-use .rdp file from Portunia.
     #[command(subcommand)]
     Rdp(RdpCmd),
+    /// Notifications: e-mail (SMTP), Microsoft Teams and signed JSON webhook (approval, alerts).
+    #[command(subcommand)]
+    Notify(NotifyCmd),
+    /// Access approval: requests waiting, grant, refuse, withdraw.
+    #[command(subcommand)]
+    Approval(ApprovalCmd),
     /// Dedicated relay: this machine publishes the web portal of a Gate.
     #[command(subcommand)]
     Edge(EdgeCmd),
@@ -383,6 +391,8 @@ enum UserCmd {
         #[arg(long)]
         remove: bool,
     },
+    /// E-mail address of the account (approval and alert notifications); empty to remove it.
+    Email { login: String, address: String },
 }
 
 #[derive(Subcommand)]
@@ -524,6 +534,71 @@ enum RdpCmd {
 }
 
 #[derive(Subcommand)]
+enum ApprovalCmd {
+    /// Requests waiting and accesses granted under way.
+    List,
+    /// Grants a request for a duration (as the console: any request).
+    Grant {
+        /// Identifier, or its first characters as listed by « approval list ».
+        id: String,
+        /// Duration in minutes (5 to 10080).
+        #[arg(long)]
+        minutes: i64,
+        #[arg(long, default_value = "")]
+        comment: String,
+    },
+    /// Refuses a request.
+    Deny {
+        id: String,
+        #[arg(long, default_value = "")]
+        comment: String,
+    },
+    /// Withdraws a granted access (its sessions close within 30 seconds) or cancels a request.
+    Revoke { id: String },
+}
+
+#[derive(Subcommand)]
+enum NotifyCmd {
+    /// Shows the notification settings (secrets hidden).
+    Show,
+    /// Notification settings; what is not given stays as it is (empty: removed).
+    Set {
+        /// SMTP server (empty: no e-mail).
+        #[arg(long)]
+        smtp_host: Option<String>,
+        /// SMTP port (587 with starttls, 465 with tls, 25).
+        #[arg(long)]
+        smtp_port: Option<u16>,
+        /// starttls, tls or aucune.
+        #[arg(long)]
+        smtp_security: Option<String>,
+        /// SMTP account (empty: no authentication).
+        #[arg(long)]
+        smtp_user: Option<String>,
+        /// Asks for the SMTP password (typed, not shown).
+        #[arg(long)]
+        smtp_password: bool,
+        /// Sender address (« Portunia Gate <gate@example.com> »).
+        #[arg(long)]
+        from: Option<String>,
+        /// Microsoft Teams « Workflows » webhook address (empty: none).
+        #[arg(long)]
+        teams_url: Option<String>,
+        /// JSON webhook address (empty: none).
+        #[arg(long)]
+        webhook_url: Option<String>,
+        /// Generates a new webhook signing secret and shows it once.
+        #[arg(long)]
+        webhook_secret: bool,
+    },
+    /// Sends a test: e-mail to this address, and Teams and webhook if set.
+    Test {
+        /// Address receiving the test e-mail.
+        email: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 enum AssistCmd {
     /// Shows the assistance state and settings.
     Show,
@@ -609,6 +684,16 @@ enum RuleCmd {
     },
     /// Deletes a rule: sessions it allowed close within 30 seconds.
     Delete { name: String },
+    /// Access only after approval (on/off), approved by a group (--approvers; empty: administrators).
+    Approval {
+        name: String,
+        /// on or off.
+        #[arg(value_parser = parse_switch, action = clap::ArgAction::Set)]
+        on: bool,
+        /// Group of the approvers; empty: administrators.
+        #[arg(long)]
+        approvers: Option<String>,
+    },
 }
 
 /// Interrupteur en ligne de commande : on/off, en anglais ou en français.
@@ -897,7 +982,7 @@ async fn run(cli: Cli) -> Result<()> {
                     tokio::time::sleep(std::time::Duration::from_secs(24 * 3600)).await;
                 }
             });
-            tokio::try_join!(sshd::run(state.clone()), api::run(state.clone()), portal::run(state.clone()), relay::run(state.clone()), tunnel::run(state.clone()), acme::run(state.clone()), health::run(state.clone()), live::run(state.clone()), rdpnative::run(state.clone()), websession::run(state.clone()))?;
+            tokio::try_join!(sshd::run(state.clone()), api::run(state.clone()), portal::run(state.clone()), relay::run(state.clone()), tunnel::run(state.clone()), acme::run(state.clone()), health::run(state.clone()), live::run(state.clone()), rdpnative::run(state.clone()), websession::run(state.clone()), approval::run(state.clone()))?;
             Ok(())
         }
         Command::User(cmd) => user_cmd(&state, cmd).await,
@@ -907,6 +992,8 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Portal(cmd) => portal_cmd(&state, cmd).await,
         Command::Assist(cmd) => assist_cmd(&state, cmd).await,
         Command::Rdp(cmd) => rdp_cmd(&state, cmd).await,
+        Command::Notify(cmd) => notify_cmd(&state, cmd).await,
+        Command::Approval(cmd) => approval_cmd(&state, cmd).await,
         Command::Audit { verify, last, search, csv } => {
             if verify {
                 match audit::verify(&state.db).await? {
@@ -1150,6 +1237,113 @@ fn parse_day(text: &str, end: bool) -> Result<chrono::DateTime<chrono::Utc>> {
 }
 
 /// Une session : compte, serveur, horaires, fichier d'enregistrement et contrôle de sa signature.
+/// Approbation en ligne de commande : la console agit comme un administrateur sans compte.
+async fn approval_cmd(state: &Arc<State>, cmd: ApprovalCmd) -> Result<()> {
+    let db = &state.db;
+    let find = |prefix: String| async move {
+        let rows: Vec<(uuid::Uuid,)> = sqlx::query_as("SELECT id FROM approvals WHERE id::text LIKE $1 || '%'").bind(prefix.to_lowercase()).fetch_all(db).await?;
+        match rows.as_slice() {
+            [one] => Ok(one.0),
+            [] => Err(anyhow!(t!("Unknown request", "Demande inconnue"))),
+            _ => Err(anyhow!(t!("Several requests start this way: give more characters", "Plusieurs demandes commencent ainsi : donnez plus de caractères"))),
+        }
+    };
+    let local = |d: chrono::DateTime<chrono::Utc>| d.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string();
+    match cmd {
+        ApprovalCmd::List => {
+            let rows: Vec<approval::Request> = sqlx::query_as(
+                "SELECT a.id, a.user_id, u.login, a.target_id, t.name AS target, a.reason, a.ticket, a.status, a.requested_at, a.decided_by, a.decided_at, a.until, a.comment
+                 FROM approvals a JOIN users u ON u.id = a.user_id JOIN targets t ON t.id = a.target_id
+                 WHERE a.status = 'attente' OR (a.status = 'accordee' AND a.until > now()) ORDER BY a.requested_at",
+            )
+            .fetch_all(db)
+            .await?;
+            if rows.is_empty() {
+                println!("{}", t!("No request waiting, no access under way.", "Aucune demande en attente, aucun accès en cours."));
+            }
+            for r in rows {
+                let state = if r.status == "attente" { t!("waiting", "en attente").to_string() } else { format!("{} {}", t!("granted until", "accordé jusqu'au"), r.until.map(local).unwrap_or_default()) };
+                println!("{}  {:<14} {:<18} {:<26} {}{}", &r.id.to_string()[..8], r.login, r.target, state, r.reason, if r.ticket.is_empty() { String::new() } else { format!(" [{}]", r.ticket) });
+            }
+        }
+        ApprovalCmd::Grant { id, minutes, comment } => {
+            let id = find(id).await?;
+            let r = approval::decide_by(state, "console", None, id, true, minutes, &comment).await?;
+            println!("{}", t!(format!("Granted: {} → {} until {}.", r.login, r.target, r.until.map(local).unwrap_or_default()), format!("Accordé : {} → {} jusqu'au {}.", r.login, r.target, r.until.map(local).unwrap_or_default())));
+        }
+        ApprovalCmd::Deny { id, comment } => {
+            let id = find(id).await?;
+            let r = approval::decide_by(state, "console", None, id, false, 0, &comment).await?;
+            println!("{}", t!(format!("Refused: {} → {}.", r.login, r.target), format!("Refusé : {} → {}.", r.login, r.target)));
+        }
+        ApprovalCmd::Revoke { id } => {
+            let id = find(id).await?;
+            approval::cancel_by(state, "console", None, id).await?;
+            println!("{}", t!("Withdrawn: its sessions close within 30 seconds.", "Retiré : ses sessions se ferment sous 30 secondes."));
+        }
+    }
+    Ok(())
+}
+
+/// Notifications : réglages et essai.
+async fn notify_cmd(state: &Arc<State>, cmd: NotifyCmd) -> Result<()> {
+    match cmd {
+        NotifyCmd::Show => {
+            let s = notify::settings(state).await?;
+            let shown = |v: &str| if v.is_empty() { "—".to_string() } else { v.to_string() };
+            println!("{} {}:{} ({})", t!("SMTP:", "SMTP :"), shown(&s.smtp_host), s.smtp_port, s.smtp_security);
+            println!("{} {}{}", t!("SMTP account:", "Compte SMTP :"), shown(&s.smtp_user), if s.smtp_password.is_some() { t!(" (password saved)", " (mot de passe enregistré)") } else { "" });
+            println!("{} {}", t!("Sender:", "Expéditeur :"), shown(&s.smtp_from));
+            println!("Teams : {}", shown(&s.teams_url));
+            println!("Webhook : {}{}", shown(&s.webhook_url), if s.webhook_secret.is_some() { t!(" (signed)", " (signé)") } else { "" });
+        }
+        NotifyCmd::Set { smtp_host, smtp_port, smtp_security, smtp_user, smtp_password, from, teams_url, webhook_url, webhook_secret } => {
+            let mut s = notify::settings(state).await?;
+            if let Some(v) = smtp_host { s.smtp_host = v.trim().to_string(); }
+            if let Some(v) = smtp_port { s.smtp_port = v; }
+            if let Some(v) = smtp_security { s.smtp_security = v.trim().to_lowercase(); }
+            if let Some(v) = smtp_user { s.smtp_user = v.trim().to_string(); }
+            if smtp_password {
+                s.smtp_password = Some(rpassword::prompt_password(t!("SMTP password: ", "Mot de passe SMTP : "))?);
+            }
+            if let Some(v) = from { s.smtp_from = v.trim().to_string(); }
+            if let Some(v) = teams_url { s.teams_url = v.trim().to_string(); }
+            if let Some(v) = webhook_url { s.webhook_url = v.trim().to_string(); }
+            let mut new_secret = None;
+            if webhook_secret {
+                use base64::Engine;
+                let secret = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(keys::random::<32>()?);
+                s.webhook_secret = Some(secret.clone());
+                new_secret = Some(secret);
+            }
+            notify::save(state, &s).await?;
+            audit::log(&state.db, "console", "notifications.modifiees", notify::public(&s)).await?;
+            println!("{}", t!("Notification settings saved.", "Réglages des notifications enregistrés."));
+            if let Some(secret) = new_secret {
+                println!("{} {secret}", t!("Webhook signing secret (shown only once):", "Secret de signature du webhook (affiché une seule fois) :"));
+            }
+        }
+        NotifyCmd::Test { email } => {
+            let s = notify::settings(state).await?;
+            let gate = api::setting_str(state, "nom", "Portunia Gate").await?;
+            let text = t!("Test message from the Gate: notifications work.", "Message d'essai de la Gate : les notifications fonctionnent.");
+            if let Some(to) = email {
+                notify::mail(&s, &[to.clone()], &format!("[{gate}] {}", t!("Test", "Essai")), text).await?;
+                println!("✓ {} {to}", t!("E-mail sent to", "Courriel envoyé à"));
+            }
+            if !s.teams_url.is_empty() {
+                notify::teams(&s, &format!("[{gate}] {}", t!("Test", "Essai")), text).await?;
+                println!("✓ Teams");
+            }
+            if !s.webhook_url.is_empty() {
+                notify::webhook(&s, &gate, "essai", &json!({ "message": text })).await?;
+                println!("✓ Webhook");
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Coupe une session ouverte : ordre appliqué par le service sous 30 secondes.
 async fn session_cut(state: &State, id: &str, disable: bool) -> Result<()> {
     let found = model::audit_sessions_by_prefix(&state.db, id).await?;
@@ -1450,6 +1644,16 @@ async fn user_cmd(state: &State, cmd: UserCmd) -> Result<()> {
                     "À la prochaine connexion dans Portunia, l'utilisateur choisit le sien. Sans Portunia : sudo portunia-gate user passwd. Ses sessions ouvertes se ferment sous 30 secondes."
                 )
             );
+        }
+        UserCmd::Email { login, address } => {
+            let user = find(login).await?;
+            let address = address.trim().to_string();
+            if !address.is_empty() {
+                address.parse::<lettre::Address>().map_err(|_| anyhow!(t!("not an e-mail address", "ce n'est pas une adresse e-mail")))?;
+            }
+            sqlx::query("UPDATE users SET email = $2 WHERE id = $1").bind(user.id).bind(&address).execute(&state.db).await?;
+            audit::log(&state.db, "console", "compte.modifie", json!({ "compte": user.login, "email": address })).await?;
+            println!("{}", t!("E-mail address saved.", "Adresse e-mail enregistrée."));
         }
         UserCmd::RdpPassword { login, remove } => {
             let user = find(login).await?;
@@ -2487,6 +2691,27 @@ async fn rule_cmd(state: &State, cmd: RuleCmd) -> Result<()> {
             )
             .await?;
             println!("{}", t!("Rule changed: open sessions are rechecked within 30 seconds.", "Règle modifiée : les sessions ouvertes sont revérifiées sous 30 secondes."));
+        }
+        RuleCmd::Approval { name, on, approvers } => {
+            let id: uuid::Uuid = sqlx::query_scalar("SELECT id FROM rules WHERE name = $1")
+                .bind(&name)
+                .fetch_optional(db)
+                .await?
+                .ok_or_else(|| anyhow!(t!(format!("Unknown rule: {name}"), format!("Règle inconnue : {name}"))))?;
+            sqlx::query("UPDATE rules SET approval = $2 WHERE id = $1").bind(id).bind(on).execute(db).await?;
+            if let Some(g) = &approvers {
+                let group = match g.trim() {
+                    "" => None,
+                    n => Some(model::group_id(db, n).await?),
+                };
+                sqlx::query("UPDATE rules SET approver_group = $2 WHERE id = $1").bind(id).bind(group).execute(db).await?;
+            }
+            audit::log(db, "console", "regle.modifiee", json!({ "regle": name, "approbation": on, "approbateurs": approvers })).await?;
+            println!("{}", if on {
+                t!("Approval required: open sessions without an approved access close within 30 seconds.", "Approbation exigée : les sessions ouvertes sans accès approuvé se ferment sous 30 secondes.")
+            } else {
+                t!("Approval no longer required.", "Approbation plus exigée.")
+            });
         }
         RuleCmd::Delete { name } => {
             let gone: Option<String> = sqlx::query_scalar("DELETE FROM rules WHERE name = $1 RETURNING name")
