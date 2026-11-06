@@ -116,6 +116,8 @@ pub async fn run(state: Arc<State>) -> anyhow::Result<()> {
         // Vue en direct : sessions ouvertes, et les couper.
         .route("/api/v1/audit/direct", get(audit_live))
         .route("/api/v1/audit/sessions/{id}/couper", post(audit_cut))
+        // Export d'une relecture (vidéo, sous-titres, transcription, .cast) : noté au journal.
+        .route("/api/v1/audit/sessions/{id}/export", post(audit_export))
         .route("/api/v1/assistance", get(assist_status))
         .route("/api/v1/assistance/{place}", get(assist_join))
         .route("/api/v1/admin/assistance", get(admin_assist).put(admin_assist_update))
@@ -1660,7 +1662,7 @@ async fn load_recording(api: &Api, headers: &HeaderMap, id: Uuid, reveal: bool) 
 /// Relectures déjà faites de cette session (les 20 dernières).
 async fn consultations(state: &State, id: Uuid) -> Result<Vec<Value>, ApiError> {
     let views: Vec<(String, DateTime<Utc>, String)> = sqlx::query_as(
-        "SELECT actor, at, event FROM audit WHERE event IN ('enregistrement.consulte', 'enregistrement.revele', 'session.suivie') AND detail->>'session' = $1
+        "SELECT actor, at, event FROM audit WHERE event IN ('enregistrement.consulte', 'enregistrement.revele', 'session.suivie', 'enregistrement.exporte') AND detail->>'session' = $1
          ORDER BY seq DESC LIMIT 20",
     )
     .bind(id.to_string())
@@ -1791,6 +1793,27 @@ struct CutBody {
     /// Désactiver aussi le compte (administrateurs seulement).
     #[serde(default)]
     desactiver: bool,
+}
+
+#[derive(Deserialize)]
+struct ExportBody {
+    /// mp4, webm, srt, txt ou cast.
+    format: String,
+}
+
+/// Un export de relecture fait dans Portunia : inscrit au journal (enregistrement.exporte).
+async fn audit_export(AxState(api): Ctx, headers: HeaderMap, Path(id): Path<Uuid>, Json(body): Json<ExportBody>) -> ApiResult {
+    let (user, own) = reader(&api, &headers).await?;
+    let format = body.format.trim().to_ascii_lowercase();
+    if !["mp4", "webm", "srt", "txt", "cast"].contains(&format.as_str()) {
+        return Err(err(StatusCode::BAD_REQUEST, t!("Export format: mp4, webm, srt, txt or cast", "Format d'export : mp4, webm, srt, txt ou cast")));
+    }
+    let s = model::audit_session(&api.state.db, id)
+        .await?
+        .filter(|s| own.as_ref().is_none_or(|o| *o == s.login))
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, t!("Session not found", "Session introuvable")))?;
+    audit::note(&api.state.db, &user.login, "enregistrement.exporte", json!({ "session": id, "cible": s.target, "compte": s.login, "format": format })).await;
+    Ok(Json(json!({ "etat": "ok" })))
 }
 
 /// Coupe une session ouverte ; désactive aussi le compte si demandé.

@@ -203,7 +203,8 @@ Menu **⋯** de la Gate › **Audit** › **Sessions** (rôles administrateur et
 | Repères | Chaque commande ; en orange sudo, Ctrl+C et les saisies masquées ; en rouge les commandes sensibles ; en bas, les erreurs affichées. |
 | Panneau | **Frappe** : les lignes tapées, horodatées, avec recherche. **Informations** : compte, serveur, mode, adresse, durée, empreinte, signature, relectures précédentes. |
 | Signature | Vérifiée à chaque ouverture. Un fichier modifié depuis la session est signalé en rouge. |
-| Exports | **Enregistrement .cast** (lisible par asciinema) et **Transcription** (texte horodaté). |
+| Exports | **Enregistrement .cast** (lisible par asciinema), **Transcription** (texte horodaté) et, avec Portunia 0.76, **Vidéo** (MP4 fabriqué sur le poste, frappe en sous-titres et fichier .srt, filigrane). Chaque export est noté au journal depuis la 0.37 (`enregistrement.exporte`). |
+| Détacher | **⧉ Détacher** ouvre le lecteur dans sa propre fenêtre. |
 
 **Saisies masquées** : une frappe qui ne s'affiche pas à l'écran (mot de passe de sudo, su, ssh…) est remplacée par des points de longueur fixe, dans le lecteur comme dans la recherche. Elle reste dans le fichier signé : un administrateur peut la **révéler** (bouton dans le lecteur), et cette relecture est inscrite au journal (`enregistrement.revele`). L'export `.cast` d'une relecture masquée est une copie non signée ; celui d'une relecture révélée est le fichier d'origine, signé.
 

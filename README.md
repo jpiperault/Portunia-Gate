@@ -190,7 +190,8 @@ Gate **⋯** menu › **Audit** › **Sessions** (administrator and auditor role
 | Markers | Every command; in orange sudo, Ctrl+C and masked input; in red sensitive commands; at the bottom, errors shown on screen. |
 | Panel | **Keystrokes**: typed lines, time-stamped, with search. **Details**: account, server, mode, address, duration, fingerprint, signature, previous replays. |
 | Signature | Checked on every opening. A file changed since the session is flagged in red. |
-| Exports | **.cast recording** (readable by asciinema) and **Transcript** (time-stamped text). |
+| Exports | **.cast recording** (readable by asciinema), **Transcript** (time-stamped text) and, with Portunia 0.76, **Video** (MP4 made on the workstation, keystrokes as subtitles plus an .srt file, watermark). Each export is logged since 0.37 (`enregistrement.exporte`). |
+| Detach | **⧉ Detach** opens the player in its own window. |
 
 **Masked input**: keystrokes not echoed on screen (sudo, su, ssh passwords…) are replaced by fixed-length dots, in the player as in search. They remain in the signed file: an administrator can **reveal** them (button in the player), and that replay is written to the log (`enregistrement.revele`). The `.cast` export of a masked replay is an unsigned copy; that of a revealed replay is the original, signed file.
 
