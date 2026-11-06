@@ -585,6 +585,8 @@ struct Chunk {
 /// Enregistrement tenu par son propre fil : le relais lui confie les octets et repart,
 /// sans attendre le disque. Si le disque ne suit plus, le relais attend (jamais de perte).
 pub struct Tape {
+    /// Fichier de l'enregistrement (relu en direct pendant la session).
+    pub path: String,
     tx: Option<tokio::sync::mpsc::Sender<Chunk>>,
     writer: Option<std::thread::JoinHandle<Recorder>>,
     start: Instant,
@@ -628,12 +630,37 @@ impl Recorder {
     /// Confie l'enregistrement à un fil dédié.
     pub fn spawn(mut self) -> Result<Tape> {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Chunk>(256);
+        let path = self.path.display().to_string();
+        let runtime = tokio::runtime::Handle::current();
         let writer = std::thread::Builder::new().name("rdpcap".into()).spawn(move || {
-            while let Some(chunk) = rx.blocking_recv() {
+            // Écrit sur le disque au moins chaque seconde (et après une demi-seconde sans
+            // message) : la session se suit en direct depuis l'Audit.
+            let mut flushed = Instant::now();
+            let mut dirty = false;
+            loop {
+                let next = runtime.block_on(async { tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv()).await });
+                let chunk = match next {
+                    Ok(Some(chunk)) => chunk,
+                    Ok(None) => break,
+                    Err(_) => {
+                        if dirty {
+                            self.failed |= self.out.flush().is_err();
+                            dirty = false;
+                            flushed = Instant::now();
+                        }
+                        continue;
+                    }
+                };
                 self.last_t = chunk.t;
                 let records = if chunk.from_server { self.tap.server(chunk.t, &chunk.data) } else { self.tap.client(chunk.t, &chunk.data) };
                 for r in records {
                     self.write(&r);
+                    dirty = true;
+                }
+                if dirty && flushed.elapsed() >= std::time::Duration::from_secs(1) {
+                    self.failed |= self.out.flush().is_err();
+                    dirty = false;
+                    flushed = Instant::now();
                 }
                 // Écriture impossible : le canal se ferme, le relais arrête la session.
                 if self.failed {
@@ -642,7 +669,7 @@ impl Recorder {
             }
             self
         })?;
-        Ok(Tape { tx: Some(tx), writer: Some(writer), start: Instant::now() })
+        Ok(Tape { path, tx: Some(tx), writer: Some(writer), start: Instant::now() })
     }
 
     fn write(&mut self, record: &Record) {

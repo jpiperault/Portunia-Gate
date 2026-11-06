@@ -1156,7 +1156,7 @@ async fn terminal(
         let state = portal.state.clone();
         state.web.active.fetch_add(1, Ordering::Relaxed);
         let user = format!("{}%{}", w.user.login, target.name);
-        let (_watch, cut) = state.live.watch(crate::live::Watched { user: w.user.id, login: &w.user.login, target: Some(&target), web: true, recorded: false });
+        let (_watch, cut) = state.live.watch(crate::live::Watched { user: w.user.id, login: &w.user.login, target: Some(&target), web: true, recorded: false, session: None });
         if let Err(e) = bridge(&state, socket, &user, &ticket, cols, rows, w.expires, idle_min, cut).await {
             tracing::warn!("{} {user}: {e:#}", t!("portal: terminal", "portail : terminal"));
         }

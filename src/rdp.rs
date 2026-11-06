@@ -669,6 +669,10 @@ pub(crate) async fn relay_session(
         audit::note(db, &user.login, "rebond.ouvert", json!({ "session": id, "cible": target.name, "protocole": "rdp", "adresse": a.addr })).await;
     } else {
         model::session_start(db, id, user.id, target.id, "rdp", if target.vaulted() { "coffre" } else { "enregistré" }, &a.addr).await?;
+        // Fichier connu dès l'ouverture : la session se suit en direct depuis l'Audit.
+        if let Some(c) = &capture {
+            model::session_recording(db, id, &c.path).await?;
+        }
         audit::note(
             db,
             &user.login,
@@ -678,7 +682,7 @@ pub(crate) async fn relay_session(
         .await;
     }
     let started = Instant::now();
-    let (_watch, mut cut) = state.live.watch(crate::live::Watched { user: user.id, login: &user.login, target: Some(target), web, recorded: !jump });
+    let (_watch, mut cut) = state.live.watch(crate::live::Watched { user: user.id, login: &user.login, target: Some(target), web, recorded: !jump, session: Some(id) });
     let mut tick = tokio::time::interval(Duration::from_secs(5));
     // Octets relayés (rebond : sans enregistrement pour les compter).
     let moved = AtomicU64::new(0);

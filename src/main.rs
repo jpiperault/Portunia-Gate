@@ -162,7 +162,7 @@ enum Command {
     Edge(EdgeCmd),
     /// General settings; without a name, lists them all.
     Setting {
-        /// auth_policy, banner, name, language, session_hours, remember_password, own_replay, sensitive_commands or file_copies_mb.
+        /// auth_policy, banner, name, language, session_hours, remember_password, own_replay, live_notice, sensitive_commands or file_copies_mb.
         key: Option<String>,
         /// New value; without a value, shows the current one.
         value: Option<String>,
@@ -175,6 +175,14 @@ enum SessionsCmd {
     Show {
         /// Identifier, or its first characters as listed by « sessions ».
         id: String,
+    },
+    /// Cuts an open session (within 30 seconds); --disable also disables the account.
+    Cut {
+        /// Identifier, or its first characters as listed by « sessions ».
+        id: String,
+        /// Also disable the account.
+        #[arg(long)]
+        disable: bool,
     },
 }
 
@@ -949,6 +957,7 @@ async fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Command::Sessions { cmd: Some(SessionsCmd::Show { id }), .. } => session_show(&state, &id).await,
+        Command::Sessions { cmd: Some(SessionsCmd::Cut { id, disable }), .. } => session_cut(&state, &id, disable).await,
         Command::Sessions { cmd: None, last, user, server, since, until, text, input, files } => {
             let filter = model::AuditFilter {
                 login: user,
@@ -1044,6 +1053,7 @@ async fn all_settings(state: &State) -> Result<Vec<(&'static str, String)>> {
         ("session_hours", api::session_hours(state).await?.to_string()),
         ("remember_password", on_off(api::remember_allowed(state).await?)),
         ("own_replay", on_off(api::own_sessions_allowed(state).await?)),
+        ("live_notice", on_off(api::live_notice(state).await?)),
         ("sensitive_commands", api::sensitive_commands(state).await?.join(", ")),
         ("file_copies_mb", model::setting(&state.db, "copies_fichiers_mo").await?.and_then(|v| v.as_u64()).unwrap_or(0).to_string()),
         ("banner", api::setting_str(state, "banniere", sshd::default_banner()).await?.replace('\n', "\\n")),
@@ -1060,11 +1070,12 @@ async fn setting_cmd(state: &State, key: &str, value: Option<String>) -> Result<
         "session_hours" | "duree_session_h" => "duree_session_h",
         "remember_password" | "memo_mot_de_passe" => "memo_mot_de_passe",
         "own_replay" | "relecture_propres" => "relecture_propres",
+        "live_notice" | "direct_prevenir" => "direct_prevenir",
         "sensitive_commands" | "commandes_sensibles" => "commandes_sensibles",
         "file_copies_mb" | "copies_fichiers_mo" => "copies_fichiers_mo",
         _ => bail!(t!(
-            "unknown setting: auth_policy, banner, name, language, session_hours, remember_password, own_replay, sensitive_commands or file_copies_mb",
-            "réglage inconnu : auth_policy, banner, name, language, session_hours, remember_password, own_replay, sensitive_commands ou file_copies_mb"
+            "unknown setting: auth_policy, banner, name, language, session_hours, remember_password, own_replay, live_notice, sensitive_commands or file_copies_mb",
+            "réglage inconnu : auth_policy, banner, name, language, session_hours, remember_password, own_replay, live_notice, sensitive_commands ou file_copies_mb"
         )),
     };
     let Some(v) = value else {
@@ -1076,6 +1087,7 @@ async fn setting_cmd(state: &State, key: &str, value: Option<String>) -> Result<
             "duree_session_h" => "session_hours",
             "memo_mot_de_passe" => "remember_password",
             "relecture_propres" => "own_replay",
+            "direct_prevenir" => "live_notice",
             "commandes_sensibles" => "sensitive_commands",
             "copies_fichiers_mo" => "file_copies_mb",
             other => other,
@@ -1103,7 +1115,7 @@ async fn setting_cmd(state: &State, key: &str, value: Option<String>) -> Result<
             }
             json!(h)
         }
-        "memo_mot_de_passe" | "relecture_propres" => json!(parse_switch(&v).map_err(|e| anyhow!(e))?),
+        "memo_mot_de_passe" | "relecture_propres" | "direct_prevenir" => json!(parse_switch(&v).map_err(|e| anyhow!(e))?),
         "copies_fichiers_mo" => {
             let mb: u64 = v.trim().parse().map_err(|_| anyhow!(t!("file_copies_mb: a number of megabytes (0: no copy)", "file_copies_mb : un nombre de mégaoctets (0 : aucune copie)")))?;
             if mb > 10_240 {
@@ -1138,6 +1150,32 @@ fn parse_day(text: &str, end: bool) -> Result<chrono::DateTime<chrono::Utc>> {
 }
 
 /// Une session : compte, serveur, horaires, fichier d'enregistrement et contrôle de sa signature.
+/// Coupe une session ouverte : ordre appliqué par le service sous 30 secondes.
+async fn session_cut(state: &State, id: &str, disable: bool) -> Result<()> {
+    let found = model::audit_sessions_by_prefix(&state.db, id).await?;
+    let s = match found.as_slice() {
+        [one] => one,
+        [] => bail!(t!("Session not found", "Session introuvable")),
+        _ => bail!(t!("Several sessions start this way: give more characters", "Plusieurs sessions commencent ainsi : donnez plus de caractères")),
+    };
+    if s.ended_at.is_some() {
+        bail!(t!("This session is already closed", "Cette session est déjà fermée"));
+    }
+    model::order_cut_session(&state.db, s.id, "console").await?;
+    if disable {
+        if let Some(u) = model::user_by_login(&state.db, &s.login).await? {
+            sqlx::query("UPDATE users SET disabled = true WHERE id = $1").bind(u.id).execute(&state.db).await?;
+            model::order_cut(&state.db, u.id).await?;
+        }
+    }
+    audit::log(&state.db, "console", "session.coupee_par", json!({ "session": s.id, "cible": s.target, "compte": s.login, "desactive": disable })).await?;
+    println!("{}", t!("Session cut within 30 seconds.", "Session coupée sous 30 secondes."));
+    if disable {
+        println!("{}", t!(format!("Account {} disabled.", s.login), format!("Compte {} désactivé.", s.login)));
+    }
+    Ok(())
+}
+
 async fn session_show(state: &State, id: &str) -> Result<()> {
     let found = model::audit_sessions_by_prefix(&state.db, id).await?;
     let s = match found.as_slice() {

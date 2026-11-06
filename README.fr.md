@@ -187,6 +187,8 @@ Rien ne s'affiche sous la Gate ? Aucune règle ne donne encore accès à un serv
 
 ## Relire les sessions
 
+**En direct (0.36)** : **Audit** › **En direct** liste les sessions ouvertes en ce moment (SSH, Bureau à distance, interfaces web), mises à jour toutes les 10 secondes. **Suivre** ouvre le lecteur à la fin de la session, qui s'allonge au fil de la session (● EN DIRECT) : l'écran, la frappe si la règle l'enregistre, les clics, les actions web. **Couper** ferme la session tout de suite ; un administrateur peut désactiver le compte en même temps. Le suivi est noté au journal (`session.suivie`), la coupure aussi (`session.coupee_par`). Avec le réglage `live_notice` (actif par défaut), l'utilisateur SSH est prévenu dans son terminal que sa session est suivie. Pas de prise en main du clavier. En ligne de commande : `sudo portunia-gate sessions cut ID [--disable]`.
+
 Menu **⋯** de la Gate › **Audit** › **Sessions** (rôles administrateur et auditeur).
 
 **Trouver une session** : filtres par compte, serveur et période, case « Avec frappe ». La recherche porte sur la frappe et sur le texte affiché de toutes les sessions enregistrées : la colonne « Trouvé » donne le moment et l'extrait, un clic ouvre la relecture à cet endroit.

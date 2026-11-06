@@ -113,6 +113,9 @@ pub async fn run(state: Arc<State>) -> anyhow::Result<()> {
         .route("/api/v1/audit/sessions", get(audit_sessions))
         .route("/api/v1/audit/sessions/{id}/enregistrement", get(audit_recording))
         .route("/api/v1/audit/sessions/{id}/flux", get(audit_rdp_stream))
+        // Vue en direct : sessions ouvertes, et les couper.
+        .route("/api/v1/audit/direct", get(audit_live))
+        .route("/api/v1/audit/sessions/{id}/couper", post(audit_cut))
         .route("/api/v1/assistance", get(assist_status))
         .route("/api/v1/assistance/{place}", get(assist_join))
         .route("/api/v1/admin/assistance", get(admin_assist).put(admin_assist_update))
@@ -1375,6 +1378,8 @@ async fn admin_settings(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
         "duree_session_h": session_hours(state).await?,
         "memo_mot_de_passe": remember_allowed(state).await?,
         "relecture_propres": own_sessions_allowed(state).await?,
+        // Prévenir l'utilisateur d'une session suivie en direct (terminaux SSH).
+        "direct_prevenir": live_notice(state).await?,
         "commandes_sensibles": sensitive_commands(state).await?,
         // Copies des fichiers copiés en Bureau à distance, gardées par session (Mo ; 0 : aucune).
         "copies_fichiers_mo": model::setting(&state.db, "copies_fichiers_mo").await?.and_then(|v| v.as_u64()).unwrap_or(0),
@@ -1391,6 +1396,7 @@ struct SettingsBody {
     duree_session_h: Option<i64>,
     memo_mot_de_passe: Option<bool>,
     relecture_propres: Option<bool>,
+    direct_prevenir: Option<bool>,
     commandes_sensibles: Option<Vec<String>>,
     langue: Option<String>,
     copies_fichiers_mo: Option<u64>,
@@ -1428,6 +1434,10 @@ async fn admin_settings_update(AxState(api): Ctx, headers: HeaderMap, Json(body)
         model::set_setting(db, "relecture_propres", json!(v)).await?;
         changed.insert("relecture_propres".into(), json!(v));
     }
+    if let Some(v) = body.direct_prevenir {
+        model::set_setting(db, "direct_prevenir", json!(v)).await?;
+        changed.insert("direct_prevenir".into(), json!(v));
+    }
     if let Some(list) = body.commandes_sensibles {
         let list: Vec<String> = list.into_iter().map(|c| c.trim().to_string()).filter(|c| !c.is_empty()).collect();
         model::set_setting(db, "commandes_sensibles", json!(list)).await?;
@@ -1463,6 +1473,10 @@ const SENSITIVE_DEFAULT: &[&str] = &[
 
 pub(crate) async fn own_sessions_allowed(state: &State) -> anyhow::Result<bool> {
     Ok(model::setting(&state.db, "relecture_propres").await?.and_then(|v| v.as_bool()).unwrap_or(false))
+}
+
+pub(crate) async fn live_notice(state: &State) -> anyhow::Result<bool> {
+    Ok(model::setting(&state.db, "direct_prevenir").await?.and_then(|v| v.as_bool()).unwrap_or(true))
 }
 
 pub(crate) async fn sensitive_commands(state: &State) -> anyhow::Result<Vec<String>> {
@@ -1578,6 +1592,28 @@ async fn audit_sessions(AxState(api): Ctx, headers: HeaderMap, Query(q): Query<A
 #[derive(Deserialize)]
 struct RecordingQuery {
     reveler: Option<bool>,
+    /// Relecture déjà ouverte qui se met à jour (session en direct) : rien de plus au journal.
+    suite: Option<bool>,
+}
+
+/// Une relecture commence : notée au journal (« session.suivie » si la session est encore
+/// ouverte) ; l'utilisateur en est prévenu si le réglage live_notice le demande.
+async fn note_view(state: &State, user: &User, s: &model::AuditSession, id: Uuid, reveal: bool, q: &RecordingQuery) {
+    if q.suite.unwrap_or(false) {
+        return;
+    }
+    let live = s.ended_at.is_none() && state.live.sessions().contains(&id);
+    let event = if reveal {
+        "enregistrement.revele"
+    } else if live {
+        "session.suivie"
+    } else {
+        "enregistrement.consulte"
+    };
+    audit::note(&state.db, &user.login, event, json!({ "session": id, "cible": s.target, "compte": s.login })).await;
+    if live && live_notice(state).await.unwrap_or(true) {
+        state.live.notify_session(id, &t!(format!("Portunia Gate: this session is being followed live by {}.", user.login), format!("Portunia Gate : cette session est suivie en direct par {}.", user.login)));
+    }
 }
 
 /// Enregistrement d'une session lisible par l'appelant, avec le contrôle de sa signature.
@@ -1624,7 +1660,7 @@ async fn load_recording(api: &Api, headers: &HeaderMap, id: Uuid, reveal: bool) 
 /// Relectures déjà faites de cette session (les 20 dernières).
 async fn consultations(state: &State, id: Uuid) -> Result<Vec<Value>, ApiError> {
     let views: Vec<(String, DateTime<Utc>, String)> = sqlx::query_as(
-        "SELECT actor, at, event FROM audit WHERE event IN ('enregistrement.consulte', 'enregistrement.revele') AND detail->>'session' = $1
+        "SELECT actor, at, event FROM audit WHERE event IN ('enregistrement.consulte', 'enregistrement.revele', 'session.suivie') AND detail->>'session' = $1
          ORDER BY seq DESC LIMIT 20",
     )
     .bind(id.to_string())
@@ -1644,7 +1680,7 @@ async fn audit_recording(AxState(api): Ctx, headers: HeaderMap, Path(id): Path<U
     // Interface web : le journal d'actions (pages, envois, WebSocket, coffre).
     if s.kind == "web" {
         let (_, actions, duration) = crate::websession::read(&raw).map_err(|e| err(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
-        audit::note(&state.db, &user.login, "enregistrement.consulte", json!({ "session": id, "cible": s.target, "compte": s.login })).await;
+        note_view(state, &user, &s, id, false, &q).await;
         return Ok(Json(json!({
             "session": session,
             "web": { "actions": actions, "duree": duration },
@@ -1665,13 +1701,7 @@ async fn audit_recording(AxState(api): Ctx, headers: HeaderMap, Path(id): Path<U
         let mut events = replay.events;
         let hidden = if reveal { 0 } else { crate::rdpcap::mask_clipboard(&mut events) };
         let clips = events.iter().filter(|e| e["k"] == "presse-papiers").count();
-        audit::note(
-            &state.db,
-            &user.login,
-            if reveal { "enregistrement.revele" } else { "enregistrement.consulte" },
-            json!({ "session": id, "cible": s.target, "compte": s.login }),
-        )
-        .await;
+        note_view(state, &user, &s, id, reveal, &q).await;
         return Ok(Json(json!({
             "session": session,
             "rdp": { "evenements": events, "duree": replay.duration, "images": replay.display.len(), "compte": crate::rdpcap::counts(&events) },
@@ -1687,13 +1717,7 @@ async fn audit_recording(AxState(api): Ctx, headers: HeaderMap, Path(id): Path<U
     let cast = crate::replay::Cast::parse(&text);
     let hidden = cast.lines.iter().filter(|l| l.secret).count();
     let content = if reveal { text.into_owned() } else { cast.masked() };
-    audit::note(
-        &state.db,
-        &user.login,
-        if reveal { "enregistrement.revele" } else { "enregistrement.consulte" },
-        json!({ "session": id, "cible": s.target, "compte": s.login }),
-    )
-    .await;
+    note_view(state, &user, &s, id, reveal, &q).await;
     Ok(Json(json!({
         "session": session,
         "cast": content,
@@ -1709,12 +1733,19 @@ async fn audit_recording(AxState(api): Ctx, headers: HeaderMap, Path(id): Path<U
 /// Image d'une session Bureau à distance, pour le lecteur de Portunia : blocs temps (f64),
 /// longueur (u32), message RDP du serveur. Sans presse-papiers ni authentification.
 /// La consultation est inscrite au journal par /enregistrement, que le lecteur appelle d'abord.
-async fn audit_rdp_stream(AxState(api): Ctx, headers: HeaderMap, Path(id): Path<Uuid>) -> Result<Response, ApiError> {
+async fn audit_rdp_stream(AxState(api): Ctx, headers: HeaderMap, Path(id): Path<Uuid>, Query(q): Query<StreamQuery>) -> Result<Response, ApiError> {
     let Loaded { session: s, raw, signature, .. } = load_recording(&api, &headers, id, false).await?;
     if s.kind != "rdp" {
         return Err(err(StatusCode::NOT_FOUND, t!("Not a Remote Desktop session", "Ce n'est pas une session Bureau à distance")));
     }
-    let body = tokio::task::spawn_blocking(move || crate::rdpcap::read(&raw).map(|r| crate::rdpcap::display_stream(&r)))
+    // Session en direct : seulement les images après celles déjà reçues.
+    let skip = q.depuis.unwrap_or(0);
+    let body = tokio::task::spawn_blocking(move || {
+        crate::rdpcap::read(&raw).map(|mut r| {
+            r.display.drain(..skip.min(r.display.len()));
+            crate::rdpcap::display_stream(&r)
+        })
+    })
         .await
         .map_err(|e| anyhow!("{e}"))?
         .map_err(|e| err(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
@@ -1726,6 +1757,66 @@ async fn audit_rdp_stream(AxState(api): Ctx, headers: HeaderMap, Path(id): Path<
         body,
     )
         .into_response())
+}
+
+#[derive(Deserialize)]
+struct StreamQuery {
+    /// Nombre d'images déjà reçues.
+    depuis: Option<usize>,
+}
+
+/// Sessions ouvertes en ce moment (Audit › En direct).
+async fn audit_live(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
+    auditor(&api, &headers).await?;
+    let ids = api.state.live.sessions();
+    let mut list = Vec::new();
+    for id in ids {
+        if let Some(s) = model::audit_session(&api.state.db, id).await?.filter(|s| s.ended_at.is_none()) {
+            list.push(json!({
+                "id": s.id, "compte": s.login, "serveur": s.target, "type": s.kind, "detail": s.detail, "mode": s.mode,
+                "adresse": s.client_addr, "debut": s.started_at, "fin": null, "enregistree": s.recording.is_some(),
+                "relisible": s.recording.is_some() && s.kind != "rdp" && s.kind != "web",
+                "relisible_rdp": s.recording.is_some() && s.kind == "rdp",
+                "relisible_web": s.recording.is_some() && s.kind == "web",
+                "frappe": s.frappe, "fichiers": s.fichiers, "octets": s.bytes,
+            }));
+        }
+    }
+    list.sort_by(|a, b| b["debut"].as_str().cmp(&a["debut"].as_str()));
+    Ok(Json(json!({ "sessions": list, "prevenir": live_notice(&api.state).await? })))
+}
+
+#[derive(Deserialize)]
+struct CutBody {
+    /// Désactiver aussi le compte (administrateurs seulement).
+    #[serde(default)]
+    desactiver: bool,
+}
+
+/// Coupe une session ouverte ; désactive aussi le compte si demandé.
+async fn audit_cut(AxState(api): Ctx, headers: HeaderMap, Path(id): Path<Uuid>, Json(body): Json<CutBody>) -> ApiResult {
+    let actor = auditor(&api, &headers).await?;
+    if body.desactiver && actor.role != "admin" {
+        return Err(err(StatusCode::FORBIDDEN, t!("Only an administrator can disable an account", "Seul un administrateur peut désactiver un compte")));
+    }
+    let state = &api.state;
+    let s = model::audit_session(&state.db, id).await?.ok_or_else(|| err(StatusCode::NOT_FOUND, t!("Session not found", "Session introuvable")))?;
+    if s.login == actor.login && body.desactiver {
+        return Err(err(StatusCode::BAD_REQUEST, t!("You cannot disable your own account", "Vous ne pouvez pas désactiver votre propre compte")));
+    }
+    let why = t!(format!("Session cut by {}.", actor.login), format!("Session coupée par {}.", actor.login));
+    if !state.live.cut_session(id, &why) {
+        return Err(err(StatusCode::NOT_FOUND, t!("This session is no longer open", "Cette session n'est plus ouverte")));
+    }
+    if body.desactiver {
+        sqlx::query("UPDATE users SET disabled = true WHERE login = $1").bind(&s.login).execute(&state.db).await.map_err(anyhow::Error::from)?;
+        if let Some(u) = model::user_by_login(&state.db, &s.login).await? {
+            state.live.cut_user(u.id, &why);
+        }
+        state.live.recheck();
+    }
+    audit::note(&state.db, &actor.login, "session.coupee_par", json!({ "session": id, "cible": s.target, "compte": s.login, "desactive": body.desactiver })).await;
+    Ok(Json(json!({ "etat": "ok" })))
 }
 
 // ---------- Bureau à distance (Portunia) ----------

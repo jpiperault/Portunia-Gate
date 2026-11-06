@@ -192,8 +192,8 @@ impl Ctx {
         Ok(model::access(&self.state.db, self.user.id, target.id).await?.map(|access| (target, access)))
     }
 
-    fn watch(&self, target: &Target, recorded: bool) -> (live::Guard, Cut) {
-        self.state.live.watch(Watched { user: self.user.id, login: &self.user.login, target: Some(target), web: false, recorded })
+    fn watch(&self, target: &Target, recorded: bool, session: Uuid) -> (live::Guard, Cut) {
+        self.state.live.watch(Watched { user: self.user.id, login: &self.user.login, target: Some(target), web: false, recorded, session: Some(session) })
     }
 }
 
@@ -470,7 +470,7 @@ impl server::Handler for Conn {
         self.authenticated.store(true, Ordering::SeqCst);
         self.slot = None;
         // Compte désactivé ou supprimé : la connexion entière se ferme.
-        let (guard, mut cut) = self.state.live.watch(Watched { user: user.id, login: &user.login, target: None, web: false, recorded: false });
+        let (guard, mut cut) = self.state.live.watch(Watched { user: user.id, login: &user.login, target: None, web: false, recorded: false, session: None });
         self.watch = Some(guard);
         let handle = session.handle();
         tokio::spawn(async move {
@@ -891,7 +891,11 @@ async fn shell(ctx: Arc<Ctx>, mut channel: Channel<Msg>, mut pty: Option<PtyInfo
     if target.records() {
         say(&channel, t!("Portunia Gate: session recorded.\n", "Portunia Gate : session enregistrée.\n")).await;
         match Recorder::create(&ctx.state.config.recordings_dir(), id, p.cols, p.rows, &format!("{login} → {detail}"), access.record_input) {
-            Ok(r) => recorder = Some(r),
+            Ok(r) => {
+                // Fichier connu dès l'ouverture : la session se suit en direct depuis l'Audit.
+                model::session_recording(db, id, &r.path()).await?;
+                recorder = Some(r)
+            }
             Err(e) => {
                 refuse_unrecorded(&ctx, id, &target.name, &e, &channel).await;
                 let _ = handle.disconnect(russh::Disconnect::ByApplication, "", "fr").await;
@@ -899,7 +903,7 @@ async fn shell(ctx: Arc<Ctx>, mut channel: Channel<Msg>, mut pty: Option<PtyInfo
             }
         }
     }
-    let (_watch, mut cut) = ctx.watch(&target, recorder.is_some());
+    let (_watch, mut cut) = ctx.watch(&target, recorder.is_some(), id);
     let started = std::time::Instant::now();
     let (status, ended) = pump(&mut channel, remote, recorder.as_mut(), &mut cut).await;
     let _ = handle.disconnect(russh::Disconnect::ByApplication, "", "fr").await;
@@ -1000,6 +1004,7 @@ async fn connect_interactive(
 async fn pump(user: &mut Channel<Msg>, mut remote: Channel<russh::client::Msg>, mut rec: Option<&mut Recorder>, cut: &mut Cut) -> (Option<u32>, Option<String>) {
     let mut status = None;
     let mut ended = None;
+    let mut notices = cut.notices();
     loop {
         if rec.as_deref().is_some_and(Recorder::failed) {
             ended = Some(t!("Recording failed: session closed. Tell an administrator.", "Enregistrement impossible : session fermée. Prévenez un administrateur.").to_string());
@@ -1009,6 +1014,10 @@ async fn pump(user: &mut Channel<Msg>, mut remote: Channel<russh::client::Msg>, 
             why = cut.reason() => {
                 ended = Some(why);
                 break;
+            }
+            // Session suivie en direct (réglage live_notice) : dit à l'utilisateur, pas enregistré.
+            text = notices.next() => {
+                let _ = user.data_bytes(format!("\r\n\x1b[1;33m{text}\x1b[0m\r\n").into_bytes()).await;
             }
             msg = user.wait() => match msg {
                 Some(ChannelMsg::Data { data }) => {
@@ -1144,7 +1153,10 @@ async fn exec(ctx: Arc<Ctx>, mut channel: Channel<Msg>, pty: Option<PtyInfo>, co
     let mut recorder = None;
     if recorded {
         match Recorder::create(&ctx.state.config.recordings_dir(), id, cols, rows, &format!("{} → {}: {command}", ctx.user.login, target.name), access.record_input) {
-            Ok(r) => recorder = Some(r),
+            Ok(r) => {
+                model::session_recording(&ctx.state.db, id, &r.path()).await?;
+                recorder = Some(r)
+            }
             Err(e) => {
                 refuse_unrecorded(&ctx, id, &target.name, &e, &channel).await;
                 let _ = handle.disconnect(russh::Disconnect::ByApplication, "", "fr").await;
@@ -1152,7 +1164,7 @@ async fn exec(ctx: Arc<Ctx>, mut channel: Channel<Msg>, pty: Option<PtyInfo>, co
             }
         }
     }
-    let (_watch, mut cut) = ctx.watch(&target, recorder.is_some());
+    let (_watch, mut cut) = ctx.watch(&target, recorder.is_some(), id);
     let started = std::time::Instant::now();
     let (status, ended) = pump(&mut channel, remote, recorder.as_mut(), &mut cut).await;
     let _ = handle.disconnect(russh::Disconnect::ByApplication, "", "fr").await;
@@ -1188,7 +1200,7 @@ async fn sftp(ctx: Arc<Ctx>, mut channel: Channel<Msg>, name: String) -> Result<
         json!({ "session": id, "cible": target.name, "adresse": ctx.addr }),
     )
     .await;
-    let (_watch, mut cut) = ctx.watch(&target, false);
+    let (_watch, mut cut) = ctx.watch(&target, false, id);
     let started = std::time::Instant::now();
     let (status, ended) = pump(&mut channel, remote, None, &mut cut).await;
     let _ = handle.disconnect(russh::Disconnect::ByApplication, "", "fr").await;
@@ -1260,7 +1272,7 @@ async fn relay_tcp(ctx: Arc<Ctx>, target: Target, channel: Channel<Msg>) -> Resu
     )
     .await;
     let started = std::time::Instant::now();
-    let (_watch, mut cut) = ctx.watch(&target, false);
+    let (_watch, mut cut) = ctx.watch(&target, false, id);
     let (up, down) = relay_counted(channel.into_stream(), tcp, &mut cut).await;
     let _ = model::session_end(
         db,
@@ -1311,7 +1323,7 @@ async fn relay_tunnel(
         json!({ "session": id, "cible": target.name, "vers": detail, "adresse": ctx.addr }),
     )
     .await;
-    let (_watch, mut cut) = ctx.watch(&target, false);
+    let (_watch, mut cut) = ctx.watch(&target, false, id);
     let (mut a, mut b) = (channel.into_stream(), remote.into_stream());
     let (up, down) = tokio::select! {
         copied = tokio::io::copy_bidirectional(&mut a, &mut b) => copied.unwrap_or((0, 0)),

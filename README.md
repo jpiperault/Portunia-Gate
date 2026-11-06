@@ -176,6 +176,8 @@ Nothing shows under the Gate? No rule grants access to a server yet: create a se
 
 Gate **⋯** menu › **Audit** › **Sessions** (administrator and auditor roles).
 
+**Live (0.36)**: **Audit** › **Live** lists the sessions open right now (SSH, Remote Desktop, web interfaces), refreshed every 10 seconds. **Follow** opens the player at the end of the session, which keeps growing as the session goes on (● LIVE): the screen, keystrokes if the rule records them, clicks, web actions. **Cut** closes the session at once; an administrator can also disable the account at the same time. Following is logged (`session.suivie`), cutting too (`session.coupee_par`). With the `live_notice` setting (on by default), an SSH user is told in their terminal that their session is followed. There is no taking over the keyboard. Command line: `sudo portunia-gate sessions cut ID [--disable]`.
+
 **Finding a session**: filters by account, server and period, "With keystrokes" box. Search covers the keystrokes and the displayed text of all recorded sessions: the "Found" column gives the moment and the excerpt, and a click opens the replay at that point.
 
 **The player**, in a tab:

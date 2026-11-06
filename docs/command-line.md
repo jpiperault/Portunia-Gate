@@ -117,6 +117,7 @@ sudo portunia-gate setting banner "Authorised access only. Sessions are recorded
 sudo portunia-gate setting session_hours 8                # Portunia sign-in duration, 1 to 168 hours
 sudo portunia-gate setting remember_password off          # Portunia may remember the Gate password on workstations
 sudo portunia-gate setting own_replay off                 # each account may replay its own sessions
+sudo portunia-gate setting live_notice on                 # tell SSH users when their session is followed live
 sudo portunia-gate setting sensitive_commands "rm -rf,shutdown,DROP TABLE"   # marked on the player's timeline
 sudo portunia-gate setting file_copies_mb 200             # keep copied files, up to 200 MB per session (0: none)
 sudo portunia-gate setting session_hours                  # without a value: shows it
@@ -211,6 +212,7 @@ sudo portunia-gate sessions --text "rm -rf"               # text shown on screen
 sudo portunia-gate sessions --input                       # sessions whose keystrokes are recorded
 sudo portunia-gate sessions --files                       # Remote Desktop sessions where files were copied
 sudo portunia-gate sessions show 3f2a9c1e                 # details, recording file, signature check
+sudo portunia-gate sessions cut 3f2a9c1e                  # cuts an open session within 30 s (--disable: also disables the account)
 ```
 
 `sessions show` prints the recording's path and checks its signature (`✓ Signature verified` or `⚠ ALTERED FILE`). An SSH recording (`.cast`, asciicast v2) can be played in a terminal with `sudo asciinema play <file>`. That replay is **not logged** and shows masked input: keep it to system administrators, and use Portunia for auditors. Remote Desktop recordings (`.rdpcap`) are replayed in Portunia only. For a web session (`.weblog`, 0.35), `sessions show` also lists its actions (time, kind, method, status, path).

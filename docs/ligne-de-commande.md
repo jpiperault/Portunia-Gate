@@ -117,6 +117,7 @@ sudo portunia-gate setting banner "Accès réservé. Les sessions sont enregistr
 sudo portunia-gate setting session_hours 8                # durée d'une connexion Portunia, 1 à 168 heures
 sudo portunia-gate setting remember_password off          # Portunia peut retenir le mot de passe de la Gate sur les postes
 sudo portunia-gate setting own_replay off                 # chaque compte peut relire ses propres sessions
+sudo portunia-gate setting live_notice on                 # prévenir l'utilisateur SSH quand sa session est suivie en direct
 sudo portunia-gate setting sensitive_commands "rm -rf,shutdown,DROP TABLE"   # repérées sur la barre de temps du lecteur
 sudo portunia-gate setting file_copies_mb 200             # garde les fichiers copiés, jusqu'à 200 Mo par session (0 : aucun)
 sudo portunia-gate setting session_hours                  # sans valeur : l'affiche
@@ -211,6 +212,7 @@ sudo portunia-gate sessions --text "rm -rf"               # texte affiché à l'
 sudo portunia-gate sessions --input                       # sessions dont la frappe est enregistrée
 sudo portunia-gate sessions --files                       # sessions Bureau à distance avec des fichiers copiés
 sudo portunia-gate sessions show 3f2a9c1e                 # détail, fichier d'enregistrement, contrôle de la signature
+sudo portunia-gate sessions cut 3f2a9c1e                  # coupe une session ouverte sous 30 s (--disable : désactive aussi le compte)
 ```
 
 `sessions show` donne le chemin de l'enregistrement et vérifie sa signature (`✓ Signature vérifiée` ou `⚠ FICHIER ALTÉRÉ`). Un enregistrement SSH (`.cast`, asciicast v2) se relit dans un terminal avec `sudo asciinema play <fichier>`. Cette relecture **n'est pas journalisée** et montre les saisies masquées : réservez-la aux administrateurs système, et passez par Portunia pour les auditeurs. Les enregistrements Bureau à distance (`.rdpcap`) ne se relisent que dans Portunia. Pour une session web (`.weblog`, 0.35), `sessions show` liste aussi ses actions (temps, nature, méthode, statut, chemin).

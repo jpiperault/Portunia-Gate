@@ -42,6 +42,19 @@ pub async fn order_cut(db: &PgPool, user: Uuid) -> Result<()> {
     set_setting(db, ORDER_CUT, serde_json::json!({ "n": n, "comptes": list })).await
 }
 
+/// Ordre de la ligne de commande : couper une session (appliqué par le service sous 30 s).
+pub const ORDER_CUT_SESSION: &str = "console_coupures_sessions";
+
+pub async fn order_cut_session(db: &PgPool, session: Uuid, by: &str) -> Result<()> {
+    let current = setting(db, ORDER_CUT_SESSION).await?.unwrap_or(Value::Null);
+    let n = current["n"].as_i64().unwrap_or(0) + 1;
+    let mut list = current["sessions"].as_array().cloned().unwrap_or_default();
+    list.push(serde_json::json!({ "n": n, "session": session, "par": by }));
+    let excess = list.len().saturating_sub(50);
+    list.drain(..excess);
+    set_setting(db, ORDER_CUT_SESSION, serde_json::json!({ "n": n, "sessions": list })).await
+}
+
 /// Fait avancer un compteur rangé dans les réglages (ordre passé d'un processus à l'autre).
 pub async fn bump_setting(db: &PgPool, key: &str) -> Result<()> {
     sqlx::query(
@@ -596,6 +609,12 @@ pub async fn session_start(db: &PgPool, id: Uuid, user: Uuid, target: Uuid, kind
     .bind(client)
     .execute(db)
     .await?;
+    Ok(())
+}
+
+/// Fichier d'enregistrement d'une session encore ouverte (suivie en direct).
+pub async fn session_recording(db: &PgPool, id: Uuid, path: &str) -> Result<()> {
+    sqlx::query("UPDATE sessions SET recording = $2 WHERE id = $1").bind(id).bind(path).execute(db).await?;
     Ok(())
 }
 

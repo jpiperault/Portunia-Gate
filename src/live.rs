@@ -41,7 +41,11 @@ struct Entry {
     target: Option<(Uuid, String)>,
     web: bool,
     recorded: bool,
+    /// Session de la liste des sessions (absente : connexion sans serveur).
+    session: Option<Uuid>,
     cut: watch::Sender<Option<String>>,
+    /// Message pour l'utilisateur (session suivie en direct), affiché par les terminaux.
+    notice: watch::Sender<Option<String>>,
 }
 
 #[derive(Default)]
@@ -56,6 +60,8 @@ pub struct Registry {
     assist_on: AtomicU8,
     /// Derniers ordres de fermeture de comptes et de réveil de Let's Encrypt vus, + 1.
     cut_seen: AtomicI64,
+    /// Dernier ordre « sessions cut » vu, + 1.
+    session_cut_seen: AtomicI64,
     acme_seen: AtomicI64,
 }
 
@@ -68,6 +74,8 @@ pub struct Watched<'a> {
     pub web: bool,
     /// Enregistrée : se ferme si le disque se remplit.
     pub recorded: bool,
+    /// Ligne de la liste des sessions : suivie en direct et coupée depuis l'Audit.
+    pub session: Option<Uuid>,
 }
 
 /// Inscription, retirée quand elle est lâchée.
@@ -82,8 +90,26 @@ impl Drop for Guard {
     }
 }
 
-/// Signal de fermeture d'une session, avec sa raison.
-pub struct Cut(watch::Receiver<Option<String>>);
+/// Signal de fermeture d'une session, avec sa raison ; et messages pour l'utilisateur.
+pub struct Cut(watch::Receiver<Option<String>>, Option<watch::Receiver<Option<String>>>);
+
+/// Messages pour l'utilisateur d'une session (voir `Cut::notices`).
+pub struct Notices(Option<watch::Receiver<Option<String>>>);
+
+impl Notices {
+    /// Prochain message ; jamais si l'inscription est retirée ou déjà prise.
+    pub async fn next(&mut self) -> String {
+        let Some(rx) = self.0.as_mut() else { return std::future::pending().await };
+        loop {
+            if rx.changed().await.is_err() {
+                return std::future::pending().await;
+            }
+            if let Some(text) = rx.borrow_and_update().clone() {
+                return text;
+            }
+        }
+    }
+}
 
 impl Cut {
     /// La raison de la fermeture ; `None` si l'inscription a été retirée sans fermeture.
@@ -103,6 +129,11 @@ impl Cut {
         self.0.borrow().clone()
     }
 
+    /// Messages pour l'utilisateur, à attendre à côté de la fermeture.
+    pub fn notices(&mut self) -> Notices {
+        Notices(self.1.take())
+    }
+
     /// Pour un `select!` : n'aboutit que sur une vraie fermeture.
     pub async fn reason(&mut self) -> String {
         match self.wait().await {
@@ -116,16 +147,42 @@ impl Registry {
     pub fn watch(&self, w: Watched<'_>) -> (Guard, Cut) {
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         let (cut, rx) = watch::channel(None);
+        let (notice, notices) = watch::channel(None);
         let entry = Entry {
             user: w.user,
             login: w.login.to_string(),
             target: w.target.map(|t| (t.id, t.name.clone())),
             web: w.web,
             recorded: w.recorded,
+            session: w.session,
             cut,
+            notice,
         };
         self.entries.lock().unwrap().insert(id, entry);
-        (Guard { id, entries: self.entries.clone() }, Cut(rx))
+        (Guard { id, entries: self.entries.clone() }, Cut(rx, Some(notices)))
+    }
+
+    /// Sessions en cours de la liste des sessions.
+    pub fn sessions(&self) -> Vec<Uuid> {
+        self.entries.lock().unwrap().values().filter_map(|e| e.session).collect()
+    }
+
+    /// Coupe une session (Audit › En direct). false : elle n'est plus ouverte.
+    pub fn cut_session(&self, session: Uuid, why: &str) -> bool {
+        let entries = self.entries.lock().unwrap();
+        let mut found = false;
+        for e in entries.values().filter(|e| e.session == Some(session)) {
+            e.cut.send_replace(Some(why.to_string()));
+            found = true;
+        }
+        found
+    }
+
+    /// Message pour l'utilisateur d'une session (terminaux SSH seulement).
+    pub fn notify_session(&self, session: Uuid, text: &str) {
+        for e in self.entries.lock().unwrap().values().filter(|e| e.session == Some(session)) {
+            e.notice.send_replace(Some(text.to_string()));
+        }
     }
 
     /// Ferme tout ce que le compte a d'ouvert (mot de passe ou code réinitialisé).
@@ -277,6 +334,19 @@ async fn console_orders(state: &Arc<State>) -> Result<()> {
             }
         }
     }
+    // Session coupée en ligne de commande (sessions cut).
+    let cuts = model::setting(&state.db, model::ORDER_CUT_SESSION).await?.unwrap_or(serde_json::Value::Null);
+    let n = cuts["n"].as_i64().unwrap_or(0) + 1;
+    let seen = state.live.session_cut_seen.swap(n, Ordering::Relaxed);
+    if seen != 0 {
+        for order in cuts["sessions"].as_array().into_iter().flatten() {
+            let id = order["session"].as_str().and_then(|s| Uuid::parse_str(s).ok());
+            if let (Some(id), true) = (id, order["n"].as_i64().unwrap_or(0) + 1 > seen) {
+                let by = order["par"].as_str().unwrap_or("console");
+                state.live.cut_session(id, &t!(format!("Session cut by {by}."), format!("Session coupée par {by}.")));
+            }
+        }
+    }
     let wake = model::setting(&state.db, ACME_WAKE).await?.and_then(|v| v.as_i64()).unwrap_or(0) + 1;
     let seen = state.live.acme_seen.swap(wake, Ordering::Relaxed);
     if seen != 0 && seen != wake {
@@ -319,7 +389,23 @@ mod tests {
     use super::*;
 
     fn watched(login: &str) -> Watched<'_> {
-        Watched { user: Uuid::nil(), login, target: None, web: false, recorded: false }
+        Watched { user: Uuid::nil(), login, target: None, web: false, recorded: false, session: None }
+    }
+
+    #[tokio::test]
+    async fn session_suivie_puis_coupee() {
+        let registry = Registry::default();
+        let id = Uuid::new_v4();
+        let (_other, other_cut) = registry.watch(watched("bob"));
+        let (_guard, mut cut) = registry.watch(Watched { session: Some(id), ..watched("alice") });
+        assert_eq!(registry.sessions(), vec![id]);
+        let mut notices = cut.notices();
+        registry.notify_session(id, "suivie");
+        assert_eq!(tokio::time::timeout(Duration::from_secs(1), notices.next()).await.unwrap(), "suivie");
+        assert!(registry.cut_session(id, "coupée"));
+        assert_eq!(cut.wait().await.as_deref(), Some("coupée"));
+        assert_eq!(other_cut.closed(), None, "les autres sessions restent ouvertes");
+        assert!(!registry.cut_session(Uuid::new_v4(), "x"));
     }
 
     #[tokio::test]

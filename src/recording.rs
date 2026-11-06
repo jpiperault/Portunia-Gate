@@ -82,6 +82,11 @@ impl Recorder {
     }
 
     /// La session doit s'arrêter : elle ne serait plus enregistrée.
+    /// Fichier de l'enregistrement.
+    pub fn path(&self) -> String {
+        self.path.display().to_string()
+    }
+
     pub fn failed(&self) -> bool {
         self.failed
     }

@@ -182,7 +182,7 @@ pub async fn helper(state: Arc<State>, mut socket: WebSocket, login: String, use
 async fn relay(state: Arc<State>, mut agent: WebSocket, mut helper: WebSocket, login: &str, user: uuid::Uuid, addr: &str, hours: i64) {
     let started = Instant::now();
     // Compte du dépanneur désactivé : la session se ferme.
-    let (_watch, mut cut) = state.live.watch(crate::live::Watched { user, login, target: None, web: false, recorded: false });
+    let (_watch, mut cut) = state.live.watch(crate::live::Watched { user, login, target: None, web: false, recorded: false, session: None });
     let mut closing = state.assist.closing();
     let mut bytes = 0u64;
     let limit = tokio::time::sleep(Duration::from_secs(hours as u64 * 3600));

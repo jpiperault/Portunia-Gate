@@ -576,7 +576,7 @@ async fn jump(state: &Arc<State>, a: Allowed, mut client: TcpStream, request: &R
     model::session_start(db, id, user.id, target.id, "rebond", "rdp (natif)", &a.addr).await?;
     audit::note(db, &user.login, "rebond.ouvert", json!({ "session": id, "cible": target.name, "protocole": "rdp", "adresse": a.addr })).await;
     let started = Instant::now();
-    let (_watch, mut cut) = state.live.watch(crate::live::Watched { user: user.id, login: &user.login, target: Some(target), web: false, recorded: false });
+    let (_watch, mut cut) = state.live.watch(crate::live::Watched { user: user.id, login: &user.login, target: Some(target), web: false, recorded: false, session: Some(id) });
     // Chaque sens compte ses octets : un poste qui coupe brutalement ne les efface pas.
     let moved = AtomicU64::new(0);
     let reason = {

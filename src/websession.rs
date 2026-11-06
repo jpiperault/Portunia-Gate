@@ -103,7 +103,7 @@ pub async fn touch(state: &State, user: &User, target: &Target, client_addr: &st
         writeln!(out, "{}", json!({ "format": "portunia-gate-web-v1", "session": id, "compte": user.login, "serveur": target.name, "debut": now }))?;
         out.flush()?;
         // Chemin connu dès l'ouverture : la session en cours se relit déjà dans l'Audit.
-        sqlx::query("UPDATE sessions SET recording = $2 WHERE id = $1").bind(id).bind(path.display().to_string()).execute(&state.db).await?;
+        model::session_recording(&state.db, id, &path.display().to_string()).await?;
         Ok::<_, anyhow::Error>((path, out))
     }
     .await;
@@ -114,7 +114,7 @@ pub async fn touch(state: &State, user: &User, target: &Target, client_addr: &st
             return Err(t!("The Gate cannot record this session", "La Gate ne peut pas enregistrer cette session").to_string());
         }
     };
-    let (guard, cut) = state.live.watch(live::Watched { user: user.id, login: &user.login, target: Some(target), web: portal, recorded: true });
+    let (guard, cut) = state.live.watch(live::Watched { user: user.id, login: &user.login, target: Some(target), web: portal, recorded: true, session: Some(id) });
     let now = Instant::now();
     let active = Active { id, login: user.login.clone(), target: target.name.clone(), started: now, last: now, path, out, actions: 0, failed: false, index: String::new(), _guard: guard, cut };
     // Deux premières requêtes en même temps : la seconde session, inutile, est fermée aussitôt.
