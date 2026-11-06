@@ -240,6 +240,16 @@ The log records `rdp_natif.fichier` (file prepared), then the usual session even
 
 **Native sessions and replay (0.34.1).** Native Vault and Recorded sessions are always recorded, so the Gate withdraws the client's RDP 8 graphics pipeline (GFX) announcement: Windows then sends the picture as classic updates, which the replay decodes. Through the GFX channel, the replay stayed black.
 
+## Gate status and updates
+
+Since 0.39, **Gate status** (Portunia: Gate menu › *Gate status*, or the *Status* section of the administration; `sudo portunia-gate status`) shows at a glance: overall health, version, uptime, processor, memory, disk and network (with 24-hour curves in Portunia), services (database, HTTPS certificate, dedicated relays, clock, notifications, hardening), storage (recordings, database, filling rate and « disk full in N days »), activity (open sessions, sessions today, refused sign-ins, approvals waiting) and the integrity of the signed log (checked every 6 hours). In Portunia, the Gate's dot in the sidebar turns orange or red when something needs attention.
+
+- **Update in one click** (Debian package, Portunia Pro): *Update…*, now or at a set time (tonight at 3:00 by default), optionally warning the connected users 5 minutes before. A separate system service, run as root (`portunia-gate-update`), backs up the database, downloads the new package and the one installed (for the rollback) and checks their published SHA-256, installs, then waits for the new version to start. If it does not start within 3 minutes: **automatic rollback** (previous package reinstalled, database restored). It only accepts a version newer than the installed one. The administrators are told the result (and when a new version is published) by e-mail, Teams or webhook.
+- **Command line**: `update check`, `update apply [--at 03:00] [--notice] [--wait]`, `update status`, `update cancel`. With Docker: `sudo ./installer.sh update`, as before.
+- **Recording retention**: `sudo portunia-gate setting recording_days 180` (or Portunia: Settings, or the Status page). Beyond it, the recordings of ended sessions are deleted every hour; the sessions stay in the list and the deletion is logged (`enregistrement.purge`). 0: kept forever (default).
+- **Disk alert**: above 85 % full, the administrators are told (once a day at most).
+- **Log**: `mise_a_jour.programmee`, `.lancee`, `.reussie`, `.retour_arriere`, `.echec`, `.annulee`, `.disponible`; `disque.presque_plein`; `journal.altere`.
+
 ## Access approval
 
 Since 0.38 a rule can require an approval: its servers open only once an approver has granted access, for a duration. Settings: in the rule, *Access only after approval* and the **approvers** group (empty: the administrators); `sudo portunia-gate rule approval NAME on --approvers GROUP`.

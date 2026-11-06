@@ -1,0 +1,16 @@
+# Exécute une mise à jour demandée (voir portunia-gate-update.path) : sauvegarde de la base,
+# paquets téléchargés et vérifiés (SHA-256), installation, retour en arrière automatique si la
+# nouvelle version ne démarre pas. Avancement : /var/lib/portunia-gate-update/etat.json
+# N'accepte qu'une version plus récente que celle installée.
+[Unit]
+Description=Portunia Gate, mise à jour
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/portunia-gate/portunia-gate.env
+ExecStart=/usr/lib/portunia-gate/portunia-gate update run
+TimeoutStartSec=30min
+# Le paquet redémarre la Gate, pas ce service.
+KillMode=process

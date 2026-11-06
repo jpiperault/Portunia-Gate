@@ -27,7 +27,21 @@ sudo portunia-gate init --admin julien --temporary --name "ACME Gate"   # databa
 sudo portunia-gate init --no-admin                       # database and keys only
 sudo portunia-gate info                                  # version, SSH and API fingerprints to compare in Portunia, accounts
 sudo portunia-gate hardening                             # server hardening state and alerts
+sudo portunia-gate status                                # Gate status: health, hardware, services, storage, activity (--json: everything)
 ```
+
+Update (0.39, Debian package):
+
+```bash
+sudo portunia-gate update check                          # installed and latest published versions
+sudo portunia-gate update apply                          # now: backup, installation, rollback if the new version does not start
+sudo portunia-gate update apply --at 03:00 --notice      # tonight at 3:00, users warned 5 minutes before
+sudo portunia-gate update apply --wait                   # waits and shows each step
+sudo portunia-gate update status                         # scheduled update and last run
+sudo portunia-gate update cancel                         # cancels the scheduled update
+```
+
+`--version 0.40.0` picks a version (newer than the installed one only). `--no-rollback` is for when the package of the installed version is no longer published. The run is done by `portunia-gate-update.service` (root): `sudo journalctl -u portunia-gate-update`. With Docker: `sudo ./installer.sh update`.
 
 `serve` runs the Gate; the `portunia-gate` service does it, do not start it by hand. Installing, updating and hardening the server go through `installer.sh` (see the [administration guide](https://github.com/jpiperault/Portunia-Gate-releases/blob/main/docs/guide-administration.md)).
 
@@ -143,10 +157,11 @@ sudo portunia-gate setting own_replay off                 # each account may rep
 sudo portunia-gate setting live_notice on                 # tell SSH users when their session is followed live
 sudo portunia-gate setting sensitive_commands "rm -rf,shutdown,DROP TABLE"   # marked on the player's timeline
 sudo portunia-gate setting file_copies_mb 200             # keep copied files, up to 200 MB per session (0: none)
+sudo portunia-gate setting recording_days 180             # delete recordings of sessions ended over 180 days ago (0: keep)
 sudo portunia-gate setting session_hours                  # without a value: shows it
 ```
 
-French names are accepted too: `nom`, `langue`, `banniere`, `duree_session_h`, `memo_mot_de_passe`, `relecture_propres`, `commandes_sensibles`, `copies_fichiers_mo`.
+French names are accepted too: `nom`, `langue`, `banniere`, `duree_session_h`, `memo_mot_de_passe`, `relecture_propres`, `commandes_sensibles`, `copies_fichiers_mo`, `conservation_jours`.
 
 Kept file copies go next to the recording, in `/var/lib/portunia-gate/enregistrements/YYYY/MM/<session>-fichiers/`; their SHA-256 is in the signed recording and in the audit log.
 

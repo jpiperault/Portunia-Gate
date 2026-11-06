@@ -27,7 +27,21 @@ sudo portunia-gate init --admin julien --temporary --name "Gate ACME"   # base, 
 sudo portunia-gate init --no-admin                       # base et clés seulement
 sudo portunia-gate info                                  # version, empreintes SSH et de l'API à comparer dans Portunia, comptes
 sudo portunia-gate hardening                             # état du durcissement du serveur et alertes
+sudo portunia-gate status                                # état de la Gate : santé, matériel, services, stockage, activité (--json : tout)
 ```
+
+Mise à jour (0.39, paquet Debian) :
+
+```bash
+sudo portunia-gate update check                          # version installée et dernière publiée
+sudo portunia-gate update apply                          # tout de suite : sauvegarde, installation, retour si la nouvelle version ne démarre pas
+sudo portunia-gate update apply --at 03:00 --notice      # cette nuit à 3 h, utilisateurs prévenus 5 minutes avant
+sudo portunia-gate update apply --wait                   # attend et affiche chaque étape
+sudo portunia-gate update status                         # mise à jour programmée et dernière exécution
+sudo portunia-gate update cancel                         # annule la mise à jour programmée
+```
+
+`--version 0.40.0` choisit une version (plus récente que celle installée seulement). `--no-rollback` sert quand le paquet de la version installée n'est plus publié. L'exécution est faite par `portunia-gate-update.service` (root) : `sudo journalctl -u portunia-gate-update`. Avec Docker : `sudo ./installer.sh mise-a-jour`.
 
 `serve` lance la Gate : c'est le service `portunia-gate` qui s'en charge, ne la lancez pas à la main. L'installation, la mise à jour et le durcissement du serveur passent par `installer.sh` (voir le [guide d'administration](https://github.com/jpiperault/Portunia-Gate-releases/blob/main/docs/guide-administration.md)).
 
@@ -143,10 +157,11 @@ sudo portunia-gate setting own_replay off                 # chaque compte peut r
 sudo portunia-gate setting live_notice on                 # prévenir l'utilisateur SSH quand sa session est suivie en direct
 sudo portunia-gate setting sensitive_commands "rm -rf,shutdown,DROP TABLE"   # repérées sur la barre de temps du lecteur
 sudo portunia-gate setting file_copies_mb 200             # garde les fichiers copiés, jusqu'à 200 Mo par session (0 : aucun)
+sudo portunia-gate setting recording_days 180             # supprime les enregistrements des sessions terminées depuis plus de 180 jours (0 : garder)
 sudo portunia-gate setting session_hours                  # sans valeur : l'affiche
 ```
 
-Les noms français sont acceptés aussi : `nom`, `langue`, `banniere`, `duree_session_h`, `memo_mot_de_passe`, `relecture_propres`, `commandes_sensibles`, `copies_fichiers_mo`.
+Les noms français sont acceptés aussi : `nom`, `langue`, `banniere`, `duree_session_h`, `memo_mot_de_passe`, `relecture_propres`, `commandes_sensibles`, `copies_fichiers_mo`, `conservation_jours`.
 
 Les copies gardées sont rangées à côté de l'enregistrement, dans `/var/lib/portunia-gate/enregistrements/AAAA/MM/<session>-fichiers/` ; leur SHA-256 figure dans l'enregistrement signé et au journal.
 

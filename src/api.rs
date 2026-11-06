@@ -122,6 +122,8 @@ pub async fn run(state: Arc<State>) -> anyhow::Result<()> {
         // Notifications (courriel, Teams, webhook) : réglages et essai.
         .route("/api/v1/admin/notifications", get(admin_notify).put(admin_notify_update))
         .route("/api/v1/admin/notifications/essai", post(admin_notify_test))
+        .route("/api/v1/admin/etat", get(admin_status))
+        .route("/api/v1/admin/mise-a-jour", get(admin_update).post(admin_update_apply).delete(admin_update_cancel))
         .route("/api/v1/audit/sessions/{id}/couper", post(audit_cut))
         // Export d'une relecture (vidéo, sous-titres, transcription, .cast) : noté au journal.
         .route("/api/v1/audit/sessions/{id}/export", post(audit_export))
@@ -1437,6 +1439,8 @@ async fn admin_settings(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
         "copies_fichiers_mo": model::setting(&state.db, "copies_fichiers_mo").await?.and_then(|v| v.as_u64()).unwrap_or(0),
         // « en », « fr », ou vide : langue du système de la Gate.
         "langue": setting_str(state, "langue", "").await?,
+        // Jours de conservation des enregistrements (0 : toujours) ; Gate 0.39.
+        "conservation_jours": crate::status::retention_days(state).await?,
     })))
 }
 
@@ -1452,6 +1456,7 @@ struct SettingsBody {
     commandes_sensibles: Option<Vec<String>>,
     langue: Option<String>,
     copies_fichiers_mo: Option<u64>,
+    conservation_jours: Option<i64>,
 }
 
 async fn admin_settings_update(AxState(api): Ctx, headers: HeaderMap, Json(body): Json<SettingsBody>) -> ApiResult {
@@ -1502,6 +1507,15 @@ async fn admin_settings_update(AxState(api): Ctx, headers: HeaderMap, Json(body)
         model::set_setting(db, "copies_fichiers_mo", json!(v)).await?;
         changed.insert("copies_fichiers_mo".into(), json!(v));
     }
+    let mut purge = false;
+    if let Some(v) = body.conservation_jours {
+        if !(0..=36500).contains(&v) {
+            return Err(err(StatusCode::BAD_REQUEST, t!("Retention of recordings: 0 to 36500 days", "Conservation des enregistrements : 0 à 36500 jours")));
+        }
+        model::set_setting(db, crate::status::RETENTION, json!(v)).await?;
+        changed.insert(crate::status::RETENTION.into(), json!(v));
+        purge = v > 0;
+    }
     if let Some(v) = body.langue {
         let v = v.trim().to_lowercase();
         if !["", "en", "fr"].contains(&v.as_str()) {
@@ -1513,6 +1527,16 @@ async fn admin_settings_update(AxState(api): Ctx, headers: HeaderMap, Json(body)
         changed.insert("langue".into(), json!(v));
     }
     audit::note(db, &actor.login, "reglage.modifie", Value::Object(changed)).await;
+    // Nouvelle durée de conservation : appliquée tout de suite, en tâche de fond.
+    if purge {
+        let state = api.state.clone();
+        let login = actor.login.clone();
+        tokio::spawn(async move {
+            if let Err(e) = crate::status::purge(&state, &login).await {
+                tracing::warn!("{} {e:#}", t!("recordings retention:", "conservation des enregistrements :"));
+            }
+        });
+    }
     Ok(Json(json!({ "etat": "ok" })))
 }
 
@@ -1843,6 +1867,61 @@ struct CutBody {
     /// Désactiver aussi le compte (administrateurs seulement).
     #[serde(default)]
     desactiver: bool,
+}
+
+// ---------- État et mise à jour de la Gate (0.39) ----------
+
+#[derive(Deserialize)]
+struct StatusQuery {
+    /// Vérifie tout de suite la dernière version publiée.
+    verifier: Option<bool>,
+    /// Seulement le niveau et les alertes (pastille de la barre latérale).
+    court: Option<bool>,
+}
+
+async fn admin_status(AxState(api): Ctx, headers: HeaderMap, Query(q): Query<StatusQuery>) -> ApiResult {
+    admin(&api, &headers).await?;
+    let r = crate::status::report(&api.state, true, q.verifier == Some(true)).await?;
+    if q.court == Some(true) {
+        return Ok(Json(json!({ "niveau": r["niveau"], "alertes": r["alertes"], "mise_a_jour": r["mise_a_jour"]["disponible"] })));
+    }
+    Ok(Json(r))
+}
+
+async fn admin_update(AxState(api): Ctx, headers: HeaderMap, Query(q): Query<StatusQuery>) -> ApiResult {
+    admin(&api, &headers).await?;
+    let mut s = crate::update::summary(&api.state, q.verifier == Some(true)).await?;
+    s["sessions_ouvertes"] = json!(api.state.live.sessions().len());
+    Ok(Json(s))
+}
+
+#[derive(Deserialize)]
+struct UpdateBody {
+    /// Version voulue (défaut : la dernière publiée).
+    version: Option<String>,
+    /// Date (RFC 3339) ; absente : tout de suite.
+    a: Option<DateTime<Utc>>,
+    /// Prévenir les utilisateurs connectés 5 minutes avant.
+    prevenir: Option<bool>,
+}
+
+async fn admin_update_apply(AxState(api): Ctx, headers: HeaderMap, Json(body): Json<UpdateBody>) -> ApiResult {
+    let actor = admin(&api, &headers).await?;
+    let version = match body.version.map(|v| v.trim().trim_start_matches('v').to_string()).filter(|v| !v.is_empty()) {
+        Some(v) => v,
+        None => crate::update::latest(true)
+            .await
+            .version
+            .ok_or_else(|| err(StatusCode::BAD_GATEWAY, t!("Latest version unknown: the Gate cannot reach GitHub", "Dernière version inconnue : la Gate n'atteint pas GitHub")))?,
+    };
+    let p = crate::update::plan(&api.state, &version, body.a, body.prevenir.unwrap_or(false), &actor.login, false).await?;
+    Ok(Json(json!({ "etat": "ok", "programmee": p })))
+}
+
+async fn admin_update_cancel(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
+    let actor = admin(&api, &headers).await?;
+    let done = crate::update::cancel(&api.state, &actor.login).await?;
+    Ok(Json(json!({ "etat": if done { "ok" } else { "aucune" } })))
 }
 
 async fn admin_notify(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {

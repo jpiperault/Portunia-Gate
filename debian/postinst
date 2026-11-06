@@ -12,8 +12,13 @@ if [ "$1" = configure ]; then
       --shell /usr/sbin/nologin --comment "Gate" _portunia_gate
   install -d -o _portunia_gate -g _portunia_gate -m 700 /var/lib/portunia-gate
   install -d -o root -g _portunia_gate -m 750 /etc/portunia-gate
+  # Mise à jour depuis Portunia (0.39) : la Gate dépose sa demande ici, le service root
+  # portunia-gate-update l'exécute et écrit son avancement dans /var/lib/portunia-gate-update.
+  install -d -o _portunia_gate -g _portunia_gate -m 700 /var/lib/portunia-gate/mise-a-jour
+  install -d -o root -g root -m 755 /var/lib/portunia-gate-update
   if [ -d /run/systemd/system ]; then
     systemctl daemon-reload
+    systemctl enable --now portunia-gate-update.path >/dev/null 2>&1 || true
     # Mise à jour : redémarre la Gate si elle tournait ; le schéma de la base suit au démarrage.
     if [ -n "$2" ]; then systemctl try-restart portunia-gate.service portunia-gate-relais.service || true; fi
   fi

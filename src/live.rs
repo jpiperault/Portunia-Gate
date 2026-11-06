@@ -192,6 +192,13 @@ impl Registry {
         }
     }
 
+    /// Message pour toutes les sessions ouvertes (mise à jour de la Gate).
+    pub fn notify_all(&self, text: &str) {
+        for e in self.entries.lock().unwrap().values() {
+            e.notice.send_replace(Some(text.to_string()));
+        }
+    }
+
     /// Ferme tout ce que le compte a d'ouvert (mot de passe ou code réinitialisé).
     pub fn cut_user(&self, user: Uuid, why: &str) {
         for entry in self.entries.lock().unwrap().values().filter(|e| e.user == user) {

@@ -45,6 +45,8 @@ With the package, the wizard downloads the latest version, checks its fingerprin
 
 After an update, the web portal loads its new pages by itself (their files carry the version number).
 
+**From Portunia or with `portunia-gate update` (0.39, Debian package).** Portunia (Gate status › *Update…*, Portunia Pro) or `sudo portunia-gate update apply [--at 03:00] [--notice]` asks for the update; `portunia-gate-update.service` (root, started by `portunia-gate-update.path`) carries it out: database backup (`pg_dump`), packages of the new and installed versions downloaded and checked, installation, wait for the new version to start (3 minutes). If it does not start: previous package reinstalled and database restored. Files of the last run (packages, backup `base-avant-<version>.dump`) and its progress (`etat.json`) are in `/var/lib/portunia-gate-update/`; details: `sudo portunia-gate update status` or `sudo journalctl -u portunia-gate-update`. To restore that backup by hand: `sudo systemctl stop portunia-gate && sudo runuser -u _portunia_gate -- pg_restore --clean --if-exists --no-owner -d portunia_gate /var/lib/portunia-gate-update/base-avant-<version>.dump`.
+
 ## Finding the connection details
 
 ```bash
@@ -65,6 +67,10 @@ Main events: `auth.reussie` (the `via` field is `portunia` for an API sign-in; t
 ## Built-in monitoring
 
 Every 20 seconds the Gate checks that its database answers and that its SSH server greets new connections; an independent thread also checks that its internal task scheduler keeps running. If the Gate stays stuck for about a minute, it writes the cause to the service log (`surveillance : …`, with the state of its database connections) and stops, so that systemd (`Restart=on-failure`) or Docker (`restart: unless-stopped`) restarts it. If this happens, send the lines before the restart: `sudo journalctl -u portunia-gate -n 100` or `sudo docker compose logs --tail 100 portunia-gate`.
+
+## Gate status and disk
+
+`sudo portunia-gate status` (or Portunia › Gate status) shows the health of the Gate, its hardware, services, storage and activity. Above 85 % disk use, the administrators are told by e-mail, Teams or webhook (once a day at most); below `PORTUNIA_GATE_MIN_FREE_MB` free (512 MB by default), recorded sessions are refused. To free space for good, set the retention of recordings: `sudo portunia-gate setting recording_days 180` (applied at once, then every hour).
 
 ## Checking a recording
 

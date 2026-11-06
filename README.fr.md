@@ -253,6 +253,16 @@ Le journal note `rdp_natif.fichier` (fichier préparé), puis les événements h
 
 **Sessions natives et relecture (0.34.1).** Les sessions natives en coffre et en enregistré sont toujours enregistrées : la Gate retire donc l'annonce du pipeline graphique RDP 8 (GFX) faite par le client. Windows envoie alors l'image en mises à jour classiques, que la relecture décode. Par le canal GFX, la relecture restait noire.
 
+## État et mise à jour de la Gate
+
+Depuis la 0.39, l'**état de la Gate** (Portunia : menu de la Gate › *État de la Gate*, ou la section *État* de l'administration ; `sudo portunia-gate status`) montre d'un coup d'œil : la santé générale, la version, la durée de service, le processeur, la mémoire, le disque et le réseau (avec les courbes des dernières 24 heures dans Portunia), les services (base, certificat HTTPS, relais dédiés, heure, notifications, durcissement), le stockage (enregistrements, base, rythme de remplissage et « disque plein dans N jours »), l'activité (sessions ouvertes, sessions du jour, connexions refusées, approbations en attente) et l'intégrité du journal signé (vérifiée toutes les 6 heures). Dans Portunia, la pastille de la Gate dans la barre latérale passe à l'orange ou au rouge quand quelque chose demande votre attention.
+
+- **Mise à jour en un clic** (paquet Debian, Portunia Pro) : *Mettre à jour…*, tout de suite ou à une heure choisie (cette nuit à 3 h par défaut), en prévenant au besoin les utilisateurs connectés 5 minutes avant. Un service système à part, lancé en root (`portunia-gate-update`), sauvegarde la base, télécharge le nouveau paquet et celui installé (pour le retour) et vérifie leur SHA-256 publié, installe, puis attend que la nouvelle version démarre. Si elle ne démarre pas en 3 minutes : **retour en arrière automatique** (ancien paquet réinstallé, base restaurée). Il n'accepte qu'une version plus récente que celle installée. Les administrateurs sont prévenus du résultat (et de la publication d'une nouvelle version) par courriel, Teams ou webhook.
+- **En ligne de commande** : `update check`, `update apply [--at 03:00] [--notice] [--wait]`, `update status`, `update cancel`. Avec Docker : `sudo ./installer.sh mise-a-jour`, comme avant.
+- **Conservation des enregistrements** : `sudo portunia-gate setting recording_days 180` (ou Portunia : Réglages, ou la page État). Au-delà, les enregistrements des sessions terminées sont supprimés chaque heure ; les sessions restent dans la liste et la suppression est notée au journal (`enregistrement.purge`). 0 : gardés toujours (par défaut).
+- **Alerte disque** : au-delà de 85 % de remplissage, les administrateurs sont prévenus (une fois par jour au plus).
+- **Journal** : `mise_a_jour.programmee`, `.lancee`, `.reussie`, `.retour_arriere`, `.echec`, `.annulee`, `.disponible` ; `disque.presque_plein` ; `journal.altere`.
+
 ## Approbation des accès
 
 Depuis la 0.38, une règle peut exiger une approbation : ses serveurs ne s'ouvrent qu'une fois l'accès accordé par un approbateur, pour une durée. Réglage : dans la règle, *Accès seulement après approbation* et le groupe des **approbateurs** (vide : les administrateurs) ; `sudo portunia-gate rule approval NOM on --approvers GROUPE`.

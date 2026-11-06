@@ -1,0 +1,11 @@
+# Mise à jour de la Gate demandée depuis Portunia ou « portunia-gate update apply » :
+# la Gate (sans droits) dépose la demande, portunia-gate-update.service (root) l'exécute.
+[Unit]
+Description=Portunia Gate, demandes de mise à jour
+
+[Path]
+PathExists=/var/lib/portunia-gate/mise-a-jour/demande.json
+Unit=portunia-gate-update.service
+
+[Install]
+WantedBy=multi-user.target

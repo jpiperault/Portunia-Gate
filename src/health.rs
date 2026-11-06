@@ -64,10 +64,16 @@ pub async fn run(state: Arc<State>) -> anyhow::Result<()> {
     tokio::time::sleep(PERIOD).await;
     let mut failures = 0;
     let mut since = Instant::now();
+    let mut announced = false;
     loop {
         beat.store(now_secs(), Ordering::Relaxed);
         match check(&state).await {
             Ok(()) => {
+                // Premier contrôle réussi : signe attendu par le service de mise à jour.
+                if !announced {
+                    crate::update::mark_started(&state.config.data_dir);
+                    announced = true;
+                }
                 if failures > 0 {
                     tracing::info!("{}", t!("watchdog: the Gate is answering again", "surveillance : la Gate répond de nouveau"));
                 }

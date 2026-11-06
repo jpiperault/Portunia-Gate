@@ -34,6 +34,8 @@ mod tunnel;
 mod webproxy;
 mod approval;
 mod notify;
+mod status;
+mod update;
 mod webvault;
 mod websession;
 
@@ -168,9 +170,18 @@ enum Command {
     /// Dedicated relay: this machine publishes the web portal of a Gate.
     #[command(subcommand)]
     Edge(EdgeCmd),
+    /// Gate status: health, hardware, services, storage, activity, update.
+    Status {
+        /// Full report in JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Update of the Gate (Debian package): check, apply now or at a set time, cancel.
+    #[command(subcommand)]
+    Update(UpdateCmd),
     /// General settings; without a name, lists them all.
     Setting {
-        /// auth_policy, banner, name, language, session_hours, remember_password, own_replay, live_notice, sensitive_commands or file_copies_mb.
+        /// auth_policy, banner, name, language, session_hours, remember_password, own_replay, live_notice, sensitive_commands, file_copies_mb or recording_days.
         key: Option<String>,
         /// New value; without a value, shows the current one.
         value: Option<String>,
@@ -558,6 +569,37 @@ enum ApprovalCmd {
 }
 
 #[derive(Subcommand)]
+enum UpdateCmd {
+    /// Installed version and latest published version (checked now).
+    Check,
+    /// Updates the Gate: database backup, installation, automatic rollback if the new version does not start.
+    Apply {
+        /// Version to install (default: the latest published).
+        #[arg(long)]
+        version: Option<String>,
+        /// When: HH:MM (today or tomorrow) or YYYY-MM-DDTHH:MM, in the Gate's time zone; default: now.
+        #[arg(long)]
+        at: Option<String>,
+        /// Warn the connected users 5 minutes before (sessions are cut during the restart).
+        #[arg(long)]
+        notice: bool,
+        /// Without rollback, when the package of the installed version is no longer published.
+        #[arg(long)]
+        no_rollback: bool,
+        /// Waits for the end and shows each step.
+        #[arg(long)]
+        wait: bool,
+    },
+    /// Cancels a scheduled update.
+    Cancel,
+    /// Scheduled update and last run (steps, result).
+    Status,
+    /// Run by portunia-gate-update.service (root): carries out the requested update.
+    #[command(hide = true)]
+    Run,
+}
+
+#[derive(Subcommand)]
 enum NotifyCmd {
     /// Shows the notification settings (secrets hidden).
     Show,
@@ -914,6 +956,10 @@ async fn run(cli: Cli) -> Result<()> {
         };
     }
     let config = Config::from_env()?;
+    // Service de mise à jour (root) : sans connexion à la base de la Gate.
+    if let Command::Update(UpdateCmd::Run) = &cli.command {
+        return update::run_root(&config);
+    }
 
     if let Command::Init {
         admin,
@@ -982,7 +1028,7 @@ async fn run(cli: Cli) -> Result<()> {
                     tokio::time::sleep(std::time::Duration::from_secs(24 * 3600)).await;
                 }
             });
-            tokio::try_join!(sshd::run(state.clone()), api::run(state.clone()), portal::run(state.clone()), relay::run(state.clone()), tunnel::run(state.clone()), acme::run(state.clone()), health::run(state.clone()), live::run(state.clone()), rdpnative::run(state.clone()), websession::run(state.clone()), approval::run(state.clone()))?;
+            tokio::try_join!(sshd::run(state.clone()), api::run(state.clone()), portal::run(state.clone()), relay::run(state.clone()), tunnel::run(state.clone()), acme::run(state.clone()), health::run(state.clone()), live::run(state.clone()), rdpnative::run(state.clone()), websession::run(state.clone()), approval::run(state.clone()), status::run(state.clone()), update::run(state.clone()))?;
             Ok(())
         }
         Command::User(cmd) => user_cmd(&state, cmd).await,
@@ -994,6 +1040,8 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Rdp(cmd) => rdp_cmd(&state, cmd).await,
         Command::Notify(cmd) => notify_cmd(&state, cmd).await,
         Command::Approval(cmd) => approval_cmd(&state, cmd).await,
+        Command::Status { json } => status_cmd(&state, json).await,
+        Command::Update(cmd) => update_cmd(&state, cmd).await,
         Command::Audit { verify, last, search, csv } => {
             if verify {
                 match audit::verify(&state.db).await? {
@@ -1143,6 +1191,7 @@ async fn all_settings(state: &State) -> Result<Vec<(&'static str, String)>> {
         ("live_notice", on_off(api::live_notice(state).await?)),
         ("sensitive_commands", api::sensitive_commands(state).await?.join(", ")),
         ("file_copies_mb", model::setting(&state.db, "copies_fichiers_mo").await?.and_then(|v| v.as_u64()).unwrap_or(0).to_string()),
+        ("recording_days", status::retention_days(state).await?.to_string()),
         ("banner", api::setting_str(state, "banniere", sshd::default_banner()).await?.replace('\n', "\\n")),
     ])
 }
@@ -1160,9 +1209,10 @@ async fn setting_cmd(state: &State, key: &str, value: Option<String>) -> Result<
         "live_notice" | "direct_prevenir" => "direct_prevenir",
         "sensitive_commands" | "commandes_sensibles" => "commandes_sensibles",
         "file_copies_mb" | "copies_fichiers_mo" => "copies_fichiers_mo",
+        "recording_days" | "conservation_jours" => status::RETENTION,
         _ => bail!(t!(
-            "unknown setting: auth_policy, banner, name, language, session_hours, remember_password, own_replay, live_notice, sensitive_commands or file_copies_mb",
-            "réglage inconnu : auth_policy, banner, name, language, session_hours, remember_password, own_replay, live_notice, sensitive_commands ou file_copies_mb"
+            "unknown setting: auth_policy, banner, name, language, session_hours, remember_password, own_replay, live_notice, sensitive_commands, file_copies_mb or recording_days",
+            "réglage inconnu : auth_policy, banner, name, language, session_hours, remember_password, own_replay, live_notice, sensitive_commands, file_copies_mb ou recording_days"
         )),
     };
     let Some(v) = value else {
@@ -1177,6 +1227,7 @@ async fn setting_cmd(state: &State, key: &str, value: Option<String>) -> Result<
             "direct_prevenir" => "live_notice",
             "commandes_sensibles" => "sensitive_commands",
             "copies_fichiers_mo" => "file_copies_mb",
+            "conservation_jours" => "recording_days",
             other => other,
         };
         println!("{}", shown.into_iter().find(|(n, _)| *n == english).map(|(_, v)| v).unwrap_or_default());
@@ -1214,6 +1265,13 @@ async fn setting_cmd(state: &State, key: &str, value: Option<String>) -> Result<
             let list: Vec<String> = v.split(',').map(|c| c.trim().to_string()).filter(|c| !c.is_empty()).collect();
             json!(list)
         }
+        "conservation_jours" => {
+            let days: i64 = v.trim().parse().map_err(|_| anyhow!(t!("recording_days: a number of days (0: kept forever)", "recording_days : un nombre de jours (0 : gardés toujours)")))?;
+            if !(0..=36500).contains(&days) {
+                bail!(t!("recording_days: 0 to 36500", "recording_days : 0 à 36500"));
+            }
+            json!(days)
+        }
         _ => json!(v),
     };
     model::set_setting(&state.db, key, stored.clone()).await?;
@@ -1222,7 +1280,224 @@ async fn setting_cmd(state: &State, key: &str, value: Option<String>) -> Result<
     if key == "langue" {
         println!("  {}", t!("The service follows it within 30 seconds.", "Le service la suit sous 30 secondes."));
     }
+    if key == status::RETENTION && stored.as_i64().unwrap_or(0) > 0 {
+        let (sessions, bytes) = status::purge(state, "console").await?;
+        println!("  {}", t!(format!("Recordings removed now: {sessions} session(s), {}. Then every hour by the service.", status::human(bytes)), format!("Enregistrements supprimés maintenant : {sessions} session(s), {}. Ensuite chaque heure par le service.", status::human(bytes))));
+    }
     Ok(())
+}
+
+/// `status` : l'état de la Gate, lisible au terminal (ou en JSON).
+async fn status_cmd(state: &State, as_json: bool) -> Result<()> {
+    let r = status::report(state, false, true).await?;
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&r)?);
+        return Ok(());
+    }
+    let level = r["niveau"].as_str().unwrap_or("?");
+    let mark = |etat: &str| match etat {
+        "ok" => "✓",
+        "alerte" => "⚠",
+        "erreur" => "✗",
+        _ => "·",
+    };
+    println!(
+        "{} {} · Portunia Gate {} · {}",
+        mark(level),
+        r["nom"].as_str().unwrap_or(""),
+        r["version"].as_str().unwrap_or(""),
+        match level {
+            "ok" => t!("healthy", "en bonne santé"),
+            "alerte" => t!("needs attention", "à surveiller"),
+            _ => t!("problem", "problème"),
+        }
+    );
+    for a in r["alertes"].as_array().into_iter().flatten() {
+        println!("  ⚠ {}", a.as_str().unwrap_or(""));
+    }
+    let pct = |v: &serde_json::Value| v.as_f64().map(|p| format!("{p:.0} %")).unwrap_or_else(|| "?".into());
+    println!();
+    println!("{:<22}{} · {}", t!("Server", "Serveur"), r["hote"].as_str().unwrap_or("?"), r["systeme"].as_str().unwrap_or("?"));
+    if let Some(s) = r["machine_depuis_s"].as_u64() {
+        println!("{:<22}{} {} {}", t!("Up for", "Allumé depuis"), s / 86400, t!("d", "j"), format!("{} h", s % 86400 / 3600));
+    }
+    println!("{:<22}{} ({} {})", t!("Processor", "Processeur"), pct(&r["cpu"]["pourcent"]), r["cpu"]["coeurs"], t!("cores", "cœurs"));
+    if let (Some(t), Some(u)) = (r["memoire"]["total"].as_u64(), r["memoire"]["utilisee"].as_u64()) {
+        println!("{:<22}{} / {}", t!("Memory", "Mémoire"), status::human(u), status::human(t));
+    }
+    if let (Some(t), Some(f)) = (r["disque"]["total"].as_u64(), r["disque"]["libre"].as_u64()) {
+        println!("{:<22}{} ({} {} / {})", t!("Disk", "Disque"), pct(&r["disque"]["pourcent"]), status::human(f), t!("free of", "libres sur"), status::human(t));
+    }
+    println!();
+    for s in r["services"].as_array().into_iter().flatten() {
+        println!("{} {:<20}{}", mark(s["etat"].as_str().unwrap_or("")), s["nom"].as_str().unwrap_or(""), s["detail"].as_str().unwrap_or(""));
+    }
+    let st = &r["stockage"];
+    println!();
+    println!(
+        "{:<22}{} · {} {}",
+        t!("Recordings", "Enregistrements"),
+        status::human(st["enregistrements"]["octets"].as_u64().unwrap_or(0)),
+        st["enregistrements"]["fichiers"],
+        t!("files", "fichiers")
+    );
+    if let Some(d) = st["par_jour"].as_f64() {
+        println!("{:<22}+{} {}", t!("Rate", "Rythme"), status::human(d as u64), t!("per day", "par jour"));
+    }
+    if let Some(d) = st["plein_dans_jours"].as_i64() {
+        println!("{:<22}{} {}", t!("Disk full in", "Disque plein dans"), d, t!("days", "jours"));
+    }
+    let days = st["conservation_jours"].as_i64().unwrap_or(0);
+    println!(
+        "{:<22}{}",
+        t!("Retention", "Conservation"),
+        if days == 0 { t!("forever (setting recording_days DAYS)", "toujours (setting recording_days JOURS)").to_string() } else { t!(format!("{days} days"), format!("{days} jours")) }
+    );
+    let a = &r["activite"];
+    println!();
+    println!(
+        "{:<22}{} {} · {} {} · {} {}",
+        t!("Activity", "Activité"),
+        a["sessions_ouvertes"],
+        t!("open", "ouvertes"),
+        a["sessions_jour"],
+        t!("today", "aujourd'hui"),
+        a["refus_24h"],
+        t!("refusals (24 h)", "refus (24 h)")
+    );
+    println!("{:<22}{}", t!("Audit log", "Journal"), t!("check: sudo portunia-gate audit --verify", "vérification : sudo portunia-gate audit --verify"));
+    let u = &r["mise_a_jour"];
+    if u["disponible"] == json!(true) {
+        println!("\n{} {} → {} : sudo portunia-gate update apply", t!("Update available:", "Mise à jour disponible :"), u["actuelle"].as_str().unwrap_or(""), u["derniere"].as_str().unwrap_or(""));
+    }
+    Ok(())
+}
+
+/// HH:MM (aujourd'hui, ou demain si l'heure est passée) ou AAAA-MM-JJTHH:MM, heure de la Gate.
+fn parse_when(text: &str) -> Result<chrono::DateTime<chrono::Utc>> {
+    use chrono::TimeZone;
+    let text = text.trim().replace(' ', "T");
+    let local = if let Ok(t) = chrono::NaiveTime::parse_from_str(&text, "%H:%M") {
+        let now = chrono::Local::now();
+        let mut day = now.date_naive();
+        if t <= now.time() {
+            day = day.succ_opt().unwrap_or(day);
+        }
+        day.and_time(t)
+    } else {
+        chrono::NaiveDateTime::parse_from_str(&text, "%Y-%m-%dT%H:%M").map_err(|_| anyhow!(t!("--at: HH:MM or YYYY-MM-DDTHH:MM", "--at : HH:MM ou AAAA-MM-JJTHH:MM")))?
+    };
+    let at = chrono::Local.from_local_datetime(&local).earliest().ok_or_else(|| anyhow!(t!("--at: time that does not exist (time change)", "--at : heure qui n'existe pas (changement d'heure)")))?;
+    Ok(at.with_timezone(&chrono::Utc))
+}
+
+fn print_progress(p: &update::Progress) {
+    println!(
+        "{} {} → {} · {} · {}",
+        t!("Last run:", "Dernière exécution :"),
+        p.de,
+        p.vers,
+        match p.resultat.as_str() {
+            "reussie" => t!("done", "réussie"),
+            "retour_arriere" => t!("rolled back", "retour en arrière"),
+            "en_cours" => t!("under way", "en cours"),
+            _ => t!("failed", "échec"),
+        },
+        p.debut.map(|d| d.with_timezone(&chrono::Local).format("%d/%m %H:%M").to_string()).unwrap_or_default()
+    );
+    for line in &p.journal {
+        println!("  {line}");
+    }
+    if !p.message.is_empty() {
+        println!("  {}", p.message);
+    }
+}
+
+async fn update_cmd(state: &State, cmd: UpdateCmd) -> Result<()> {
+    match cmd {
+        UpdateCmd::Run => unreachable!(),
+        UpdateCmd::Check => {
+            let s = update::summary(state, true).await?;
+            println!("{} {}", t!("Installed:", "Installée :"), update::CURRENT);
+            match s["derniere"].as_str() {
+                Some(v) => println!("{} {v}{}", t!("Latest published:", "Dernière publiée :"), if s["disponible"] == json!(true) { t!(" — update available", " — mise à jour disponible") } else { t!(" — up to date", " — à jour") }),
+                None => println!("{} {}", t!("Latest version unknown:", "Dernière version inconnue :"), s["erreur_verification"].as_str().unwrap_or("?")),
+            }
+            if let Some(why) = s["impossible"].as_str() {
+                println!("{why}");
+            }
+            Ok(())
+        }
+        UpdateCmd::Apply { version, at, notice, no_rollback, wait } => {
+            let version = match version {
+                Some(v) => v.trim().trim_start_matches('v').to_string(),
+                None => update::latest(true).await.version.ok_or_else(|| anyhow!(t!("latest version unknown: give --version", "dernière version inconnue : indiquez --version")))?,
+            };
+            let at = at.as_deref().map(parse_when).transpose()?;
+            let p = update::plan(state, &version, at, notice, "console", no_rollback).await?;
+            if p.a > chrono::Utc::now() + chrono::Duration::seconds(5) {
+                println!(
+                    "✓ {}",
+                    t!(
+                        format!("Update to {version} scheduled for {}{}. Cancel: sudo portunia-gate update cancel", p.a.with_timezone(&chrono::Local).format("%d/%m/%Y %H:%M"), if notice { " (users warned 5 minutes before)" } else { "" }),
+                        format!("Mise à jour en {version} programmée le {}{}. Annuler : sudo portunia-gate update cancel", p.a.with_timezone(&chrono::Local).format("%d/%m/%Y %H:%M"), if notice { " (utilisateurs prévenus 5 minutes avant)" } else { "" })
+                    )
+                );
+                return Ok(());
+            }
+            println!("✓ {}", t!(format!("Update to {version} started: the Gate restarts within a few minutes."), format!("Mise à jour en {version} lancée : la Gate redémarre dans quelques minutes.")));
+            if !wait {
+                println!("  {}", t!("Follow it: sudo portunia-gate update status", "Suivre : sudo portunia-gate update status"));
+                return Ok(());
+            }
+            // Attend que le service root prenne la demande, puis le résultat.
+            let start = std::time::Instant::now();
+            let mut shown = 0;
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                if let Some(p) = update::progress().filter(|p| p.vers == version && p.debut.is_some_and(|d| d > chrono::Utc::now() - chrono::Duration::hours(1))) {
+                    for line in p.journal.iter().skip(shown) {
+                        println!("  {line}");
+                    }
+                    shown = p.journal.len();
+                    if p.resultat != "en_cours" {
+                        anyhow::ensure!(p.resultat == "reussie", "{}", p.message);
+                        return Ok(());
+                    }
+                } else if start.elapsed() > std::time::Duration::from_secs(30) && update::request_path(&state.config.data_dir).exists() {
+                    bail!(t!("the update service does not take the request: systemctl status portunia-gate-update.path", "le service de mise à jour ne prend pas la demande : systemctl status portunia-gate-update.path"));
+                }
+                if start.elapsed() > std::time::Duration::from_secs(20 * 60) {
+                    bail!(t!("no result after 20 minutes: sudo portunia-gate update status", "pas de résultat après 20 minutes : sudo portunia-gate update status"));
+                }
+            }
+        }
+        UpdateCmd::Cancel => {
+            if update::cancel(state, "console").await? {
+                println!("✓ {}", t!("Scheduled update cancelled.", "Mise à jour programmée annulée."));
+            } else {
+                println!("{}", t!("No scheduled update.", "Aucune mise à jour programmée."));
+            }
+            Ok(())
+        }
+        UpdateCmd::Status => {
+            println!("{} {} · {} {}", t!("Installed:", "Installée :"), update::CURRENT, t!("mode:", "mode :"), update::mode());
+            match update::planned(state).await? {
+                Some(p) => println!(
+                    "{} {} — {}{}",
+                    t!("Scheduled:", "Programmée :"),
+                    p.version,
+                    p.a.with_timezone(&chrono::Local).format("%d/%m/%Y %H:%M"),
+                    if p.prevenir { t!(" (users warned)", " (utilisateurs prévenus)") } else { "" }
+                ),
+                None => println!("{}", t!("No scheduled update.", "Aucune mise à jour programmée.")),
+            }
+            if let Some(p) = update::progress() {
+                print_progress(&p);
+            }
+            Ok(())
+        }
+    }
 }
 
 /// Date « AAAA-MM-JJ » à minuit, heure de la Gate ; `end` : fin de ce jour (minuit suivant).
