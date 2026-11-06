@@ -492,6 +492,23 @@ def ssh_more(args, state, api, report, admin, user, win_password):
                 "preuve": "$ ssh -p 2222 banc-user%banc-win-ssh@gate whoami\n" + out.replace(a["mot_de_passe"], "••••").strip()[-500:]}
     report.check("G-SSH-04", "Connexion directe : mot de passe et code TOTP", direct)
 
+    def slow_code():
+        a = state["comptes"][f"{PREFIX}user"]
+
+        def late():
+            # Comme un utilisateur qui cherche son téléphone : plus de 30 s avant de taper le code.
+            time.sleep(35)
+            return fresh_code(state, f"{PREFIX}user")
+        start = time.time()
+        out, code = converse(["ssh", *SSH_OPTS, "-o", "PreferredAuthentications=keyboard-interactive,password", "-p", "2222",
+                              f"{PREFIX}user%{target}@127.0.0.1", "whoami"],
+                             [("password", a["mot_de_passe"]), ("code", late)], timeout=120)
+        shown = out.replace(a["mot_de_passe"], "••••").strip()[-400:]
+        EVIDENCE["preuve"] = f"$ ssh -p 2222 banc-user%banc-win-ssh@gate whoami   (code tapé après 35 s)\n{shown}"
+        expect(args.win_user.lower() in out.lower(), f"connexion coupée pendant l'attente du code (code {code}) : {shown[-160:]}")
+        return {"detail": f"code accepté {round(time.time() - start)} s après le début de la connexion", "preuve": EVIDENCE["preuve"]}
+    report.check("G-SSH-06", "Code TOTP tapé lentement (35 s)", slow_code)
+
     def jump():
         since = now_utc()
         a = state["comptes"][f"{PREFIX}user"]
@@ -515,7 +532,8 @@ def audit_more(args, state, api, report, admin):
     def recording(target, kind):
         status, body, _ = api.call("GET", "/api/v1/admin/sessions?limite=200", token=admin)
         expect(status == 200, f"sessions : {status}")
-        found = [s for s in body["sessions"] if s["serveur"] == target and s["type"] == kind and s["enregistree"] and s["fin"]]
+        found = [s for s in body["sessions"] if s["serveur"] == target and s["type"] == kind and s["enregistree"] and s["fin"]
+                 and (kind != "rdp" or "(natif)" in (s["adresse"] or ""))]
         if not found:
             raise Skip(f"aucune session {kind} enregistrée sur {target}")
         s = found[0]
@@ -697,7 +715,9 @@ def portal_tests(args, state, api, report, admin, win_password):
             browser.js("document.querySelector('.xterm-helper-textarea')?.focus()")
             browser.type("whoami")
             browser.key("Enter", "Enter", 13)
-            ok = browser.until(f"document.querySelector('.xterm-rows')?.innerText.toLowerCase().includes({json.dumps(args.win_user.lower())})", 20)
+            # Réponse de whoami (« machine\compte »), pas l'invite qui contient déjà le nom du compte.
+            ok = browser.until(f"document.querySelector('.xterm-rows')?.innerText.toLowerCase().includes({json.dumps(chr(92) + args.win_user.lower())})", 20)
+            time.sleep(1)
             EVIDENCE["capture"] = browser.shot("G-POR-02")
             text = browser.js("document.querySelector('.xterm-rows')?.innerText || ''")
             expect(ok, f"whoami sans réponse dans le terminal : {text.strip()[-200:]}")
