@@ -2,7 +2,8 @@
 //!
 //! La Gate relaie chaque requête vers le serveur, après avoir vérifié le compte et sa règle
 //! (contrôle refait au plus toutes les 30 secondes), et note au journal chaque page ouverte
-//! (`web.page`). Les en-têtes sont réécrits pour que l'application se croie appelée
+//! (`web.page`). Chaque compte y a une session web (voir `websession`) : pages, envois et
+//! WebSocket sont notés dans son journal d'actions, relu dans l'Audit. Les en-têtes sont réécrits pour que l'application se croie appelée
 //! directement : `Host`, `Origin` et `Referer` vers le serveur ; `Location` et les cookies
 //! vers la Gate. Les cookies propres à la Gate ne partent jamais vers le serveur. Les
 //! WebSocket (consoles, rafraîchissements) passent aussi.
@@ -36,7 +37,7 @@ use uuid::Uuid;
 use crate::{
     audit,
     model::{self, Target, User},
-    webvault,
+    webvault, websession,
     State,
 };
 
@@ -250,6 +251,10 @@ fn page(status: StatusCode, text: &str) -> Response<Body> {
 /// Relaie la requête vers le serveur (`path` : chemin et paramètres côté serveur).
 /// `plain` : le navigateur parle en http simple (relais local de Portunia).
 pub async fn forward(state: &State, user: &User, target: &Target, mut req: Request<Body>, path: &str, plain: bool, client_addr: &str) -> Response<Body> {
+    // Session web : ouverte à la première requête ; refus si elle a été coupée.
+    if let Err(why) = websession::touch(state, user, target, client_addr, !plain).await {
+        return page(StatusCode::FORBIDDEN, &why);
+    }
     match relay(state, user, target, &mut req, path, plain, client_addr).await {
         Ok(res) => res,
         Err(e) => {
@@ -281,6 +286,8 @@ async fn relay(state: &State, user: &User, target: &Target, req: &mut Request<Bo
         None
     };
     let fill = vault.is_some() && target.web_connexion != "basic";
+    let method = req.method().clone();
+    let action = websession::kind(&method, document, upgrade.is_some());
     let mut substituted = false;
     // Chemin d'origine pour le journal : jamais celui où le mot de passe a été mis.
     let original = path;
@@ -377,6 +384,12 @@ async fn relay(state: &State, user: &User, target: &Target, req: &mut Request<Bo
         let _ = conn.with_upgrades().await;
     });
     let mut res = sender.send_request(out).await?;
+    if let Some(k) = action {
+        websession::action(user.id, target.id, k, method.as_str(), original, res.status().as_u16());
+    }
+    if substituted {
+        websession::action(user.id, target.id, "coffre", method.as_str(), original, res.status().as_u16());
+    }
 
     // WebSocket : une fois acceptée des deux côtés, les octets passent tels quels.
     if res.status() == StatusCode::SWITCHING_PROTOCOLS {

@@ -33,6 +33,7 @@ mod tls;
 mod tunnel;
 mod webproxy;
 mod webvault;
+mod websession;
 
 use std::{io::IsTerminal, path::PathBuf, sync::Arc};
 
@@ -888,7 +889,7 @@ async fn run(cli: Cli) -> Result<()> {
                     tokio::time::sleep(std::time::Duration::from_secs(24 * 3600)).await;
                 }
             });
-            tokio::try_join!(sshd::run(state.clone()), api::run(state.clone()), portal::run(state.clone()), relay::run(state.clone()), tunnel::run(state.clone()), acme::run(state.clone()), health::run(state.clone()), live::run(state.clone()), rdpnative::run(state.clone()))?;
+            tokio::try_join!(sshd::run(state.clone()), api::run(state.clone()), portal::run(state.clone()), relay::run(state.clone()), tunnel::run(state.clone()), acme::run(state.clone()), health::run(state.clone()), live::run(state.clone()), rdpnative::run(state.clone()), websession::run(state.clone()))?;
             Ok(())
         }
         Command::User(cmd) => user_cmd(&state, cmd).await,
@@ -1171,7 +1172,14 @@ async fn session_show(state: &State, id: &str) -> Result<()> {
         }
         _ => println!("{}", t!("No signature yet (session ongoing or interrupted).", "Pas encore de signature (session en cours ou interrompue).")),
     }
-    if s.kind == "rdp" {
+    if s.kind == "web" {
+        // Journal d'actions : lisible directement.
+        if let Ok((_, actions, _)) = websession::read(&raw) {
+            for a in actions {
+                println!("{:>9.1} s  {:<9} {:<6} {:<4} {}", a["t"].as_f64().unwrap_or(0.0), a["k"].as_str().unwrap_or_default(), a["methode"].as_str().unwrap_or_default(), a["statut"], a["chemin"].as_str().unwrap_or_default());
+            }
+        }
+    } else if s.kind == "rdp" {
         println!("{}", t!("Replay: Portunia › Audit (Remote Desktop recordings are read by Portunia only).", "Relecture : Portunia › Audit (les enregistrements Bureau à distance ne se lisent que dans Portunia)."));
     } else {
         println!("{} sudo asciinema play {path}", t!("Replay in a terminal (not logged, masked input shown):", "Relecture dans un terminal (non journalisée, saisies masquées visibles) :"));

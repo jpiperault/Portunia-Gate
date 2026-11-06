@@ -1539,7 +1539,15 @@ async fn audit_sessions(AxState(api): Ctx, headers: HeaderMap, Query(q): Query<A
             let t = t.clone();
             tokio::task::spawn_blocking(move || {
                 jobs.into_iter()
-                    .map(|path| path.and_then(|p| std::fs::read_to_string(p).ok()).and_then(|c| crate::replay::Cast::parse(&c).find(&t)))
+                    .map(|path| {
+                        let web = path.as_deref().is_some_and(|p| p.ends_with(".weblog"));
+                        let content = path.and_then(|p| std::fs::read_to_string(p).ok())?;
+                        if web {
+                            crate::websession::find(&content, &t)
+                        } else {
+                            crate::replay::Cast::parse(&content).find(&t)
+                        }
+                    })
                     .collect()
             })
             .await
@@ -1554,7 +1562,9 @@ async fn audit_sessions(AxState(api): Ctx, headers: HeaderMap, Query(q): Query<A
             json!({
                 "id": s.id, "compte": s.login, "serveur": s.target, "type": s.kind, "detail": s.detail, "mode": s.mode,
                 "adresse": s.client_addr, "debut": s.started_at, "fin": s.ended_at, "enregistree": s.recording.is_some(),
-                "relisible": s.recording.is_some() && s.kind != "rdp",
+                "relisible": s.recording.is_some() && s.kind != "rdp" && s.kind != "web",
+                // Journal d'actions web : Portunia 0.74 et suivants.
+                "relisible_web": s.recording.is_some() && s.kind == "web",
                 // Lecteur Bureau à distance : Portunia 0.47 et suivants (les précédents gardent « relecture bientôt »).
                 "relisible_rdp": s.recording.is_some() && s.kind == "rdp",
                 "frappe": s.frappe, "fichiers": s.fichiers, "octets": s.bytes,
@@ -1631,6 +1641,21 @@ async fn audit_recording(AxState(api): Ctx, headers: HeaderMap, Path(id): Path<U
         "id": s.id, "compte": s.login, "serveur": s.target, "type": s.kind, "detail": s.detail, "mode": s.mode,
         "adresse": s.client_addr, "debut": s.started_at, "fin": s.ended_at, "frappe": s.frappe, "octets": raw.len(),
     });
+    // Interface web : le journal d'actions (pages, envois, WebSocket, coffre).
+    if s.kind == "web" {
+        let (_, actions, duration) = crate::websession::read(&raw).map_err(|e| err(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
+        audit::note(&state.db, &user.login, "enregistrement.consulte", json!({ "session": id, "cible": s.target, "compte": s.login })).await;
+        return Ok(Json(json!({
+            "session": session,
+            "web": { "actions": actions, "duree": duration },
+            "revele": false,
+            "saisies_masquees": 0,
+            "signature": signature,
+            "empreinte": sha,
+            "commandes_sensibles": [],
+            "consultations": consultations(state, id).await?,
+        })));
+    }
     // Bureau à distance : les événements ici, l'image par /flux.
     if s.kind == "rdp" {
         let replay = tokio::task::spawn_blocking(move || crate::rdpcap::read(&raw))

@@ -213,7 +213,7 @@ sudo portunia-gate sessions --files                       # sessions Bureau à d
 sudo portunia-gate sessions show 3f2a9c1e                 # détail, fichier d'enregistrement, contrôle de la signature
 ```
 
-`sessions show` donne le chemin de l'enregistrement et vérifie sa signature (`✓ Signature vérifiée` ou `⚠ FICHIER ALTÉRÉ`). Un enregistrement SSH (`.cast`, asciicast v2) se relit dans un terminal avec `sudo asciinema play <fichier>`. Cette relecture **n'est pas journalisée** et montre les saisies masquées : réservez-la aux administrateurs système, et passez par Portunia pour les auditeurs. Les enregistrements Bureau à distance (`.rdpcap`) ne se relisent que dans Portunia.
+`sessions show` donne le chemin de l'enregistrement et vérifie sa signature (`✓ Signature vérifiée` ou `⚠ FICHIER ALTÉRÉ`). Un enregistrement SSH (`.cast`, asciicast v2) se relit dans un terminal avec `sudo asciinema play <fichier>`. Cette relecture **n'est pas journalisée** et montre les saisies masquées : réservez-la aux administrateurs système, et passez par Portunia pour les auditeurs. Les enregistrements Bureau à distance (`.rdpcap`) ne se relisent que dans Portunia. Pour une session web (`.weblog`, 0.35), `sessions show` liste aussi ses actions (temps, nature, méthode, statut, chemin).
 
 ## Sans Portunia, de zéro
 

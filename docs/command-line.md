@@ -213,7 +213,7 @@ sudo portunia-gate sessions --files                       # Remote Desktop sessi
 sudo portunia-gate sessions show 3f2a9c1e                 # details, recording file, signature check
 ```
 
-`sessions show` prints the recording's path and checks its signature (`✓ Signature verified` or `⚠ ALTERED FILE`). An SSH recording (`.cast`, asciicast v2) can be played in a terminal with `sudo asciinema play <file>`. That replay is **not logged** and shows masked input: keep it to system administrators, and use Portunia for auditors. Remote Desktop recordings (`.rdpcap`) are replayed in Portunia only.
+`sessions show` prints the recording's path and checks its signature (`✓ Signature verified` or `⚠ ALTERED FILE`). An SSH recording (`.cast`, asciicast v2) can be played in a terminal with `sudo asciinema play <file>`. That replay is **not logged** and shows masked input: keep it to system administrators, and use Portunia for auditors. Remote Desktop recordings (`.rdpcap`) are replayed in Portunia only. For a web session (`.weblog`, 0.35), `sessions show` also lists its actions (time, kind, method, status, path).
 
 ## Without Portunia, from scratch
 

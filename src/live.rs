@@ -98,6 +98,11 @@ impl Cut {
         }
     }
 
+    /// Raison de la fermeture si elle a déjà été demandée (sans attendre).
+    pub fn closed(&self) -> Option<String> {
+        self.0.borrow().clone()
+    }
+
     /// Pour un `select!` : n'aboutit que sur une vraie fermeture.
     pub async fn reason(&mut self) -> String {
         match self.wait().await {
