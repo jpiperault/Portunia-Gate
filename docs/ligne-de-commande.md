@@ -184,7 +184,7 @@ Comment les navigateurs atteignent le portail : une entrée externe (Cloudflare,
 ```bash
 sudo portunia-gate portal expose cloudflare               # entrée externe : cloudflare, direct, proxy ou relay
 sudo portunia-gate portal expose --internal on            # entrée interne en plus (réseaux vides : réseaux privés)
-sudo portunia-gate portal expose --internal-networks 10.0.0.0/8,192.168.91.0/24
+sudo portunia-gate portal expose --internal-networks 10.0.0.0/8,192.168.10.0/24
 sudo portunia-gate portal set --internal-url https://gate.lan:8446 --internal-code off   # adresse sur le réseau ; code selon le compte
 sudo portunia-gate portal expose internal                 # pas d'entrée externe : entrée interne seulement
 sudo portunia-gate portal expose proxy --trusted 10.0.5.10,10.0.5.11 --header X-Forwarded-For
