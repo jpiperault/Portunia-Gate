@@ -887,11 +887,19 @@ async fn assist_agent_file(AxState(portal): Ctx) -> Response {
 }
 
 /// Relais : connexion de Portunia Assist (personne aidée, sans compte).
-async fn assist_agent(AxState(portal): Ctx, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
+async fn assist_agent(
+    AxState(portal): Ctx,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+    ws: WebSocketUpgrade,
+) -> Response {
     let addr = client_ip(&portal, peer, &headers);
     let state = portal.state.clone();
     let lang = crate::lang::get();
-    ws.on_upgrade(move |socket| crate::lang::scope(lang, crate::assist::agent(state, socket, addr)))
+    // Retour après une coupure du réseau (jeton de reprise reçu à la mise en relation).
+    let resume = q.get("reprise").filter(|t| t.len() == 32 && t.chars().all(|c| c.is_ascii_hexdigit())).cloned();
+    ws.on_upgrade(move |socket| crate::lang::scope(lang, crate::assist::agent(state, socket, addr, resume)))
 }
 
 async fn page_desktop(Path(_nom): Path<String>) -> Response {

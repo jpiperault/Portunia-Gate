@@ -23,10 +23,19 @@ use tokio::sync::oneshot;
 
 use crate::{audit, model, State};
 
+/// Le dépanneur qui rejoint une place : sa WebSocket, son nom affiché, son compte, son jeton de reprise.
+struct Helper {
+    socket: WebSocket,
+    who: String,
+    login: String,
+    user: uuid::Uuid,
+    token: String,
+}
+
 /// Place réservée à une personne aidée qui attend son dépanneur.
 struct Waiting {
-    /// Le dépanneur arrive : sa WebSocket, son nom affiché et son compte.
-    tx: oneshot::Sender<(WebSocket, String, String, uuid::Uuid)>,
+    /// Le dépanneur arrive.
+    tx: oneshot::Sender<Helper>,
     since: Instant,
     addr: String,
 }
@@ -35,6 +44,8 @@ struct Waiting {
 #[derive(Default)]
 pub struct Rooms {
     waiting: Mutex<HashMap<String, Waiting>>,
+    /// Sessions coupées par le réseau, en attente du retour des deux côtés.
+    parked: Mutex<Vec<Parked>>,
     /// Coupure de toutes les sessions (relais désactivé).
     closing: Mutex<Option<tokio::sync::watch::Sender<u64>>>,
     /// Connexions récentes par adresse (anti-abus).
@@ -50,6 +61,7 @@ impl Rooms {
     /// Ferme toutes les sessions et libère les places (relais coupé).
     pub fn close_all(&self) {
         self.waiting.lock().unwrap().clear();
+        self.parked.lock().unwrap().clear();
         if let Some(tx) = self.closing.lock().unwrap().as_ref() {
             tx.send_modify(|n| *n += 1);
         }
@@ -97,12 +109,20 @@ const MAX_WAITING_PER_ADDRESS: usize = 3;
 /// Combien de temps une place attend son dépanneur.
 const WAIT: Duration = Duration::from_secs(30 * 60);
 
+/// Combien de temps une session coupée par le réseau attend le retour des deux côtés.
+const RESUME_FOR: Duration = Duration::from_secs(120);
+
 async fn send_json(socket: &mut WebSocket, v: Value) -> bool {
     socket.send(Message::Text(v.to_string().into())).await.is_ok()
 }
 
-/// Personne aidée : place, attente du dépanneur, puis relais.
-pub async fn agent(state: Arc<State>, mut socket: WebSocket, addr: String) {
+/// Personne aidée : place, attente du dépanneur, puis relais. Avec `resume`, elle revient après
+/// une coupure du réseau (jeton de reprise reçu à la mise en relation).
+pub async fn agent(state: Arc<State>, mut socket: WebSocket, addr: String, resume: Option<String>) {
+    if let Some(token) = resume {
+        rejoin(state, socket, &token, None).await;
+        return;
+    }
     let s = match settings(&state).await {
         Ok(s) if s.enabled => s,
         _ => {
@@ -147,11 +167,22 @@ pub async fn agent(state: Arc<State>, mut socket: WebSocket, addr: String) {
         _ = wait_closed(&mut socket) => None,
     };
     state.assist.waiting.lock().unwrap().remove(&place);
-    let Some((helper, who, login, user)) = paired else { return };
-    if !send_json(&mut socket, json!({ "type": "relie", "depanneur": who })).await {
+    let Some(helper) = paired else { return };
+    let agent_token = uuid::Uuid::new_v4().simple().to_string();
+    if !send_json(&mut socket, json!({ "type": "relie", "depanneur": helper.who, "reprise": agent_token })).await {
         return;
     }
-    relay(state, socket, helper, &login, user, &addr, s.hours).await;
+    let session = Session {
+        agent_token,
+        helper_token: helper.token,
+        user: helper.user,
+        login: helper.login,
+        addr,
+        hours: s.hours,
+        started: Instant::now(),
+        bytes: 0,
+    };
+    run(state, session, socket, helper.socket).await;
 }
 
 /// Attend la fermeture (ou une erreur) de la WebSocket, en ignorant les messages.
@@ -163,46 +194,153 @@ async fn wait_closed(socket: &mut WebSocket) {
     }
 }
 
-/// Dépanneur : rejoint la place demandée. `who` est le nom montré à la personne aidée.
-pub async fn helper(state: Arc<State>, mut socket: WebSocket, login: String, user: uuid::Uuid, who: String, place: String) {
+/// Dépanneur : rejoint la place demandée. `who` est le nom montré à la personne aidée. Avec
+/// `resume`, il revient après une coupure du réseau.
+pub async fn helper(state: Arc<State>, mut socket: WebSocket, login: String, user: uuid::Uuid, who: String, place: String, resume: Option<String>) {
+    if let Some(token) = resume {
+        rejoin(state, socket, &token, Some(user)).await;
+        return;
+    }
     let waiting = state.assist.waiting.lock().unwrap().remove(&place);
     let Some(w) = waiting.filter(|w| w.since.elapsed() < WAIT) else {
         audit::note(&state.db, &login, "assistance.place_inconnue", json!({ "place": place })).await;
         send_json(&mut socket, json!({ "type": "erreur", "message": t!("Unknown or expired code: ask for the code again", "Code inconnu ou expiré : redemandez le code") })).await;
         return;
     };
-    if !send_json(&mut socket, json!({ "type": "relie", "adresse": w.addr })).await {
+    let token = uuid::Uuid::new_v4().simple().to_string();
+    if !send_json(&mut socket, json!({ "type": "relie", "adresse": w.addr, "reprise": token })).await {
         return;
     }
     audit::note(&state.db, &login, "assistance.ouverte", json!({ "place": place, "adresse": w.addr })).await;
-    let _ = w.tx.send((socket, who, login, user));
+    let _ = w.tx.send(Helper { socket, who, login, user, token });
 }
 
-/// Transmet les messages binaires dans les deux sens, jusqu'à la fin ou la durée maximale.
-async fn relay(state: Arc<State>, mut agent: WebSocket, mut helper: WebSocket, login: &str, user: uuid::Uuid, addr: &str, hours: i64) {
-    let started = Instant::now();
+/// Une assistance en cours : les deux côtés, et de quoi la reprendre après une coupure.
+struct Session {
+    agent_token: String,
+    helper_token: String,
+    user: uuid::Uuid,
+    login: String,
+    addr: String,
+    hours: i64,
+    started: Instant,
+    bytes: u64,
+}
+
+/// Session coupée qui attend le retour des deux côtés.
+struct Parked {
+    session: Session,
+    since: Instant,
+    agent: Option<WebSocket>,
+    helper: Option<WebSocket>,
+}
+
+/// Relaie la session ; après une coupure du réseau, la met de côté le temps que les deux
+/// reviennent (jetons de reprise), sinon la note comme fermée.
+async fn run(state: Arc<State>, mut session: Session, agent: WebSocket, helper: WebSocket) {
+    match relay(&state, &mut session, agent, helper).await {
+        End::Done(reason) => closed(&state, &session, reason).await,
+        End::Lost => {
+            audit::note(&state.db, &session.login, "assistance.coupure", json!({ "adresse": session.addr })).await;
+            let agent_token = session.agent_token.clone();
+            state.assist.parked.lock().unwrap().push(Parked { session, since: Instant::now(), agent: None, helper: None });
+            // Personne n'est revenu à temps : fermée.
+            let st = state.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(RESUME_FOR).await;
+                let gone = {
+                    let mut parked = st.assist.parked.lock().unwrap();
+                    parked.iter().position(|p| p.session.agent_token == agent_token).map(|i| parked.remove(i))
+                };
+                if let Some(p) = gone {
+                    closed(&st, &p.session, "coupure").await;
+                }
+            });
+        }
+    }
+}
+
+/// Retour d'un côté après une coupure : quand l'autre est là aussi, la session reprend.
+async fn rejoin(state: Arc<State>, socket: WebSocket, token: &str, helper_user: Option<uuid::Uuid>) {
+    let mut socket = Some(socket);
+    let ready = {
+        let mut parked = state.assist.parked.lock().unwrap();
+        parked.retain(|p| p.since.elapsed() < RESUME_FOR);
+        let found = parked.iter().position(|p| match helper_user {
+            Some(u) => p.session.helper_token == token && p.session.user == u,
+            None => p.session.agent_token == token,
+        });
+        match found {
+            None => None,
+            Some(i) => {
+                let p = &mut parked[i];
+                if helper_user.is_some() {
+                    p.helper = socket.take();
+                } else {
+                    p.agent = socket.take();
+                }
+                if p.agent.is_some() && p.helper.is_some() {
+                    Some(Ok(parked.remove(i)))
+                } else {
+                    Some(Err(()))
+                }
+            }
+        }
+    };
+    match ready {
+        None => {
+            let Some(mut socket) = socket else { return };
+            send_json(&mut socket, json!({ "type": "erreur", "message": t!("The assistance can no longer resume: start a new one", "L'assistance ne peut plus reprendre : recommencez-en une") })).await;
+        }
+        // L'autre côté n'est pas encore revenu : sa WebSocket attend dans la session mise de côté.
+        Some(Err(())) => {}
+        Some(Ok(p)) => {
+            let (Some(mut agent), Some(mut helper)) = (p.agent, p.helper) else { return };
+            if !send_json(&mut agent, json!({ "type": "repris" })).await || !send_json(&mut helper, json!({ "type": "repris" })).await {
+                closed(&state, &p.session, "coupure").await;
+                return;
+            }
+            audit::note(&state.db, &p.session.login, "assistance.reprise", json!({ "adresse": p.session.addr, "coupure_s": p.since.elapsed().as_secs() })).await;
+            Box::pin(run(state, p.session, agent, helper)).await;
+        }
+    }
+}
+
+enum End {
+    /// Fin voulue (ou durée maximale, relais coupé…), avec la raison notée au journal.
+    Done(&'static str),
+    /// Réseau coupé d'un côté : reprise possible.
+    Lost,
+}
+
+/// Transmet les messages dans les deux sens (binaires : le flux chiffré ; texte : la reprise),
+/// jusqu'à la fin ou la durée maximale. Après une coupure, l'autre côté n'est pas fermé
+/// proprement : il voit la coupure et revient avec son jeton.
+async fn relay(state: &State, session: &mut Session, mut agent: WebSocket, mut helper: WebSocket) -> End {
     // Compte du dépanneur désactivé : la session se ferme.
-    let (_watch, mut cut) = state.live.watch(crate::live::Watched { user, login, target: None, web: false, recorded: false, session: None });
+    let (_watch, mut cut) = state.live.watch(crate::live::Watched { user: session.user, login: &session.login, target: None, web: false, recorded: false, session: None });
     let mut closing = state.assist.closing();
-    let mut bytes = 0u64;
-    let limit = tokio::time::sleep(Duration::from_secs(hours as u64 * 3600));
+    let left = Duration::from_secs(session.hours as u64 * 3600).saturating_sub(session.started.elapsed());
+    let limit = tokio::time::sleep(left);
     tokio::pin!(limit);
     let reason = loop {
         tokio::select! {
             m = agent.recv() => match m {
-                Some(Ok(Message::Binary(b))) => {
-                    bytes += b.len() as u64;
-                    if helper.send(Message::Binary(b)).await.is_err() { break "depanneur"; }
+                Some(Ok(m @ (Message::Binary(_) | Message::Text(_)))) => {
+                    session.bytes += match &m { Message::Binary(b) => b.len(), Message::Text(t) => t.len(), _ => 0 } as u64;
+                    if helper.send(m).await.is_err() { return End::Lost; }
                 }
-                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break "personne aidee",
+                Some(Ok(Message::Close(_))) => break "personne aidee",
+                None | Some(Err(_)) => return End::Lost,
                 _ => {}
             },
             m = helper.recv() => match m {
-                Some(Ok(Message::Binary(b))) => {
-                    bytes += b.len() as u64;
-                    if agent.send(Message::Binary(b)).await.is_err() { break "personne aidee"; }
+                Some(Ok(m @ (Message::Binary(_) | Message::Text(_)))) => {
+                    session.bytes += match &m { Message::Binary(b) => b.len(), Message::Text(t) => t.len(), _ => 0 } as u64;
+                    if agent.send(m).await.is_err() { return End::Lost; }
                 }
-                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break "depanneur",
+                Some(Ok(Message::Close(_))) => break "depanneur",
+                None | Some(Err(_)) => return End::Lost,
                 _ => {}
             },
             _ = closing.changed() => break "relais coupe",
@@ -212,11 +350,15 @@ async fn relay(state: Arc<State>, mut agent: WebSocket, mut helper: WebSocket, l
     };
     let _ = agent.send(Message::Close(None)).await;
     let _ = helper.send(Message::Close(None)).await;
+    End::Done(reason)
+}
+
+async fn closed(state: &State, session: &Session, reason: &str) {
     audit::note(
         &state.db,
-        login,
+        &session.login,
         "assistance.fermee",
-        json!({ "adresse": addr, "duree_s": started.elapsed().as_secs(), "octets": bytes, "fin": reason }),
+        json!({ "adresse": session.addr, "duree_s": session.started.elapsed().as_secs(), "octets": session.bytes, "fin": reason }),
     )
     .await;
 }

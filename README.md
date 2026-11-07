@@ -346,7 +346,8 @@ Take control of a relative's or a customer's PC with **Portunia Assistance** (Po
 | Who | Members of the **helpers group** only ("Dépanneurs" by default), signed in to the Gate from Portunia. |
 | Person helped | A frame and a **Stop** bar stay on their screen (not visible in the shared image); pressing Esc three times also stops. The assistance ends after the maximum duration (4 hours by default). |
 | Program | The Gate downloads `portunia-assistance.exe` from the Portunia releases when assistance is enabled, then once a day, and checks its SHA-256 fingerprint. It is not code-signed yet: Windows SmartScreen warns on first opening ("More info" › "Run anyway"). |
-| Audit log | `assistance.ouverte`, `assistance.fermee`, `assistance.reglage`, `assistance.place_inconnue`, `assistance.programme`. |
+| Network cut | Since 0.43 (with Portunia 0.81 and Portunia Assistance 0.81): when the network of either side drops, the session waits up to 2 minutes and resumes by itself, without a new code; what was in transit is sent again. |
+| Audit log | `assistance.ouverte`, `assistance.fermee`, `assistance.coupure`, `assistance.reprise`, `assistance.reglage`, `assistance.place_inconnue`, `assistance.programme`. |
 
 **Setup**: the page and the relay use the web portal address (see [Web portal](#web-portal), steps 1 to 3; the portal itself can stay off). In Portunia, enable the **Remote assistance** extension, then Gate **⋯** menu › **Administer** › **Assistance**: helpers group, maximum duration, then the switch. Create the group and add the helpers' accounts.
 
@@ -436,6 +437,6 @@ See also [docs/operations.md](docs/operations.md): backups, updates, logs, troub
 3. **Audit**: replay and search (0.5), live view and session termination, on-demand MP4 video, detachable player, configurable retention with disk estimate, syslog and CSV.
 4. **Remote Desktop**: jump (0.6), recorded with signed recording (0.8), replay (0.10), vault (0.29: the Gate opens the Windows session with the vault account), ordinary RDP clients (0.31: mstsc, Windows App, Remmina with a single-use .rdp file), then rules (clipboard, sound).
 5. **Web portal**: SSH (0.7) and Remote Desktop (0.8) in the browser behind Cloudflare, then passkeys, branding.
-6. **Remote assistance**: Portunia Assistance relay with a code (0.11), then invitation link, unattended access to your own PCs, file transfer, chat.
+6. **Remote assistance**: Portunia Assistance relay with a code (0.11), chat, pause, take back control and resume after a network cut (0.43), then file transfer, several screens, invitation link, unattended access to your own PCs.
 7. **Operations**: built-in backup, apt repository for updates, ARM package, imports (Portunia, CSV), optional web console.
 8. **Master console**: a central Portunia Gate for service providers, relays at customers' sites.

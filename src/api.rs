@@ -2218,7 +2218,13 @@ async fn assist_status(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
 }
 
 /// Le dépanneur rejoint la place donnée par la personne aidée (WebSocket).
-async fn assist_join(AxState(api): Ctx, headers: HeaderMap, Path(place): Path<String>, ws: axum::extract::ws::WebSocketUpgrade) -> Result<Response, ApiError> {
+async fn assist_join(
+    AxState(api): Ctx,
+    headers: HeaderMap,
+    Path(place): Path<String>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> Result<Response, ApiError> {
     let user = caller(&api, &headers).await?;
     let state = api.state.clone();
     if !crate::assist::can_help(&state, user.id).await? {
@@ -2229,7 +2235,9 @@ async fn assist_join(AxState(api): Ctx, headers: HeaderMap, Path(place): Path<St
     }
     let name = setting_str(&state, "nom", "Portunia Gate").await?;
     let who = format!("{} ({name})", user.login);
-    Ok(ws.on_upgrade(move |socket| crate::assist::helper(state, socket, user.login, user.id, who, place)))
+    // Retour après une coupure du réseau (Portunia 0.81 et suivants).
+    let resume = q.get("reprise").filter(|t| t.len() == 32 && t.chars().all(|c| c.is_ascii_hexdigit())).cloned();
+    Ok(ws.on_upgrade(move |socket| crate::assist::helper(state, socket, user.login, user.id, who, place, resume)))
 }
 
 async fn admin_assist(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
