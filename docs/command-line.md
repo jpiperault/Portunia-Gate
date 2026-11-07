@@ -158,10 +158,11 @@ sudo portunia-gate setting live_notice on                 # tell SSH users when 
 sudo portunia-gate setting sensitive_commands "rm -rf,shutdown,DROP TABLE"   # marked on the player's timeline
 sudo portunia-gate setting file_copies_mb 200             # keep copied files, up to 200 MB per session (0: none)
 sudo portunia-gate setting recording_days 180             # delete recordings of sessions ended over 180 days ago (0: keep)
+sudo portunia-gate setting audit_days 365                 # delete audit log events older than 365 days (0: keep; at least 90)
 sudo portunia-gate setting session_hours                  # without a value: shows it
 ```
 
-French names are accepted too: `nom`, `langue`, `banniere`, `duree_session_h`, `memo_mot_de_passe`, `relecture_propres`, `commandes_sensibles`, `copies_fichiers_mo`, `conservation_jours`.
+French names are accepted too: `nom`, `langue`, `banniere`, `duree_session_h`, `memo_mot_de_passe`, `relecture_propres`, `commandes_sensibles`, `copies_fichiers_mo`, `conservation_jours`, `journal_jours`.
 
 Kept file copies go next to the recording, in `/var/lib/portunia-gate/enregistrements/YYYY/MM/<session>-fichiers/`; their SHA-256 is in the signed recording and in the audit log.
 
@@ -249,7 +250,7 @@ With Docker, keep port 3390 inside the container and change the published one (`
 ```bash
 sudo portunia-gate audit --last 50                        # latest events
 sudo portunia-gate audit --search marc --last 200         # account, event or detail containing the text
-sudo portunia-gate audit --verify                         # checks the whole chain: a deleted or edited event shows
+sudo portunia-gate audit --verify                         # checks the whole chain (since the last purge): a deleted or edited event shows
 sudo portunia-gate audit --last 5000 --csv journal.csv    # export for a spreadsheet (same format as Portunia)
 sudo portunia-gate sessions --last 20
 sudo portunia-gate sessions --user marc --server web-01 --since 2026-11-01 --until 2026-11-30
@@ -260,7 +261,7 @@ sudo portunia-gate sessions show 3f2a9c1e                 # details, recording f
 sudo portunia-gate sessions cut 3f2a9c1e                  # cuts an open session within 30 s (--disable: also disables the account)
 ```
 
-`sessions show` prints the recording's path and checks its signature (`✓ Signature verified` or `⚠ ALTERED FILE`). An SSH recording (`.cast`, asciicast v2) can be played in a terminal with `sudo asciinema play <file>`. That replay is **not logged** and shows masked input: keep it to system administrators, and use Portunia for auditors. Remote Desktop recordings (`.rdpcap`) are replayed in Portunia only. For a web session (`.weblog`, 0.35), `sessions show` also lists its actions (time, kind, method, status, path).
+`sessions show` prints the recording's path and checks its signature (`✓ Signature verified` or `⚠ ALTERED FILE`). An SSH recording (`.cast`, asciicast v2) can be played in a terminal with `sudo asciinema play <file>` (compressed one day after the session since 0.42, `.cast.gz`: `sessions show` gives the command with `zcat`). That replay is **not logged** and shows masked input: keep it to system administrators, and use Portunia for auditors. Remote Desktop recordings (`.rdpcap`) are replayed in Portunia only. For a web session (`.weblog`, 0.35), `sessions show` also lists its actions (time, kind, method, status, path).
 
 ## Without Portunia, from scratch
 

@@ -516,8 +516,9 @@ update() {
   echo "${B}$(t "Portunia Gate — update" "Portunia Gate — mise à jour")${N}"
   warn "$(t "The Gate restarts at the end: open sessions will be cut." "La Gate redémarre à la fin : les sessions ouvertes seront coupées.")"
   confirm "$(t "Continue?" "Continuer ?")" || exit 0
+  # Version en place lue sans la Gate : une version qui ne démarre plus doit pouvoir être remplacée.
   local before
-  before=$(hcmd info | sed -n 1p)
+  before=$(installed_version)
   if [ "$MODE" = docker ]; then
     if [ -d .git ]; then
       step "$(t "Fetching the latest version" "Récupération de la dernière version")"
@@ -533,7 +534,18 @@ update() {
   fi
   wait_api
   ok "$(t "Before:" "Avant :") $before"
-  ok "$(t "After:" "Après :") $(hcmd info | sed -n 1p)"
+  ok "$(t "After:" "Après :") $(installed_version)"
+}
+
+# Version installée, même si la Gate ne démarre pas (paquet, ou binaire de l'image Docker).
+installed_version() {
+  local v=''
+  if [ "$MODE" = docker ]; then
+    v=$(compose run --rm --no-deps -T --entrypoint portunia-gate portunia-gate --version 2>/dev/null | awk '{print $NF}' || true)
+  else
+    v=$(dpkg-query -W -f '${Version}' portunia-gate 2>/dev/null || true)
+  fi
+  printf 'Portunia Gate %s\n' "${v:-?}"
 }
 
 add_admin() {

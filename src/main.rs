@@ -182,7 +182,7 @@ enum Command {
     Update(UpdateCmd),
     /// General settings; without a name, lists them all.
     Setting {
-        /// auth_policy, banner, name, language, session_hours, remember_password, own_replay, live_notice, sensitive_commands, file_copies_mb or recording_days.
+        /// auth_policy, banner, name, language, session_hours, remember_password, own_replay, live_notice, sensitive_commands, file_copies_mb, recording_days or audit_days.
         key: Option<String>,
         /// New value; without a value, shows the current one.
         value: Option<String>,
@@ -1070,7 +1070,7 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Update(cmd) => update_cmd(&state, cmd).await,
         Command::Audit { verify, last, search, csv } => {
             if verify {
-                match audit::verify(&state.db).await? {
+                match audit::verify(&state.db, &state.keys).await? {
                     Ok(n) => println!("{}", t!(format!("Log intact: {n} chained events."), format!("Journal intact : {n} événements chaînés."))),
                     Err(broken) => bail!(t!(format!("LOG TAMPERED WITH: {broken}"), format!("JOURNAL ALTÉRÉ : {broken}"))),
                 }
@@ -1218,6 +1218,7 @@ async fn all_settings(state: &State) -> Result<Vec<(&'static str, String)>> {
         ("sensitive_commands", api::sensitive_commands(state).await?.join(", ")),
         ("file_copies_mb", model::setting(&state.db, "copies_fichiers_mo").await?.and_then(|v| v.as_u64()).unwrap_or(0).to_string()),
         ("recording_days", status::retention_days(state).await?.to_string()),
+        ("audit_days", status::journal_days(state).await?.to_string()),
         ("banner", api::setting_str(state, "banniere", sshd::default_banner()).await?.replace('\n', "\\n")),
     ])
 }
@@ -1236,9 +1237,10 @@ async fn setting_cmd(state: &State, key: &str, value: Option<String>) -> Result<
         "sensitive_commands" | "commandes_sensibles" => "commandes_sensibles",
         "file_copies_mb" | "copies_fichiers_mo" => "copies_fichiers_mo",
         "recording_days" | "conservation_jours" => status::RETENTION,
+        "audit_days" | "journal_jours" => audit::RETENTION,
         _ => bail!(t!(
-            "unknown setting: auth_policy, banner, name, language, session_hours, remember_password, own_replay, live_notice, sensitive_commands, file_copies_mb or recording_days",
-            "réglage inconnu : auth_policy, banner, name, language, session_hours, remember_password, own_replay, live_notice, sensitive_commands, file_copies_mb ou recording_days"
+            "unknown setting: auth_policy, banner, name, language, session_hours, remember_password, own_replay, live_notice, sensitive_commands, file_copies_mb, recording_days or audit_days",
+            "réglage inconnu : auth_policy, banner, name, language, session_hours, remember_password, own_replay, live_notice, sensitive_commands, file_copies_mb, recording_days ou audit_days"
         )),
     };
     let Some(v) = value else {
@@ -1254,6 +1256,7 @@ async fn setting_cmd(state: &State, key: &str, value: Option<String>) -> Result<
             "commandes_sensibles" => "sensitive_commands",
             "copies_fichiers_mo" => "file_copies_mb",
             "conservation_jours" => "recording_days",
+            "journal_jours" => "audit_days",
             other => other,
         };
         println!("{}", shown.into_iter().find(|(n, _)| *n == english).map(|(_, v)| v).unwrap_or_default());
@@ -1298,6 +1301,13 @@ async fn setting_cmd(state: &State, key: &str, value: Option<String>) -> Result<
             }
             json!(days)
         }
+        "journal_jours" => {
+            let days: i64 = v.trim().parse().map_err(|_| anyhow!(t!(format!("audit_days: a number of days (0: kept forever, otherwise at least {})", audit::MIN_DAYS), format!("audit_days : un nombre de jours (0 : gardé toujours, sinon au moins {})", audit::MIN_DAYS))))?;
+            if days != 0 && !(audit::MIN_DAYS..=36500).contains(&days) {
+                bail!(t!(format!("audit_days: 0, or {} to 36500", audit::MIN_DAYS), format!("audit_days : 0, ou {} à 36500", audit::MIN_DAYS)));
+            }
+            json!(days)
+        }
         _ => json!(v),
     };
     model::set_setting(&state.db, key, stored.clone()).await?;
@@ -1309,6 +1319,10 @@ async fn setting_cmd(state: &State, key: &str, value: Option<String>) -> Result<
     if key == status::RETENTION && stored.as_i64().unwrap_or(0) > 0 {
         let (sessions, bytes) = status::purge(state, "console").await?;
         println!("  {}", t!(format!("Recordings removed now: {sessions} session(s), {}. Then every hour by the service.", status::human(bytes)), format!("Enregistrements supprimés maintenant : {sessions} session(s), {}. Ensuite chaque heure par le service.", status::human(bytes))));
+    }
+    if key == audit::RETENTION && stored.as_i64().unwrap_or(0) > 0 {
+        let removed = status::purge_journal(state, "console").await?;
+        println!("  {}", t!(format!("Audit log events removed now: {removed}. Then every day by the service."), format!("Événements du journal supprimés maintenant : {removed}. Ensuite chaque jour par le service.")));
     }
     Ok(())
 }
@@ -1392,6 +1406,16 @@ async fn status_cmd(state: &State, as_json: bool) -> Result<()> {
         t!("refusals (24 h)", "refus (24 h)")
     );
     println!("{:<22}{}", t!("Audit log", "Journal"), t!("check: sudo portunia-gate audit --verify", "vérification : sudo portunia-gate audit --verify"));
+    let jd = r["journal_jours"].as_i64().unwrap_or(0);
+    let purged = match r["journal_purge"]["depuis"].as_i64() {
+        Some(from) => t!(format!(" · purged up to event #{from}"), format!(" · purgé jusqu'à l'événement n° {from}")),
+        None => String::new(),
+    };
+    println!(
+        "{:<22}{}{purged}",
+        t!("Audit log retention", "Conservation journal"),
+        if jd == 0 { t!("forever (setting audit_days DAYS)", "toujours (setting audit_days JOURS)").to_string() } else { t!(format!("{jd} days"), format!("{jd} jours")) }
+    );
     let u = &r["mise_a_jour"];
     if u["disponible"] == json!(true) {
         println!("\n{} {} → {} : sudo portunia-gate update apply", t!("Update available:", "Mise à jour disponible :"), u["actuelle"].as_str().unwrap_or(""), u["derniere"].as_str().unwrap_or(""));
@@ -1691,7 +1715,7 @@ async fn session_show(state: &State, id: &str) -> Result<()> {
         return Ok(());
     };
     println!("{} {path}", t!("Recording:", "Enregistrement :"));
-    let raw = std::fs::read(path).map_err(|e| anyhow!(t!(format!("unreadable recording file: {e}"), format!("fichier d'enregistrement illisible : {e}"))))?;
+    let raw = recording::read(path).map_err(|e| anyhow!(t!(format!("unreadable recording file: {e}"), format!("fichier d'enregistrement illisible : {e}"))))?;
     let sha = keys::sha256_hex(&raw);
     match (&s.recording_sha256, &s.signature) {
         (Some(expected), Some(sig)) => {
@@ -1715,7 +1739,8 @@ async fn session_show(state: &State, id: &str) -> Result<()> {
     } else if s.kind == "rdp" {
         println!("{}", t!("Replay: Portunia › Audit (Remote Desktop recordings are read by Portunia only).", "Relecture : Portunia › Audit (les enregistrements Bureau à distance ne se lisent que dans Portunia)."));
     } else {
-        println!("{} sudo asciinema play {path}", t!("Replay in a terminal (not logged, masked input shown):", "Relecture dans un terminal (non journalisée, saisies masquées visibles) :"));
+        let play = if path.ends_with(recording::COMPRESSED) { format!("zcat {path} > /tmp/session.cast && asciinema play /tmp/session.cast") } else { format!("asciinema play {path}") };
+        println!("{} sudo {play}", t!("Replay in a terminal (not logged, masked input shown):", "Relecture dans un terminal (non journalisée, saisies masquées visibles) :"));
     }
     Ok(())
 }

@@ -158,10 +158,11 @@ sudo portunia-gate setting live_notice on                 # prévenir l'utilisat
 sudo portunia-gate setting sensitive_commands "rm -rf,shutdown,DROP TABLE"   # repérées sur la barre de temps du lecteur
 sudo portunia-gate setting file_copies_mb 200             # garde les fichiers copiés, jusqu'à 200 Mo par session (0 : aucun)
 sudo portunia-gate setting recording_days 180             # supprime les enregistrements des sessions terminées depuis plus de 180 jours (0 : garder)
+sudo portunia-gate setting audit_days 365                 # supprime les événements du journal de plus de 365 jours (0 : garder ; au moins 90)
 sudo portunia-gate setting session_hours                  # sans valeur : l'affiche
 ```
 
-Les noms français sont acceptés aussi : `nom`, `langue`, `banniere`, `duree_session_h`, `memo_mot_de_passe`, `relecture_propres`, `commandes_sensibles`, `copies_fichiers_mo`, `conservation_jours`.
+Les noms français sont acceptés aussi : `nom`, `langue`, `banniere`, `duree_session_h`, `memo_mot_de_passe`, `relecture_propres`, `commandes_sensibles`, `copies_fichiers_mo`, `conservation_jours`, `journal_jours`.
 
 Les copies gardées sont rangées à côté de l'enregistrement, dans `/var/lib/portunia-gate/enregistrements/AAAA/MM/<session>-fichiers/` ; leur SHA-256 figure dans l'enregistrement signé et au journal.
 
@@ -249,7 +250,7 @@ Avec Docker, gardez le port 3390 dans le conteneur et changez celui qui est publ
 ```bash
 sudo portunia-gate audit --last 50                        # derniers événements
 sudo portunia-gate audit --search marc --last 200         # compte, événement ou détail contenant le texte
-sudo portunia-gate audit --verify                         # vérifie toute la chaîne : un événement supprimé ou modifié se voit
+sudo portunia-gate audit --verify                         # vérifie toute la chaîne (depuis la dernière purge) : un événement supprimé ou modifié se voit
 sudo portunia-gate audit --last 5000 --csv journal.csv    # export pour un tableur (même format que Portunia)
 sudo portunia-gate sessions --last 20
 sudo portunia-gate sessions --user marc --server web-01 --since 2026-11-01 --until 2026-11-30
@@ -260,7 +261,7 @@ sudo portunia-gate sessions show 3f2a9c1e                 # détail, fichier d'e
 sudo portunia-gate sessions cut 3f2a9c1e                  # coupe une session ouverte sous 30 s (--disable : désactive aussi le compte)
 ```
 
-`sessions show` donne le chemin de l'enregistrement et vérifie sa signature (`✓ Signature vérifiée` ou `⚠ FICHIER ALTÉRÉ`). Un enregistrement SSH (`.cast`, asciicast v2) se relit dans un terminal avec `sudo asciinema play <fichier>`. Cette relecture **n'est pas journalisée** et montre les saisies masquées : réservez-la aux administrateurs système, et passez par Portunia pour les auditeurs. Les enregistrements Bureau à distance (`.rdpcap`) ne se relisent que dans Portunia. Pour une session web (`.weblog`, 0.35), `sessions show` liste aussi ses actions (temps, nature, méthode, statut, chemin).
+`sessions show` donne le chemin de l'enregistrement et vérifie sa signature (`✓ Signature vérifiée` ou `⚠ FICHIER ALTÉRÉ`). Un enregistrement SSH (`.cast`, asciicast v2) se relit dans un terminal avec `sudo asciinema play <fichier>` (compressé un jour après la session depuis la 0.42, `.cast.gz` : `sessions show` donne la commande avec `zcat`). Cette relecture **n'est pas journalisée** et montre les saisies masquées : réservez-la aux administrateurs système, et passez par Portunia pour les auditeurs. Les enregistrements Bureau à distance (`.rdpcap`) ne se relisent que dans Portunia. Pour une session web (`.weblog`, 0.35), `sessions show` liste aussi ses actions (temps, nature, méthode, statut, chemin).
 
 ## Sans Portunia, de zéro
 

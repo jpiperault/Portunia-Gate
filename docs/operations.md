@@ -43,6 +43,8 @@ sudo ./installer.sh update          # Docker, from the repository folder
 
 With the package, the wizard downloads the latest version, checks its fingerprint and installs it. With Docker, it fetches the latest version (`git pull`) and rebuilds. Either way, the Gate restarts and updates the database schema. **Open sessions are cut**: warn users.
 
+Since 0.42, the wizard reads the installed version from the package, not from the Gate: an installed version that no longer starts is still replaced. To reinstall a downloaded file: `sudo bash installer.sh --package portunia-gate_amd64.deb update`.
+
 After an update, the web portal loads its new pages by itself (their files carry the version number).
 
 **From Portunia or with `portunia-gate update` (0.39, Debian package).** Portunia (Gate status › *Update…*, Portunia Pro) or `sudo portunia-gate update apply [--at 03:00] [--notice]` asks for the update; `portunia-gate-update.service` (root, started by `portunia-gate-update.path`) carries it out: database backup (`pg_dump`), packages of the new and installed versions downloaded and checked, installation, wait for the new version to start (3 minutes). If it does not start: previous package reinstalled and database restored. Files of the last run (packages, backup `base-avant-<version>.dump`) and its progress (`etat.json`) are in `/var/lib/portunia-gate-update/`; details: `sudo portunia-gate update status` or `sudo journalctl -u portunia-gate-update`. To restore that backup by hand: `sudo systemctl stop portunia-gate && sudo runuser -u _portunia_gate -- pg_restore --clean --if-exists --no-owner -d portunia_gate /var/lib/portunia-gate-update/base-avant-<version>.dump`.
@@ -71,6 +73,10 @@ Every 20 seconds the Gate checks that its database answers and that its SSH serv
 ## Gate status and disk
 
 `sudo portunia-gate status` (or Portunia › Gate status) shows the health of the Gate, its hardware, services, storage and activity. Above 85 % disk use, the administrators are told by e-mail, Teams or webhook (once a day at most); below `PORTUNIA_GATE_MIN_FREE_MB` free (512 MB by default), recorded sessions are refused. To free space for good, set the retention of recordings: `sudo portunia-gate setting recording_days 180` (applied at once, then every hour).
+
+**Compression (0.42).** One day after a session ends, its signed recording is compressed (gzip, `<file>.gz`): an SSH recording takes 5 to 10 times less space. The fingerprint and signature stay those of the original content, checked after decompression; a file whose fingerprint no longer matches is left as it is. The audit log notes each pass (`enregistrement.compresse`, sizes before and after). To read a compressed SSH recording in a terminal: `sudo zcat <file>.cast.gz > /tmp/s.cast && asciinema play /tmp/s.cast`.
+
+**Audit log retention (0.42).** `sudo portunia-gate setting audit_days 365` (0: kept forever, the default; otherwise at least 90 days) deletes the older events, at once then every day. The chain is checked before each purge: an altered log is never purged (`journal.purge_refusee`). The first kept event is anchored (its number and the fingerprint of the one before it, signed by the Gate's key, table `audit_ancres`), so `audit --verify` checks the chain from there. Each purge is logged (`journal.purge`). Export what you must keep beforehand: `sudo portunia-gate audit --last 5000 --csv journal.csv`.
 
 ## Checking a recording
 

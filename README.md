@@ -248,6 +248,8 @@ Since 0.39, **Gate status** (Portunia: Gate menu › *Gate status*, or the *Stat
 - **Command line**: `update check`, `update apply [--at 03:00] [--notice] [--wait]`, `update status`, `update cancel`. With Docker: `sudo ./installer.sh update`, as before.
 - **Recording retention**: `sudo portunia-gate setting recording_days 180` (or Portunia: Settings, or the Status page). Beyond it, the recordings of ended sessions are deleted every hour; the sessions stay in the list and the deletion is logged (`enregistrement.purge`). 0: kept forever (default).
 - **Disk alert**: above 85 % full, the administrators are told (once a day at most).
+- **Compression** (0.42): one day after a session ends, its recording is compressed (gzip): 5 to 10 times less space for SSH. Fingerprint and signature unchanged (`enregistrement.compresse`).
+- **Audit log retention** (0.42): `sudo portunia-gate setting audit_days 365` (or Portunia: Settings, or the Status page). 0: kept forever (default), otherwise at least 90 days. The chain is checked before each daily purge, and a signed anchor keeps it verifiable (`journal.purge`).
 - **Log**: `mise_a_jour.programmee`, `.lancee`, `.reussie`, `.retour_arriere`, `.echec`, `.annulee`, `.disponible`; `disque.presque_plein`; `journal.altere`.
 
 ## Access approval

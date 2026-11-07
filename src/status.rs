@@ -231,7 +231,7 @@ pub async fn run(state: Arc<State>) -> Result<()> {
         }
         // Chaîne du journal vérifiée toutes les 6 heures (la première fois après 2 minutes).
         if n % 360 == 2 {
-            let j = match audit::verify(&state.db).await {
+            let j = match audit::verify(&state.db, &state.keys).await {
                 Ok(Ok(count)) => Journal { ok: true, evenements: count, verifie_le: Utc::now(), erreur: None },
                 Ok(Err(broken)) => Journal { ok: false, evenements: 0, verifie_le: Utc::now(), erreur: Some(broken) },
                 Err(e) => Journal { ok: false, evenements: 0, verifie_le: Utc::now(), erreur: Some(format!("{e:#}")) },
@@ -245,6 +245,16 @@ pub async fn run(state: Arc<State>) -> Result<()> {
         if n % 60 == 1 {
             if let Err(e) = purge(&state, "systeme").await {
                 tracing::warn!("{} {e:#}", t!("recordings retention:", "conservation des enregistrements :"));
+            }
+            if let Err(e) = compress_old(&state).await {
+                tracing::warn!("{} {e:#}", t!("recordings compression:", "compression des enregistrements :"));
+            }
+        }
+        // Conservation du journal d'audit : chaque jour (la première fois après 30 minutes).
+        if n % 1440 == 30 {
+            if let Err(e) = purge_journal(&state, "systeme").await {
+                tracing::warn!("{} {e:#}", t!("audit log retention:", "conservation du journal :"));
+                audit::note(&state.db, "systeme", "journal.purge_refusee", json!({ "erreur": format!("{e:#}") })).await;
             }
         }
         let disk_pct = disk_percent(disk(&state.config.data_dir));
@@ -350,6 +360,77 @@ pub async fn purge(state: &State, actor: &str) -> Result<(u64, u64)> {
     Ok((sessions, bytes))
 }
 
+/// Jours de conservation du journal d'audit (0 : gardé toujours).
+pub async fn journal_days(state: &State) -> Result<i64> {
+    Ok(model::setting(&state.db, audit::RETENTION).await?.and_then(|v| v.as_i64()).unwrap_or(0).clamp(0, 36500))
+}
+
+/// Purge du journal selon `journal_jours` ; renvoie le nombre d'événements supprimés.
+pub async fn purge_journal(state: &State, actor: &str) -> Result<i64> {
+    let days = journal_days(state).await?;
+    if days == 0 {
+        return Ok(0);
+    }
+    audit::purge(&state.db, &state.keys, actor, days).await
+}
+
+/// Enregistrements terminés et signés compressés (gzip) un jour après la fin de leur session,
+/// au plus 1000 par passage. L'empreinte et la signature restent celles du contenu d'origine ;
+/// un fichier dont l'empreinte ne correspond plus n'est pas touché. Renvoie (sessions, avant, après).
+pub async fn compress_old(state: &State) -> Result<(u64, u64, u64)> {
+    let root = state.config.recordings_dir();
+    let (mut sessions, mut before, mut after) = (0u64, 0u64, 0u64);
+    let mut skipped: Vec<uuid::Uuid> = Vec::new();
+    while sessions + (skipped.len() as u64) < 1000 {
+        let rows: Vec<(uuid::Uuid, String, String)> = sqlx::query_as(
+            "SELECT id, recording, recording_sha256 FROM sessions WHERE recording IS NOT NULL AND recording_sha256 IS NOT NULL AND signature IS NOT NULL
+             AND ended_at IS NOT NULL AND ended_at < now() - interval '1 day' AND recording NOT LIKE '%.gz' AND NOT (id = ANY($1)) ORDER BY ended_at LIMIT 100",
+        )
+        .bind(&skipped)
+        .fetch_all(&state.db)
+        .await?;
+        if rows.is_empty() {
+            break;
+        }
+        for (id, recording, sha) in rows {
+            let path = PathBuf::from(&recording);
+            if !path.starts_with(&root) || recording.contains("..") {
+                skipped.push(id);
+                continue;
+            }
+            let (from, sha) = (path.clone(), sha.clone());
+            let done = tokio::task::spawn_blocking(move || crate::recording::compress(&from, &sha)).await?;
+            let (dest, a, b) = match done {
+                Ok(x) => x,
+                Err(e) => {
+                    tracing::warn!("{} {recording}: {e}", t!("recording not compressed:", "enregistrement non compressé :"));
+                    skipped.push(id);
+                    continue;
+                }
+            };
+            let dest_text = dest.display().to_string();
+            let moved = sqlx::query("UPDATE sessions SET recording = $3 WHERE id = $1 AND recording = $2").bind(id).bind(&recording).bind(&dest_text).execute(&state.db).await?;
+            if moved.rows_affected() == 1 {
+                // Lu entre-temps à l'ancien chemin : recording::read prend le « .gz ».
+                let _ = std::fs::remove_file(&path);
+                sessions += 1;
+                before += a;
+                after += b;
+            } else {
+                let _ = std::fs::remove_file(&dest);
+                skipped.push(id);
+            }
+        }
+    }
+    if sessions > 0 {
+        audit::note(&state.db, "systeme", "enregistrement.compresse", json!({ "sessions": sessions, "avant": before, "apres": after })).await;
+        if let Ok(s) = tokio::task::spawn_blocking(move || walk(&root)).await {
+            with_live(|l| l.storage = Some(s));
+        }
+    }
+    Ok((sessions, before, after))
+}
+
 /// Fichier d'enregistrement et copies de fichiers (« <session>-fichiers ») ; octets libérés,
 /// ou rien si un fichier présent n'a pas pu être supprimé.
 fn remove_recording(path: &Path) -> Option<u64> {
@@ -358,8 +439,9 @@ fn remove_recording(path: &Path) -> Option<u64> {
         std::fs::remove_file(path).ok()?;
         freed += m.len();
     }
-    if let Some(stem) = path.file_stem() {
-        let copies = path.with_file_name(format!("{}-fichiers", stem.to_string_lossy()));
+    let base = crate::recording::original(path);
+    if let Some(stem) = base.file_stem() {
+        let copies = base.with_file_name(format!("{}-fichiers", stem.to_string_lossy()));
         if copies.is_dir() {
             let size = walk(&copies).octets;
             std::fs::remove_dir_all(&copies).ok()?;
@@ -586,6 +668,8 @@ pub async fn report(state: &State, service_side: bool, check_update: bool) -> Re
         },
         "activite": { "sessions_ouvertes": open, "sessions_jour": today, "refus_24h": refused, "approbations_attente": waiting },
         "journal": journal,
+        "journal_jours": journal_days(state).await?,
+        "journal_purge": audit::last_purge(&state.db).await.ok().flatten().map(|(depuis, supprimes, date)| json!({ "depuis": depuis, "supprimes": supprimes, "date": date })),
         "mise_a_jour": up,
     }))
 }

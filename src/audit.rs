@@ -6,6 +6,8 @@ use chrono::{DateTime, SubsecRound, Utc};
 use serde_json::Value;
 use sqlx::PgPool;
 
+use crate::keys::Keys;
+
 const GENESIS: &str = "portunia-gate-journal-v1";
 
 fn link(prev: &str, seq: i64, at: &DateTime<Utc>, actor: &str, event: &str, detail: &Value) -> String {
@@ -84,21 +86,114 @@ pub struct Entry {
     pub hash: String,
 }
 
-/// Vérifie toute la chaîne. Renvoie le nombre d'événements, ou le premier maillon cassé.
-pub async fn verify(db: &PgPool) -> Result<std::result::Result<i64, String>> {
-    let rows: Vec<Entry> = sqlx::query_as("SELECT * FROM audit ORDER BY seq").fetch_all(db).await?;
-    let mut prev = GENESIS.to_string();
-    for (i, row) in rows.iter().enumerate() {
-        let expected_seq = i as i64 + 1;
-        if row.seq != expected_seq {
-            return Ok(Err(t!(format!("event #{expected_seq} missing"), format!("événement n° {expected_seq} manquant"))));
-        }
-        if row.prev_hash != prev || link(&prev, row.seq, &row.at, &row.actor, &row.event, &row.detail) != row.hash {
-            return Ok(Err(t!(format!("event #{} modified", row.seq), format!("événement n° {} modifié", row.seq))));
-        }
-        prev = row.hash.clone();
+/// Réglage : jours de conservation du journal (0 : gardé toujours).
+pub const RETENTION: &str = "journal_jours";
+/// En deçà, la purge est refusée : le journal sert de preuve.
+pub const MIN_DAYS: i64 = 90;
+
+/// Texte signé d'une ancre : la chaîne reprend à `seq`, dont le précédent avait l'empreinte `prev`.
+fn anchor_message(seq: i64, prev: &str) -> String {
+    format!("portunia-gate-journal-ancre-v1\n{seq}\n{prev}")
+}
+
+/// Point de départ de la chaîne : la dernière ancre (signature vérifiée), sinon le début.
+async fn start<'e, E: sqlx::PgExecutor<'e>>(db: E, keys: &Keys) -> Result<std::result::Result<(i64, String), String>> {
+    let anchor: Option<(i64, String, String)> = sqlx::query_as("SELECT seq, prev_hash, signature FROM audit_ancres ORDER BY seq DESC LIMIT 1").fetch_optional(db).await?;
+    let Some((seq, prev, sig)) = anchor else { return Ok(Ok((1, GENESIS.to_string()))) };
+    use base64::Engine;
+    let sig = base64::engine::general_purpose::STANDARD.decode(sig).unwrap_or_default();
+    if !keys.verify(anchor_message(seq, &prev).as_bytes(), &sig) {
+        return Ok(Err(t!(format!("purge anchor at event #{seq} modified"), format!("ancre de purge de l'événement n° {seq} modifiée"))));
     }
-    Ok(Ok(rows.len() as i64))
+    Ok(Ok((seq, prev)))
+}
+
+/// Vérifie la chaîne depuis `(seq, prev)` jusqu'à `until` exclu (ou la fin), par lots.
+/// Renvoie le nombre d'événements et l'empreinte du dernier, ou le premier maillon cassé.
+async fn walk(tx: &mut sqlx::PgConnection, from: (i64, String), until: Option<i64>) -> Result<std::result::Result<(i64, String), String>> {
+    let (mut expected, mut prev) = from;
+    let mut count = 0i64;
+    loop {
+        let rows: Vec<Entry> = sqlx::query_as("SELECT * FROM audit WHERE seq >= $1 AND ($2::bigint IS NULL OR seq < $2) ORDER BY seq LIMIT 5000")
+            .bind(expected)
+            .bind(until)
+            .fetch_all(&mut *tx)
+            .await?;
+        if rows.is_empty() {
+            break;
+        }
+        for row in &rows {
+            if row.seq != expected {
+                return Ok(Err(t!(format!("event #{expected} missing"), format!("événement n° {expected} manquant"))));
+            }
+            if row.prev_hash != prev || link(&prev, row.seq, &row.at, &row.actor, &row.event, &row.detail) != row.hash {
+                return Ok(Err(t!(format!("event #{} modified", row.seq), format!("événement n° {} modifié", row.seq))));
+            }
+            prev = row.hash.clone();
+            expected += 1;
+            count += 1;
+        }
+    }
+    // Des événements avant l'ancre auraient dû disparaître avec la purge : rien à vérifier.
+    Ok(Ok((count, prev)))
+}
+
+/// Vérifie toute la chaîne (depuis la dernière purge). Renvoie le nombre d'événements, ou le
+/// premier maillon cassé.
+pub async fn verify(db: &PgPool, keys: &Keys) -> Result<std::result::Result<i64, String>> {
+    let mut conn = db.acquire().await?;
+    let from = match start(&mut *conn, keys).await? {
+        Ok(f) => f,
+        Err(e) => return Ok(Err(e)),
+    };
+    Ok(walk(&mut *conn, from, None).await?.map(|(n, _)| n))
+}
+
+/// Supprime les événements de plus de `days` jours (au moins MIN_DAYS), après avoir vérifié
+/// qu'ils sont intacts : une chaîne cassée n'est jamais purgée, elle reste la preuve.
+/// Le dernier événement est toujours gardé. Renvoie le nombre d'événements supprimés.
+pub async fn purge(db: &PgPool, keys: &Keys, actor: &str, days: i64) -> Result<i64> {
+    anyhow::ensure!(days >= MIN_DAYS, t!(format!("audit log retention: at least {MIN_DAYS} days"), format!("conservation du journal : au moins {MIN_DAYS} jours")));
+    let mut tx = db.begin().await?;
+    sqlx::query("SET LOCAL lock_timeout = '10s'").execute(&mut *tx).await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(7340301)").execute(&mut *tx).await?;
+    let keep: Option<(i64, String)> = sqlx::query_as(
+        "SELECT seq, prev_hash FROM audit WHERE at >= now() - make_interval(days => $1::int) OR seq = (SELECT max(seq) FROM audit) ORDER BY seq LIMIT 1",
+    )
+    .bind(days as i32)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((keep, prev)) = keep else { return Ok(0) };
+    let from = match start(&mut *tx, keys).await? {
+        Ok(f) => f,
+        Err(e) => anyhow::bail!(t!(format!("audit log not purged, it is altered: {e}"), format!("journal non purgé, il est altéré : {e}"))),
+    };
+    if from.0 >= keep {
+        return Ok(0);
+    }
+    let removed = match walk(&mut *tx, from, Some(keep)).await? {
+        Ok((n, last)) if last == prev => n,
+        Ok(_) => anyhow::bail!(t!(format!("audit log not purged, it is altered: event #{keep} modified"), format!("journal non purgé, il est altéré : événement n° {keep} modifié"))),
+        Err(e) => anyhow::bail!(t!(format!("audit log not purged, it is altered: {e}"), format!("journal non purgé, il est altéré : {e}"))),
+    };
+    use base64::Engine;
+    let sig = base64::engine::general_purpose::STANDARD.encode(keys.sign(anchor_message(keep, &prev).as_bytes()));
+    sqlx::query("INSERT INTO audit_ancres (seq, prev_hash, supprimes, signature) VALUES ($1, $2, $3, $4)")
+        .bind(keep)
+        .bind(&prev)
+        .bind(removed)
+        .bind(sig)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM audit WHERE seq < $1").bind(keep).execute(&mut *tx).await?;
+    tx.commit().await?;
+    log(db, actor, "journal.purge", serde_json::json!({ "supprimes": removed, "jours": days, "depuis": keep })).await?;
+    Ok(removed)
+}
+
+/// Dernière purge : (premier événement gardé, événements supprimés, date).
+pub async fn last_purge(db: &PgPool) -> Result<Option<(i64, i64, DateTime<Utc>)>> {
+    Ok(sqlx::query_as("SELECT seq, supprimes, at FROM audit_ancres ORDER BY seq DESC LIMIT 1").fetch_optional(db).await?)
 }
 
 #[cfg(test)]

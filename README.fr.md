@@ -261,6 +261,8 @@ Depuis la 0.39, l'**état de la Gate** (Portunia : menu de la Gate › *État de
 - **En ligne de commande** : `update check`, `update apply [--at 03:00] [--notice] [--wait]`, `update status`, `update cancel`. Avec Docker : `sudo ./installer.sh mise-a-jour`, comme avant.
 - **Conservation des enregistrements** : `sudo portunia-gate setting recording_days 180` (ou Portunia : Réglages, ou la page État). Au-delà, les enregistrements des sessions terminées sont supprimés chaque heure ; les sessions restent dans la liste et la suppression est notée au journal (`enregistrement.purge`). 0 : gardés toujours (par défaut).
 - **Alerte disque** : au-delà de 85 % de remplissage, les administrateurs sont prévenus (une fois par jour au plus).
+- **Compression** (0.42) : un jour après la fin d'une session, son enregistrement est compressé (gzip) : 5 à 10 fois moins de place en SSH. Empreinte et signature inchangées (`enregistrement.compresse`).
+- **Conservation du journal** (0.42) : `sudo portunia-gate setting audit_days 365` (ou Portunia : Réglages, ou la page État). 0 : gardé toujours (par défaut), sinon au moins 90 jours. La chaîne est vérifiée avant chaque purge quotidienne, et une ancre signée la garde vérifiable (`journal.purge`).
 - **Journal** : `mise_a_jour.programmee`, `.lancee`, `.reussie`, `.retour_arriere`, `.echec`, `.annulee`, `.disponible` ; `disque.presque_plein` ; `journal.altere`.
 
 ## Approbation des accès

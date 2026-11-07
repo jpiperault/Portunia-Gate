@@ -1369,7 +1369,7 @@ async fn admin_journal(AxState(api): Ctx, headers: HeaderMap, Query(query): Quer
 
 async fn admin_journal_verify(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
     auditor(&api, &headers).await?;
-    Ok(Json(match audit::verify(&api.state.db).await? {
+    Ok(Json(match audit::verify(&api.state.db, &api.state.keys).await? {
         Ok(n) => json!({ "intact": true, "evenements": n }),
         Err(broken) => json!({ "intact": false, "probleme": broken }),
     }))
@@ -1444,6 +1444,8 @@ async fn admin_settings(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
         "langue": setting_str(state, "langue", "").await?,
         // Jours de conservation des enregistrements (0 : toujours) ; Gate 0.39.
         "conservation_jours": crate::status::retention_days(state).await?,
+        // Jours de conservation du journal d'audit (0 : toujours, sinon au moins 90) ; Gate 0.42.
+        "journal_jours": crate::status::journal_days(state).await?,
     })))
 }
 
@@ -1460,6 +1462,7 @@ struct SettingsBody {
     langue: Option<String>,
     copies_fichiers_mo: Option<u64>,
     conservation_jours: Option<i64>,
+    journal_jours: Option<i64>,
 }
 
 async fn admin_settings_update(AxState(api): Ctx, headers: HeaderMap, Json(body): Json<SettingsBody>) -> ApiResult {
@@ -1519,6 +1522,15 @@ async fn admin_settings_update(AxState(api): Ctx, headers: HeaderMap, Json(body)
         changed.insert(crate::status::RETENTION.into(), json!(v));
         purge = v > 0;
     }
+    let mut purge_journal = false;
+    if let Some(v) = body.journal_jours {
+        if v != 0 && !(audit::MIN_DAYS..=36500).contains(&v) {
+            return Err(err(StatusCode::BAD_REQUEST, t!(format!("Retention of the audit log: 0, or {} to 36500 days", audit::MIN_DAYS), format!("Conservation du journal : 0, ou {} à 36500 jours", audit::MIN_DAYS))));
+        }
+        model::set_setting(db, audit::RETENTION, json!(v)).await?;
+        changed.insert(audit::RETENTION.into(), json!(v));
+        purge_journal = v > 0;
+    }
     if let Some(v) = body.langue {
         let v = v.trim().to_lowercase();
         if !["", "en", "fr"].contains(&v.as_str()) {
@@ -1537,6 +1549,15 @@ async fn admin_settings_update(AxState(api): Ctx, headers: HeaderMap, Json(body)
         tokio::spawn(async move {
             if let Err(e) = crate::status::purge(&state, &login).await {
                 tracing::warn!("{} {e:#}", t!("recordings retention:", "conservation des enregistrements :"));
+            }
+        });
+    }
+    if purge_journal {
+        let state = api.state.clone();
+        let login = actor.login.clone();
+        tokio::spawn(async move {
+            if let Err(e) = crate::status::purge_journal(&state, &login).await {
+                tracing::warn!("{} {e:#}", t!("audit log retention:", "conservation du journal :"));
             }
         });
     }
@@ -1633,8 +1654,8 @@ async fn audit_sessions(AxState(api): Ctx, headers: HeaderMap, Query(q): Query<A
             tokio::task::spawn_blocking(move || {
                 jobs.into_iter()
                     .map(|path| {
-                        let web = path.as_deref().is_some_and(|p| p.ends_with(".weblog"));
-                        let content = path.and_then(|p| std::fs::read_to_string(p).ok())?;
+                        let web = path.as_deref().is_some_and(|p| p.trim_end_matches(crate::recording::COMPRESSED).ends_with(".weblog"));
+                        let content = path.and_then(|p| crate::recording::read(&p).ok()).and_then(|b| String::from_utf8(b).ok())?;
                         if web {
                             crate::websession::find(&content, &t)
                         } else {
@@ -1715,7 +1736,7 @@ async fn load_recording(api: &Api, headers: &HeaderMap, id: Uuid, reveal: bool) 
     if reveal && user.role != "admin" {
         return Err(err(StatusCode::FORBIDDEN, t!("Only an administrator can reveal masked input", "Seul un administrateur peut révéler les saisies masquées")));
     }
-    let raw = tokio::task::spawn_blocking(move || std::fs::read(path))
+    let raw = tokio::task::spawn_blocking(move || crate::recording::read(&path))
         .await
         .map_err(|e| anyhow!(t!(format!("reading: {e}"), format!("lecture : {e}"))))?
         .map_err(|e| err(StatusCode::NOT_FOUND, t!(format!("Unreadable recording file: {e}"), format!("Fichier d'enregistrement illisible : {e}"))))?;
