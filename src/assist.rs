@@ -389,20 +389,32 @@ pub fn agent_file(state: &State) -> std::path::PathBuf {
 
 const RELEASES: &str = "https://github.com/jpiperault/Portunia-releases/releases/latest/download";
 
-/// Télécharge la dernière version de Portunia Assist (et vérifie son empreinte SHA-256 publiée).
+/// Fréquence de la vérification d'une nouvelle version de Portunia Assistance.
+pub const AGENT_CHECK: Duration = Duration::from_secs(3600);
+
+/// Tient à jour Portunia Assist : l'empreinte SHA-256 publiée d'abord (quelques octets) ; le
+/// programme n'est téléchargé que s'il a changé, puis vérifié contre cette empreinte.
 pub async fn fetch_agent(state: Arc<State>) -> Result<()> {
     let dest = agent_file(&state);
-    let (exe, sums) = tokio::task::spawn_blocking(|| -> Result<(Vec<u8>, String)> {
-        let get = |name: &str| -> Result<Vec<u8>> {
+    let get = |name: &'static str| async move {
+        tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
             let resp = ureq::get(&format!("{RELEASES}/{name}")).timeout(Duration::from_secs(120)).call()?;
             let mut out = Vec::new();
             std::io::Read::read_to_end(&mut std::io::Read::take(resp.into_reader(), 64 * 1024 * 1024), &mut out)?;
             Ok(out)
-        };
-        Ok((get("portunia-assistance.exe")?, String::from_utf8_lossy(&get("portunia-assistance.exe.sha256")?).into_owned()))
-    })
-    .await??;
+        })
+        .await?
+    };
+    let sums = String::from_utf8_lossy(&get("portunia-assistance.exe.sha256").await?).into_owned();
     let expected = sums.split_whitespace().next().unwrap_or_default().to_lowercase();
+    anyhow::ensure!(expected.len() == 64, "empreinte publiée de portunia-assistance.exe illisible");
+    // Déjà à jour : rien à télécharger.
+    if let Ok(current) = tokio::fs::read(&dest).await {
+        if crate::keys::sha256_hex(&current) == expected {
+            return Ok(());
+        }
+    }
+    let exe = get("portunia-assistance.exe").await?;
     let actual = crate::keys::sha256_hex(&exe);
     anyhow::ensure!(expected == actual, "empreinte de portunia-assistance.exe différente de celle publiée");
     std::fs::create_dir_all(dest.parent().unwrap())?;

@@ -1042,7 +1042,8 @@ async fn run(cli: Cli) -> Result<()> {
             if tls::create_missing(&state.config.data_dir, &tls_names())? {
                 tracing::info!("certificat de l'API créé, empreinte {}", tls::fingerprint(&state.config.data_dir)?);
             }
-            // Assistance active : Portunia Assist tenu à jour (au démarrage, puis chaque jour).
+            // Assistance active : Portunia Assist tenu à jour (au démarrage, puis chaque heure ; seule
+            // l'empreinte publiée est relue tant qu'il n'a pas changé).
             let s = state.clone();
             tokio::spawn(async move {
                 loop {
@@ -1051,7 +1052,7 @@ async fn run(cli: Cli) -> Result<()> {
                             tracing::warn!("{} {e:#}", t!("Portunia Assistance download:", "téléchargement de Portunia Assistance :"));
                         }
                     }
-                    tokio::time::sleep(std::time::Duration::from_secs(24 * 3600)).await;
+                    tokio::time::sleep(assist::AGENT_CHECK).await;
                 }
             });
             tokio::try_join!(sshd::run(state.clone()), api::run(state.clone()), portal::run(state.clone()), relay::run(state.clone()), tunnel::run(state.clone()), acme::run(state.clone()), health::run(state.clone()), live::run(state.clone()), rdpnative::run(state.clone()), websession::run(state.clone()), approval::run(state.clone()), status::run(state.clone()), update::run(state.clone()))?;
