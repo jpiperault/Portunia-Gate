@@ -313,7 +313,8 @@ enum End {
     Lost,
 }
 
-/// Transmet les messages dans les deux sens (binaires : le flux chiffré ; texte : la reprise),
+/// Transmet les messages dans les deux sens (binaires : le flux chiffré ; texte : la reprise ; du
+/// dépanneur, des notes pour le journal),
 /// jusqu'à la fin ou la durée maximale. Après une coupure, l'autre côté n'est pas fermé
 /// proprement : il voit la coupure et revient avec son jeton.
 async fn relay(state: &State, session: &mut Session, mut agent: WebSocket, mut helper: WebSocket) -> End {
@@ -335,6 +336,16 @@ async fn relay(state: &State, session: &mut Session, mut agent: WebSocket, mut h
                 _ => {}
             },
             m = helper.recv() => match m {
+                // Note du dépanneur pour le journal (fichier échangé : sens, taille, issue) ; le nom et
+                // le contenu restent chiffrés de bout en bout, le relais ne les voit pas.
+                Some(Ok(Message::Text(t))) if serde_json::from_str::<Value>(&t).is_ok_and(|v| v["type"] == "journal") => {
+                    let v: Value = serde_json::from_str(&t).unwrap_or(Value::Null);
+                    if v["evenement"] == "fichier" {
+                        let sens = if v["sens"] == "recu" { "recu" } else { "envoye" };
+                        let etat: String = v["etat"].as_str().unwrap_or("?").chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_').take(20).collect();
+                        audit::note(&state.db, &session.login, "assistance.fichier", json!({ "adresse": session.addr, "sens": sens, "octets": v["taille"].as_u64().unwrap_or(0), "etat": etat })).await;
+                    }
+                }
                 Some(Ok(m @ (Message::Binary(_) | Message::Text(_)))) => {
                     session.bytes += match &m { Message::Binary(b) => b.len(), Message::Text(t) => t.len(), _ => 0 } as u64;
                     if agent.send(m).await.is_err() { return End::Lost; }

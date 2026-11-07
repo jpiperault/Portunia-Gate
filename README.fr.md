@@ -360,7 +360,8 @@ Prendre la main sur le PC d'un proche ou d'un client avec **Portunia Assistance*
 | Personne aidée | Un cadre et une barre **Arrêter** restent sur son écran (invisibles dans l'image partagée) ; Échap trois fois arrête aussi. L'assistance s'arrête au bout de la durée maximale (4 heures par défaut). |
 | Programme | La Gate télécharge `portunia-assistance.exe` depuis les versions de Portunia à l'activation de l'assistance, puis une fois par jour, et vérifie son empreinte SHA-256. Il n'est pas encore signé : Windows SmartScreen avertit à la première ouverture (« Informations complémentaires » › « Exécuter quand même »). |
 | Coupure du réseau | Depuis la 0.43 (avec Portunia 0.81 et Portunia Assistance 0.81) : si le réseau d'un des deux côtés tombe, la session attend jusqu'à 2 minutes et reprend toute seule, sans nouveau code ; ce qui était en route est renvoyé. |
-| Journal | `assistance.ouverte`, `assistance.fermee`, `assistance.coupure`, `assistance.reprise`, `assistance.reglage`, `assistance.place_inconnue`, `assistance.programme`. |
+| Fichiers | Depuis la 0.44 (avec Portunia 0.82 et Portunia Assistance 0.82) : des fichiers dans les deux sens, dans la liaison chiffrée. Le relais ne voit ni les noms ni le contenu ; Portunia signale chaque fichier pour le journal (sens, taille, issue). |
+| Journal | `assistance.ouverte`, `assistance.fermee`, `assistance.coupure`, `assistance.reprise`, `assistance.fichier`, `assistance.reglage`, `assistance.place_inconnue`, `assistance.programme`. |
 
 **Mise en place** : la page et le relais utilisent l'adresse du portail web (voir [Portail web](#portail-web), étapes 1 à 3 ; le portail lui-même peut rester coupé). Dans Portunia, activer l'extension **Assistance à distance**, puis menu **⋯** de la Gate › **Administrer** › **Assistance** : groupe des dépanneurs, durée maximale, puis l'interrupteur. Créer le groupe et y ajouter les comptes des dépanneurs.
 
@@ -450,6 +451,6 @@ Voir aussi [docs/exploitation.fr.md](docs/exploitation.fr.md) : sauvegardes, mis
 3. **Audit** : relecture et recherche (0.5), vue en direct et coupure, vidéo MP4 à la demande, lecteur détachable, conservation réglable avec estimation du disque, syslog et CSV.
 4. **Bureau à distance** : rebond (0.6), enregistré avec enregistrement signé (0.8), relecture (0.10), coffre (0.29 : la Gate ouvre la session Windows avec le compte du coffre), clients RDP ordinaires (0.31 : mstsc, Windows App, Remmina avec un fichier .rdp à usage unique), puis règles (presse-papiers, son).
 5. **Portail web** : SSH (0.7) et Bureau à distance (0.8) dans le navigateur derrière Cloudflare, puis clés d'accès (passkeys), personnalisation.
-6. **Assistance à distance** : relais Portunia Assistance avec un code (0.11), discussion, pause, reprise de la main et reprise après une coupure du réseau (0.43), puis transfert de fichiers, plusieurs écrans, lien d'invitation, accès sans surveillance à ses propres PC.
+6. **Assistance à distance** : relais Portunia Assistance avec un code (0.11), discussion, pause, reprise de la main et reprise après une coupure du réseau (0.43), transfert de fichiers (0.44), puis plusieurs écrans, lien d'invitation, accès sans surveillance à ses propres PC.
 7. **Exploitation** : sauvegarde intégrée, dépôt apt pour les mises à jour, paquet ARM, imports (Portunia, CSV), console web activable.
 8. **Console maître** : un Portunia Gate central pour les prestataires, des relais chez les clients.
