@@ -332,6 +332,12 @@ enum PortalCmd {
         #[arg(long, conflicts_with = "token")]
         remove: bool,
     },
+    /// Updates of the managed tunnel's cloudflared: without argument, shows the versions; « now »
+    /// installs the latest one and restarts the tunnel; « auto » (default) or « manual ».
+    TunnelUpdate {
+        #[arg(value_parser = ["now", "auto", "manual"])]
+        action: Option<String>,
+    },
     /// Access from outside through Cloudflare in TCP (cloudflared on the workstation): host names of
     /// the API, SSH and native RDP; without options, shows them. Empty value: nothing for that service.
     Tcp {
@@ -2656,8 +2662,54 @@ async fn portal_cmd(state: &State, cmd: PortalCmd) -> Result<()> {
             }
             let r = tunnel::report(state).await?;
             println!("{} {}", t!("Token:", "Jeton :"), if r["jeton_defini"] == json!(true) { r["tunnel_id"].as_str().unwrap_or("?") } else { "—" });
+            println!("cloudflared : {}", r["version"].as_str().unwrap_or("—"));
             println!("{} {}", t!("Route Service URL:", "Service URL de la route :"), r["service"].as_str().unwrap_or_default());
             println!("{}", t!("Live state: Portunia › Administer › Web portal.", "État en direct : Portunia › Administrer › Portail web."));
+            return Ok(());
+        }
+        PortalCmd::TunnelUpdate { action } => {
+            match action.as_deref() {
+                Some("now") => {
+                    tunnel::ask_upgrade(state, "console").await?;
+                    audit::log(&state.db, "console", "portail.tunnel_maj", json!({ "maintenant": true })).await?;
+                    println!("✓ {}", t!("Requested: within 30 seconds the Gate installs the latest cloudflared and restarts the tunnel (cut for a few seconds).", "Demandé : sous 30 secondes, la Gate installe le dernier cloudflared et relance le tunnel (coupé quelques secondes)."));
+                    return Ok(());
+                }
+                Some(mode) => {
+                    let on = mode == "auto";
+                    tunnel::set_auto(state, on).await?;
+                    audit::log(&state.db, "console", "portail.tunnel_maj", json!({ "auto": on })).await?;
+                    println!("✓ {}", if on {
+                        t!("Automatic: the Gate checks every 6 hours and moves to a new version when nobody is connected (at the latest the next night after a day).", "Automatique : la Gate vérifie toutes les 6 heures et passe à une nouvelle version quand personne n'est connecté (au plus tard la nuit suivante après un jour).")
+                    } else {
+                        t!("Manual: the Gate shows new versions without installing them (portunia-gate portal tunnel-update now).", "Manuelle : la Gate signale les nouvelles versions sans les installer (portunia-gate portal tunnel-update now).")
+                    });
+                    return Ok(());
+                }
+                None => {}
+            }
+            let auto = tunnel::auto(state).await;
+            println!("{} {}", t!("Updates:", "Mises à jour :"), if auto { t!("automatic", "automatiques") } else { t!("manual", "manuelles") });
+            // État vu par le service : versions lancée et publiée, dernière vérification.
+            if let Some(live) = service_snapshot(state).await? {
+                let r = &live["tunnel"];
+                if r["maj_systeme"] == json!(true) {
+                    println!("{}", t!("cloudflared given by PORTUNIA_GATE_CLOUDFLARED: kept up to date by the system.", "cloudflared donné par PORTUNIA_GATE_CLOUDFLARED : tenu à jour par le système."));
+                    return Ok(());
+                }
+                println!("{} {}", t!("Running version:", "Version lancée :"), r["version"].as_str().unwrap_or("—"));
+                if let Some(v) = r["maj_prete"].as_str() {
+                    println!("{} {v}", t!("Installed, started when nobody is connected:", "Installée, lancée quand personne n'est connecté :"));
+                } else if let Some(v) = r["version_dispo"].as_str() {
+                    println!("{} {v}", t!("New version available:", "Nouvelle version disponible :"));
+                }
+                if let Some(d) = r["maj_verifiee"].as_str() {
+                    println!("{} {d}", t!("Last check:", "Dernière vérification :"));
+                }
+                if let Some(e) = r["maj_erreur"].as_str() {
+                    println!("{} {e}", t!("Check failed:", "Vérification en échec :"));
+                }
+            }
             return Ok(());
         }
         PortalCmd::RelayList => {

@@ -106,6 +106,7 @@ pub async fn run(state: Arc<State>) -> anyhow::Result<()> {
         .route("/api/v1/admin/portail/fermer-sessions", post(admin_portal_close))
         .route("/api/v1/admin/portail/relais", post(admin_relay_add))
         .route("/api/v1/admin/portail/tester", post(admin_portal_check))
+        .route("/api/v1/admin/portail/tunnel-maj", post(admin_tunnel_upgrade))
         .route("/api/v1/admin/portail/certificat", put(admin_cert_import).delete(admin_cert_remove))
         .route("/api/v1/admin/portail/acme", put(admin_acme_update))
         .route("/api/v1/admin/acces-cloudflare", get(admin_cf_access).put(admin_cf_access_update))
@@ -2566,6 +2567,8 @@ struct PortalBody {
     reseaux: Option<Vec<String>>,
     /// Jeton du tunnel Cloudflare géré ; vide : l'efface ; absent : le garde.
     tunnel_jeton: Option<String>,
+    /// Mise à jour automatique de cloudflared.
+    tunnel_maj_auto: Option<bool>,
     /// Écoute HTTPS du portail (« 8446 », « 0.0.0.0:8446 ») ; vide : la ferme ; absent : la garde.
     https: Option<String>,
     /// Entrée interne, en plus de l'entrée externe.
@@ -2644,6 +2647,10 @@ async fn admin_portal_update(AxState(api): Ctx, headers: HeaderMap, Json(body): 
         let info = crate::tunnel::set_token(state, &token).await.map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
         audit::note(db, &actor.login, "portail.tunnel", json!({ "tunnel": info.map(|i| i.tunnel) })).await;
     }
+    if let Some(on) = body.tunnel_maj_auto {
+        crate::tunnel::set_auto(state, on).await?;
+        audit::note(db, &actor.login, "portail.tunnel_maj", json!({ "auto": on })).await;
+    }
     if body.mode.is_some() || body.proxys.is_some() || body.entete.is_some() || body.reseaux.is_some() || body.interne_actif.is_some() || body.interne_reseaux.is_some() {
         let before = crate::portal::exposure(state);
         let internal = crate::portal::InternalChange { open: body.interne_actif, networks: body.interne_reseaux.as_deref() };
@@ -2703,6 +2710,14 @@ async fn admin_relay_remove(AxState(api): Ctx, headers: HeaderMap, Path(id): Pat
     // Les terminaux web passés par ce relais ne doivent pas lui survivre.
     state.web.close_all();
     audit::note(&state.db, &actor.login, "relais.revoque", json!({ "nom": name })).await;
+    Ok(Json(json!({ "etat": "ok" })))
+}
+
+/// Passe tout de suite à la dernière version de cloudflared (le tunnel se relance).
+async fn admin_tunnel_upgrade(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
+    let actor = admin(&api, &headers).await?;
+    crate::tunnel::ask_upgrade(&api.state, &actor.login).await?;
+    audit::note(&api.state.db, &actor.login, "portail.tunnel_maj", json!({ "maintenant": true })).await;
     Ok(Json(json!({ "etat": "ok" })))
 }
 

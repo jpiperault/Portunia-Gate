@@ -191,6 +191,7 @@ sudo portunia-gate portal expose internal                 # pas d'entrée extern
 sudo portunia-gate portal expose proxy --trusted 10.0.5.10,10.0.5.11 --header X-Forwarded-For
 sudo portunia-gate portal tunnel -                        # jeton du tunnel Cloudflare lu sur l'entrée standard ; --remove l'arrête
 sudo portunia-gate portal tunnel                          # état du tunnel
+sudo portunia-gate portal tunnel-update                   # versions de cloudflared ; now : la dernière tout de suite (tunnel relancé) ; auto (défaut) ou manual
 sudo portunia-gate portal tcp --api gate-api.acme.fr --ssh gate-ssh.acme.fr --rdp gate-rdp.acme.fr --publish
                                                           # accès de l'extérieur par Cloudflare en TCP (Portunia, SSH, mstsc) :
                                                           # routes TCP du tunnel + enregistrements DNS, avec un jeton d'API
