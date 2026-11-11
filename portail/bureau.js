@@ -84,6 +84,19 @@ async function open(user, password, domain) {
   // Copie de fichiers : seulement si la règle l'autorise (sinon la Gate la bloque de toute façon)
   // et si le copier-coller du portail est permis, puisqu'elle passe par le presse-papiers.
   if (data.fichiers && etat.presse_papiers !== false) enableFiles();
+  // Écran tactile : la page envoie elle-même souris et clavier à la session RDP, qu'elle reçoit
+  // par le fournisseur de copie de fichiers (le composant ne donne pas accès à son envoi).
+  // Sans copie de fichiers, un fournisseur vide, sans extension : rien de plus n'est ouvert.
+  if (window.PortuniaClavier?.tactile) {
+    if (files) {
+      const set = files.setSession.bind(files);
+      files.setSession = (s) => { rdpSession = s; set(s); };
+    } else {
+      ui.enableFileTransfer({ getBuilderExtensions: () => [], setSession: (s) => { rdpSession = s; }, dispose() {} });
+      // enableFileTransfer ouvre le presse-papiers : le réglage de la Gate revient.
+      ui.setEnableClipboard(etat.presse_papiers !== false);
+    }
+  }
   const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
   const start = desktopSize();
   lastSize = `${start.width}x${start.height}`;
@@ -263,26 +276,35 @@ function followSize() {
 // « Clavier » ouvre le clavier du téléphone : le texte part en Unicode (il ne dépend pas de la
 // disposition du clavier Windows), les touches spéciales et les raccourcis en codes de touches.
 let typing = false;
+let rdpSession = null;
 const LONG_PRESS = 550;
 const SLOP = 10;
+const DEV = Backend.DeviceEvent;
+/** Événements envoyés ensemble à la session (même chemin que le composant). */
+function inputs(events) {
+  if (!rdpSession) return;
+  const tr = new Backend.InputTransaction();
+  for (const e of events) tr.addEvent(e);
+  rdpSession.applyInputs(tr);
+}
 function touch() {
-  const rds = ui.remoteDesktopService;
   const canvas = element.shadowRoot?.querySelector('canvas');
-  if (!rds || !canvas) return;
+  if (!canvas) return;
   element.style.touchAction = 'none';
   const point = (t) => {
     const r = canvas.getBoundingClientRect();
     return { x: Math.round((t.clientX - r.left) * canvas.width / r.width), y: Math.round((t.clientY - r.top) * canvas.height / r.height) };
   };
-  const button = (b, down) => rds.mouseButtonState({ button: b, preventDefault() {} }, down, false);
-  const click = (b) => { button(b, true); button(b, false); };
+  const move = (p) => inputs([DEV.mouseMove(p.x, p.y)]);
+  const button = (b, down) => inputs([down ? DEV.mouseButtonPressed(b) : DEV.mouseButtonReleased(b)]);
+  const click = (b) => inputs([DEV.mouseButtonPressed(b), DEV.mouseButtonReleased(b)]);
   let g = null;
   element.addEventListener('touchstart', (e) => {
     e.preventDefault();
     if (e.touches.length === 1) {
       const t = e.touches[0];
       g = { kind: 'one', x: t.clientX, y: t.clientY, dragging: false, done: false };
-      rds.updateMousePosition(point(t));
+      move(point(t));
       g.timer = setTimeout(() => {
         if (g?.kind === 'one' && !g.dragging) { click(2); g.done = true; navigator.vibrate?.(15); }
       }, LONG_PRESS);
@@ -301,7 +323,7 @@ function touch() {
         g.dragging = true;
         button(0, true);
       }
-      if (g.dragging) rds.updateMousePosition(point(t));
+      if (g.dragging) move(point(t));
     } else if (g?.kind === 'two' && e.touches.length === 2) {
       const y = (e.touches[0].clientY + e.touches[1].clientY) / 2;
       g.moved += Math.abs(y - g.y);
@@ -309,9 +331,9 @@ function touch() {
       g.y = y;
       // Un cran de molette tous les 24 pixels ; le contenu suit les doigts.
       while (Math.abs(g.acc) >= 24) {
-        const s = Math.sign(g.acc);
-        rds.mouseWheel({ deltaY: -s * 120, deltaX: 0, deltaMode: 0 });
-        g.acc -= s * 24;
+        const sign = Math.sign(g.acc);
+        inputs([DEV.wheelRotations(true, sign * 120, 0)]);
+        g.acc -= sign * 24;
       }
     }
   }, { passive: false });
@@ -323,7 +345,7 @@ function touch() {
       if (g.dragging) button(0, false);
       else if (!g.done) click(0);
     } else if (g.moved < SLOP && Date.now() - g.start < 400) {
-      rds.updateMousePosition(g.p);
+      move(g.p);
       click(2);
     }
     g = null;
@@ -333,35 +355,43 @@ function touch() {
     if (g?.dragging) button(0, false);
     g = null;
   });
-  keyboard(rds);
+  keyboard();
 }
 
+// Codes de touches (scancodes) des touches de la barre et des raccourcis.
+const SCAN = {
+  Escape: 0x01, Tab: 0x0f, Enter: 0x1c, Backspace: 0x0e, Space: 0x39,
+  ControlLeft: 0x1d, AltLeft: 0x38, ShiftLeft: 0x2a, MetaLeft: 0xe05b,
+  ArrowUp: 0xe048, ArrowDown: 0xe050, ArrowLeft: 0xe04b, ArrowRight: 0xe04d,
+  Delete: 0xe053, Home: 0xe047, End: 0xe04f, PageUp: 0xe049, PageDown: 0xe051, Semicolon: 0x27,
+};
+'qwertyuiop'.split('').forEach((c, i) => { SCAN[`Key${c.toUpperCase()}`] = 0x10 + i; });
+'asdfghjkl'.split('').forEach((c, i) => { SCAN[`Key${c.toUpperCase()}`] = 0x1e + i; });
+'zxcvbnm'.split('').forEach((c, i) => { SCAN[`Key${c.toUpperCase()}`] = 0x2c + i; });
+'1234567890'.split('').forEach((c, i) => { SCAN[`Digit${c}`] = 0x02 + i; });
 // Raccourcis (Ctrl, Alt, Win + lettre) : code de la touche selon la disposition du clavier
 // Windows, choisie dans la barre (AZERTY par défaut en français).
 const AZERTY = { a: 'KeyQ', q: 'KeyA', z: 'KeyW', w: 'KeyZ', m: 'Semicolon' };
 const SPECIAL = new Set(['Enter', 'Backspace', 'Tab', 'Escape', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Delete', 'Home', 'End', 'PageUp', 'PageDown']);
-const MODS = { ctrl: ['ControlLeft', 'Control'], alt: ['AltLeft', 'Alt'], win: ['MetaLeft', 'Meta'] };
-function keyboard(rds) {
-  const send = (type, code, key) => rds.sendKeyboardEvent(new KeyboardEvent(type, { code, key }));
-  const tap = (code, key) => { send('keydown', code, key); send('keyup', code, key); };
+const MODS = { ctrl: 'ControlLeft', alt: 'AltLeft', win: 'MetaLeft' };
+function keyboard() {
+  const tap = (code) => inputs([DEV.keyPressed(SCAN[code]), DEV.keyReleased(SCAN[code])]);
   const withMods = (mods, fn) => {
-    const list = [...mods].filter((m) => MODS[m]);
-    for (const m of list) send('keydown', ...MODS[m]);
+    const list = [...mods].filter((m) => MODS[m]).map((m) => SCAN[MODS[m]]);
+    inputs(list.map((c) => DEV.keyPressed(c)));
     fn();
-    for (const m of list.reverse()) send('keyup', ...MODS[m]);
+    inputs(list.reverse().map((c) => DEV.keyReleased(c)));
   };
   let layout = FR ? 'azerty' : 'qwerty';
   try { layout = localStorage.getItem('clavier-windows') || layout; } catch {}
   const text = (ch, mods) => {
-    if (ch === '\n') { withMods(mods, () => tap('Enter', 'Enter')); return; }
+    if (ch === '\n') { withMods(mods, () => tap('Enter')); return; }
     if (mods.size) {
       const c = ch.toLowerCase();
       const code = /^[a-z]$/.test(c) ? (layout === 'azerty' && AZERTY[c]) || `Key${c.toUpperCase()}` : /^[0-9]$/.test(c) ? `Digit${c}` : c === ' ' ? 'Space' : null;
-      if (code) { withMods(mods, () => tap(code, ch)); return; }
+      if (code) { withMods(mods, () => tap(code)); return; }
     }
-    rds.setKeyboardUnicodeMode(true);
-    tap('', ch);
-    rds.setKeyboardUnicodeMode(false);
+    inputs([DEV.unicodePressed(ch), DEV.unicodeReleased(ch)]);
   };
 
   const input = document.createElement('textarea');
@@ -369,7 +399,7 @@ function keyboard(rds) {
   for (const [k, v] of Object.entries({ autocapitalize: 'off', autocomplete: 'off', autocorrect: 'off', spellcheck: 'false', 'aria-label': T('Keyboard input', 'Saisie au clavier') })) input.setAttribute(k, v);
   document.body.append(input);
 
-  const KEY = { esc: ['Escape', 'Escape'], tab: ['Tab', 'Tab'], left: ['ArrowLeft', 'ArrowLeft'], up: ['ArrowUp', 'ArrowUp'], down: ['ArrowDown', 'ArrowDown'], right: ['ArrowRight', 'ArrowRight'], del: ['Delete', 'Delete'], home: ['Home', 'Home'], end: ['End', 'End'], pgup: ['PageUp', 'PageUp'], pgdn: ['PageDown', 'PageDown'] };
+  const KEY = { esc: 'Escape', tab: 'Tab', left: 'ArrowLeft', up: 'ArrowUp', down: 'ArrowDown', right: 'ArrowRight', del: 'Delete', home: 'Home', end: 'End', pgup: 'PageUp', pgdn: 'PageDown' };
   const layoutLabel = () => (layout === 'azerty' ? 'AZERTY' : 'QWERTY');
   const bar = PortuniaClavier.bar([
     { id: 'esc', label: 'Esc' }, { id: 'tab', label: 'Tab' },
@@ -386,8 +416,8 @@ function keyboard(rds) {
       bar.el.querySelector('[data-layout]').textContent = layoutLabel();
       return;
     }
-    if (id === 'start') { withMods(mods, () => tap('MetaLeft', 'Meta')); return; }
-    withMods(mods, () => tap(...KEY[id]));
+    if (id === 'start') { withMods(mods, () => tap('MetaLeft')); return; }
+    withMods(mods, () => tap(KEY[id]));
   });
   bar.el.classList.add('floating');
   bar.el.lastChild.dataset.layout = '';
@@ -418,7 +448,7 @@ function keyboard(rds) {
     } else if (e.inputType === 'insertLineBreak' || e.inputType === 'insertParagraph') {
       text('\n', bar.take());
     } else if (e.inputType === 'deleteContentBackward') {
-      withMods(bar.take(), () => tap('Backspace', 'Backspace'));
+      withMods(bar.take(), () => tap('Backspace'));
     }
     input.value = '';
   });
@@ -426,7 +456,7 @@ function keyboard(rds) {
   input.addEventListener('keydown', (e) => {
     if (e.keyCode === 229 || !SPECIAL.has(e.key)) return;
     e.preventDefault();
-    withMods(bar.take(), () => tap(e.key, e.key));
+    withMods(bar.take(), () => tap(e.key));
   });
 
   const kb = document.getElementById('clavier');
