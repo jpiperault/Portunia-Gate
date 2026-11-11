@@ -671,7 +671,7 @@ fn build_router(portal: Portal) -> Router {
         .route("/", get(page_index))
         .route(PING_PATH, get(ping))
         .route("/session/{nom}", get(page_session))
-        .route("/static/{fichier}", get(asset))
+        .route("/static/{fichier}", any(static_file))
         .route("/api/etat", get(status))
         .route("/api/connexion", post(login))
         .route("/api/deconnexion", post(logout))
@@ -855,6 +855,22 @@ async fn page_index(st: Ctx, peer: ConnectInfo<SocketAddr>, req: axum::extract::
     page(INDEX)
 }
 
+#[cfg(test)]
+mod static_tests {
+    use super::*;
+
+    #[test]
+    fn statique_du_portail_ou_de_l_interface() {
+        let v = concat!("v=", env!("CARGO_PKG_VERSION"));
+        let mut h = HeaderMap::new();
+        assert!(own_static(None, &h));
+        h.insert(header::COOKIE, HeaderValue::from_static("portunia_gate_web=hangar"));
+        assert!(own_static(Some(v), &h));
+        assert!(!own_static(None, &h));
+        assert!(!own_static(Some("v=0.1.0"), &h));
+    }
+}
+
 fn web_root_request(query: Option<&str>, headers: &HeaderMap) -> bool {
     if query.is_some_and(|q| q.split('&').any(|p| p == "accueil")) || crate::webproxy::cookie(headers, crate::webproxy::APP_COOKIE).is_none() {
         return false;
@@ -930,7 +946,25 @@ async fn gzipped(name: &'static str, body: &'static [u8]) -> Option<&'static [u8
     Some(z)
 }
 
-async fn asset(Path(fichier): Path<String>, headers: HeaderMap) -> Response {
+/// `/static/…` : ressources du portail, toujours demandées avec `?v=<version>` par ses pages.
+/// Sans cette version, et quand une interface web est ouverte dans ce navigateur, le chemin est
+/// celui de l'interface (beaucoup d'applications rangent leurs styles et scripts sous /static/).
+async fn static_file(st: Ctx, peer: ConnectInfo<SocketAddr>, Path(fichier): Path<String>, req: axum::extract::Request) -> Response {
+    if !own_static(req.uri().query(), req.headers()) {
+        return web_fallback(st, peer, req).await;
+    }
+    if req.method() != axum::http::Method::GET && req.method() != axum::http::Method::HEAD {
+        return StatusCode::METHOD_NOT_ALLOWED.into_response();
+    }
+    asset(fichier, req.headers().clone()).await
+}
+
+fn own_static(query: Option<&str>, headers: &HeaderMap) -> bool {
+    let own = query.is_some_and(|q| q.split('&').any(|p| p == concat!("v=", env!("CARGO_PKG_VERSION"))));
+    own || crate::webproxy::cookie(headers, crate::webproxy::APP_COOKIE).is_none()
+}
+
+async fn asset(fichier: String, headers: HeaderMap) -> Response {
     let (kind, body): (&str, &'static [u8]) = match fichier.as_str() {
         "app.css" => ("text/css; charset=utf-8", include_bytes!("../portail/app.css")),
         "app.js" => ("text/javascript; charset=utf-8", include_bytes!("../portail/app.js")),
