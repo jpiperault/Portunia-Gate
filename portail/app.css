@@ -72,6 +72,18 @@ input.code { letter-spacing: .3em; font-family: var(--mono); }
 .notice { position: fixed; right: max(16px, env(safe-area-inset-right, 0px)); bottom: max(16px, env(safe-area-inset-bottom, 0px)); max-width: 340px; background: var(--card); color: var(--text); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; box-shadow: 0 10px 30px rgb(0 0 0 / .35); z-index: 5; }
 .notice-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 
+/* Écran tactile : barre de touches (terminal, Bureau à distance) */
+.keys { display: flex; gap: 6px; padding: 6px 8px calc(6px + env(safe-area-inset-bottom, 0px)); background: var(--card); border-top: 1px solid var(--line); overflow-x: auto; flex: none; scrollbar-width: none; touch-action: pan-x; }
+.keys::-webkit-scrollbar { display: none; }
+.key { flex: none; min-width: 40px; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--text); font-size: 13px; font-weight: 600; touch-action: manipulation; user-select: none; -webkit-user-select: none; }
+.key.mod.on, .btn.on { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.keys.floating { position: fixed; left: 0; right: 0; bottom: 0; z-index: 6; }
+.saisie { position: fixed; left: 0; bottom: 0; width: 2px; height: 2px; opacity: 0; border: 0; padding: 0; resize: none; font-size: 16px; }
+@media (max-width: 640px) {
+  .sbar { padding: 6px 8px; gap: 6px; }
+  .sbar .btn { padding: 6px 9px; }
+}
+
 /* Bureau à distance */
 .desktop { flex: 1; min-height: 0; display: grid; place-items: center; padding: 16px; background: #0b0d12; overflow: hidden; }
 .desktop iron-remote-desktop { display: block; width: 100%; height: 100%; }

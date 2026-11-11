@@ -105,6 +105,7 @@ async function open(user, password, domain) {
   document.getElementById('cad').disabled = false;
   document.getElementById('plein').disabled = false;
   followSize();
+  if (window.PortuniaClavier?.tactile) touch();
   const end = await session.run();
   sizeWatch?.disconnect();
   showNotice(T('Session closed', 'Session fermée'), end?.reason?.() || T('The Remote Desktop session has ended.', 'La session Bureau à distance est terminée.'), [[T('Reopen', 'Rouvrir'), () => location.reload(), true], [T('My servers', 'Mes serveurs'), () => { location.href = '/?accueil'; }]]);
@@ -239,7 +240,7 @@ function desktopSize() {
   };
 }
 function applySize() {
-  if (!ui || !element) return;
+  if (!ui || !element || typing) return;
   const { width, height } = desktopSize();
   const key = `${width}x${height}`;
   if (key === lastSize) return;
@@ -254,6 +255,196 @@ function followSize() {
   sizeWatch.observe(screen);
   document.addEventListener('fullscreenchange', () => { fullLabel(); later(); });
   window.addEventListener('resize', later);
+}
+
+// ---------- Écran tactile ----------
+// Un appui = clic gauche ; appui long = clic droit ; glisser = glisser (bouton gauche
+// enfoncé) ; deux doigts qui glissent = molette ; appui à deux doigts = clic droit.
+// « Clavier » ouvre le clavier du téléphone : le texte part en Unicode (il ne dépend pas de la
+// disposition du clavier Windows), les touches spéciales et les raccourcis en codes de touches.
+let typing = false;
+const LONG_PRESS = 550;
+const SLOP = 10;
+function touch() {
+  const rds = ui.remoteDesktopService;
+  const canvas = element.shadowRoot?.querySelector('canvas');
+  if (!rds || !canvas) return;
+  element.style.touchAction = 'none';
+  const point = (t) => {
+    const r = canvas.getBoundingClientRect();
+    return { x: Math.round((t.clientX - r.left) * canvas.width / r.width), y: Math.round((t.clientY - r.top) * canvas.height / r.height) };
+  };
+  const button = (b, down) => rds.mouseButtonState({ button: b, preventDefault() {} }, down, false);
+  const click = (b) => { button(b, true); button(b, false); };
+  let g = null;
+  element.addEventListener('touchstart', (e) => {
+    e.preventDefault();
+    if (e.touches.length === 1) {
+      const t = e.touches[0];
+      g = { kind: 'one', x: t.clientX, y: t.clientY, dragging: false, done: false };
+      rds.updateMousePosition(point(t));
+      g.timer = setTimeout(() => {
+        if (g?.kind === 'one' && !g.dragging) { click(2); g.done = true; navigator.vibrate?.(15); }
+      }, LONG_PRESS);
+    } else if (e.touches.length === 2) {
+      clearTimeout(g?.timer);
+      if (g?.dragging) button(0, false);
+      g = { kind: 'two', y: (e.touches[0].clientY + e.touches[1].clientY) / 2, start: Date.now(), moved: 0, acc: 0, p: point(e.touches[0]) };
+    }
+  }, { passive: false });
+  element.addEventListener('touchmove', (e) => {
+    e.preventDefault();
+    if (g?.kind === 'one' && e.touches.length === 1 && !g.done) {
+      const t = e.touches[0];
+      if (!g.dragging && Math.hypot(t.clientX - g.x, t.clientY - g.y) > SLOP) {
+        clearTimeout(g.timer);
+        g.dragging = true;
+        button(0, true);
+      }
+      if (g.dragging) rds.updateMousePosition(point(t));
+    } else if (g?.kind === 'two' && e.touches.length === 2) {
+      const y = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+      g.moved += Math.abs(y - g.y);
+      g.acc += y - g.y;
+      g.y = y;
+      // Un cran de molette tous les 24 pixels ; le contenu suit les doigts.
+      while (Math.abs(g.acc) >= 24) {
+        const s = Math.sign(g.acc);
+        rds.mouseWheel({ deltaY: -s * 120, deltaX: 0, deltaMode: 0 });
+        g.acc -= s * 24;
+      }
+    }
+  }, { passive: false });
+  element.addEventListener('touchend', (e) => {
+    e.preventDefault();
+    if (!g || e.touches.length) return;
+    if (g.kind === 'one') {
+      clearTimeout(g.timer);
+      if (g.dragging) button(0, false);
+      else if (!g.done) click(0);
+    } else if (g.moved < SLOP && Date.now() - g.start < 400) {
+      rds.updateMousePosition(g.p);
+      click(2);
+    }
+    g = null;
+  }, { passive: false });
+  element.addEventListener('touchcancel', () => {
+    clearTimeout(g?.timer);
+    if (g?.dragging) button(0, false);
+    g = null;
+  });
+  keyboard(rds);
+}
+
+// Raccourcis (Ctrl, Alt, Win + lettre) : code de la touche selon la disposition du clavier
+// Windows, choisie dans la barre (AZERTY par défaut en français).
+const AZERTY = { a: 'KeyQ', q: 'KeyA', z: 'KeyW', w: 'KeyZ', m: 'Semicolon' };
+const SPECIAL = new Set(['Enter', 'Backspace', 'Tab', 'Escape', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Delete', 'Home', 'End', 'PageUp', 'PageDown']);
+const MODS = { ctrl: ['ControlLeft', 'Control'], alt: ['AltLeft', 'Alt'], win: ['MetaLeft', 'Meta'] };
+function keyboard(rds) {
+  const send = (type, code, key) => rds.sendKeyboardEvent(new KeyboardEvent(type, { code, key }));
+  const tap = (code, key) => { send('keydown', code, key); send('keyup', code, key); };
+  const withMods = (mods, fn) => {
+    const list = [...mods].filter((m) => MODS[m]);
+    for (const m of list) send('keydown', ...MODS[m]);
+    fn();
+    for (const m of list.reverse()) send('keyup', ...MODS[m]);
+  };
+  let layout = FR ? 'azerty' : 'qwerty';
+  try { layout = localStorage.getItem('clavier-windows') || layout; } catch {}
+  const text = (ch, mods) => {
+    if (ch === '\n') { withMods(mods, () => tap('Enter', 'Enter')); return; }
+    if (mods.size) {
+      const c = ch.toLowerCase();
+      const code = /^[a-z]$/.test(c) ? (layout === 'azerty' && AZERTY[c]) || `Key${c.toUpperCase()}` : /^[0-9]$/.test(c) ? `Digit${c}` : c === ' ' ? 'Space' : null;
+      if (code) { withMods(mods, () => tap(code, ch)); return; }
+    }
+    rds.setKeyboardUnicodeMode(true);
+    tap('', ch);
+    rds.setKeyboardUnicodeMode(false);
+  };
+
+  const input = document.createElement('textarea');
+  input.className = 'saisie';
+  for (const [k, v] of Object.entries({ autocapitalize: 'off', autocomplete: 'off', autocorrect: 'off', spellcheck: 'false', 'aria-label': T('Keyboard input', 'Saisie au clavier') })) input.setAttribute(k, v);
+  document.body.append(input);
+
+  const KEY = { esc: ['Escape', 'Escape'], tab: ['Tab', 'Tab'], left: ['ArrowLeft', 'ArrowLeft'], up: ['ArrowUp', 'ArrowUp'], down: ['ArrowDown', 'ArrowDown'], right: ['ArrowRight', 'ArrowRight'], del: ['Delete', 'Delete'], home: ['Home', 'Home'], end: ['End', 'End'], pgup: ['PageUp', 'PageUp'], pgdn: ['PageDown', 'PageDown'] };
+  const layoutLabel = () => (layout === 'azerty' ? 'AZERTY' : 'QWERTY');
+  const bar = PortuniaClavier.bar([
+    { id: 'esc', label: 'Esc' }, { id: 'tab', label: 'Tab' },
+    { id: 'ctrl', label: 'Ctrl', sticky: true }, { id: 'alt', label: 'Alt', sticky: true }, { id: 'win', label: 'Win', sticky: true },
+    { id: 'left', label: '←' }, { id: 'up', label: '↑' }, { id: 'down', label: '↓' }, { id: 'right', label: '→' },
+    { id: 'del', label: T('Del', 'Suppr') }, { id: 'home', label: T('Home', 'Début') }, { id: 'end', label: T('End', 'Fin') },
+    { id: 'pgup', label: T('PgUp', 'Pg↑') }, { id: 'pgdn', label: T('PgDn', 'Pg↓') },
+    { id: 'start', label: T('Start', 'Démarrer'), title: T('Windows key', 'Touche Windows') },
+    { id: 'layout', label: layoutLabel(), title: T('Layout of the Windows keyboard, for shortcuts', 'Disposition du clavier Windows, pour les raccourcis') },
+  ], (id, mods) => {
+    if (id === 'layout') {
+      layout = layout === 'azerty' ? 'qwerty' : 'azerty';
+      try { localStorage.setItem('clavier-windows', layout); } catch {}
+      bar.el.querySelector('[data-layout]').textContent = layoutLabel();
+      return;
+    }
+    if (id === 'start') { withMods(mods, () => tap('MetaLeft', 'Meta')); return; }
+    withMods(mods, () => tap(...KEY[id]));
+  });
+  bar.el.classList.add('floating');
+  bar.el.lastChild.dataset.layout = '';
+  bar.el.hidden = true;
+  document.body.append(bar.el);
+
+  // Barre juste au-dessus du clavier du téléphone.
+  const place = () => {
+    const vv = window.visualViewport;
+    bar.el.style.bottom = vv ? `${Math.max(0, window.innerHeight - vv.height - vv.offsetTop)}px` : '0px';
+  };
+  window.visualViewport?.addEventListener('resize', place);
+  window.visualViewport?.addEventListener('scroll', place);
+
+  let composing = false;
+  input.addEventListener('compositionstart', () => { composing = true; });
+  input.addEventListener('compositionend', (e) => {
+    composing = false;
+    const mods = bar.take();
+    for (const ch of e.data || '') text(ch, mods);
+    input.value = '';
+  });
+  input.addEventListener('input', (e) => {
+    if (composing || e.isComposing) return;
+    if (e.inputType === 'insertText' || e.inputType === 'insertReplacementText' || e.inputType === 'insertFromPaste') {
+      const mods = bar.take();
+      for (const ch of e.data || '') text(ch, mods);
+    } else if (e.inputType === 'insertLineBreak' || e.inputType === 'insertParagraph') {
+      text('\n', bar.take());
+    } else if (e.inputType === 'deleteContentBackward') {
+      withMods(bar.take(), () => tap('Backspace', 'Backspace'));
+    }
+    input.value = '';
+  });
+  // Touches sans texte : Entrée, Retour arrière (champ vide), flèches d'un clavier branché…
+  input.addEventListener('keydown', (e) => {
+    if (e.keyCode === 229 || !SPECIAL.has(e.key)) return;
+    e.preventDefault();
+    withMods(bar.take(), () => tap(e.key, e.key));
+  });
+
+  const kb = document.getElementById('clavier');
+  kb.hidden = false;
+  kb.addEventListener('pointerdown', (e) => e.preventDefault());
+  kb.addEventListener('mousedown', (e) => e.preventDefault());
+  kb.addEventListener('click', () => {
+    if (typing) input.blur();
+    else input.focus({ preventScroll: true });
+  });
+  input.addEventListener('focus', () => { typing = true; bar.el.hidden = false; kb.classList.add('on'); place(); });
+  input.addEventListener('blur', () => {
+    typing = false;
+    bar.take();
+    bar.el.hidden = true;
+    kb.classList.remove('on');
+    setTimeout(applySize, 300);
+  });
 }
 
 // Plein écran de toute la zone d'affichage (Échap ou le même bouton pour en sortir).

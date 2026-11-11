@@ -78,7 +78,53 @@ function connect() {
   term.focus();
 }
 
-term.onData((d) => send({ t: 'in', d }));
+// Écran tactile : barre de touches sous le terminal ; Ctrl et Alt s'appliquent à la touche
+// suivante, tapée au clavier du téléphone ou dans la barre.
+let keybar = null;
+function ctrl(c) {
+  if (c === ' ' || c === '@') return '\x00';
+  if (c === '?') return '\x7f';
+  const code = c.toUpperCase().charCodeAt(0);
+  return code >= 64 && code <= 95 ? String.fromCharCode(code - 64) : c;
+}
+function withMods(d, mods) {
+  if (mods.has('ctrl') && d.length === 1) d = ctrl(d);
+  if (mods.has('alt')) d = `\x1b${d}`;
+  return d;
+}
+const FONT_KEY = 'taille-terminal';
+function fontSize(delta) {
+  const size = Math.min(24, Math.max(8, term.options.fontSize + delta));
+  term.options.fontSize = size;
+  try { localStorage.setItem(FONT_KEY, String(size)); } catch {}
+  fit.fit();
+  send({ t: 'taille', c: term.cols, r: term.rows });
+}
+if (window.PortuniaClavier?.tactile) {
+  try { const s = Number(localStorage.getItem(FONT_KEY)); if (s >= 8 && s <= 24) { term.options.fontSize = s; fit.fit(); } } catch {}
+  const app = () => term.modes.applicationCursorKeysMode;
+  const SEQ = {
+    esc: '\x1b', tab: '\t', '|': '|', '~': '~', '/': '/', '-': '-',
+    up: () => (app() ? '\x1bOA' : '\x1b[A'), down: () => (app() ? '\x1bOB' : '\x1b[B'),
+    right: () => (app() ? '\x1bOC' : '\x1b[C'), left: () => (app() ? '\x1bOD' : '\x1b[D'),
+    home: () => (app() ? '\x1bOH' : '\x1b[H'), end: () => (app() ? '\x1bOF' : '\x1b[F'),
+    pgup: '\x1b[5~', pgdn: '\x1b[6~',
+  };
+  keybar = PortuniaClavier.bar([
+    { id: 'esc', label: 'Esc' }, { id: 'ctrl', label: 'Ctrl', sticky: true }, { id: 'alt', label: 'Alt', sticky: true },
+    { id: 'tab', label: 'Tab' }, { id: 'left', label: '←' }, { id: 'up', label: '↑' }, { id: 'down', label: '↓' }, { id: 'right', label: '→' },
+    { id: '|', label: '|' }, { id: '~', label: '~' }, { id: '/', label: '/' }, { id: '-', label: '-' },
+    { id: 'home', label: T('Home', 'Début') }, { id: 'end', label: T('End', 'Fin') }, { id: 'pgup', label: T('PgUp', 'Pg↑') }, { id: 'pgdn', label: T('PgDn', 'Pg↓') },
+    { id: 'small', label: 'A−', title: T('Smaller text', 'Texte plus petit') }, { id: 'big', label: 'A+', title: T('Larger text', 'Texte plus grand') },
+  ], (id, mods) => {
+    if (id === 'small' || id === 'big') { fontSize(id === 'big' ? 1 : -1); return; }
+    const seq = SEQ[id];
+    send({ t: 'in', d: withMods(typeof seq === 'function' ? seq() : seq, mods) });
+    term.focus();
+  });
+  document.getElementById('term').after(keybar.el);
+}
+term.onData((d) => send({ t: 'in', d: keybar?.armed() ? withMods(d, keybar.take()) : d }));
 let resizeTimer = 0;
 window.addEventListener('resize', () => {
   clearTimeout(resizeTimer);

@@ -931,6 +931,7 @@ async fn asset(Path(fichier): Path<String>, headers: HeaderMap) -> Response {
         "app.js" => ("text/javascript; charset=utf-8", include_bytes!("../portail/app.js")),
         "session.js" => ("text/javascript; charset=utf-8", include_bytes!("../portail/session.js")),
         "assistance.js" => ("text/javascript; charset=utf-8", include_bytes!("../portail/assistance.js")),
+        "clavier.js" => ("text/javascript; charset=utf-8", include_bytes!("../portail/clavier.js")),
         "xterm.js" => ("text/javascript; charset=utf-8", include_bytes!("../portail/xterm.js")),
         "xterm.css" => ("text/css; charset=utf-8", include_bytes!("../portail/xterm.css")),
         "addon-fit.js" => ("text/javascript; charset=utf-8", include_bytes!("../portail/addon-fit.js")),

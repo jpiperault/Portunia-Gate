@@ -276,6 +276,8 @@ Since 0.35, each account has a **web session** per server, listed with the other
 
 A web page to open your servers from any browser, without Portunia: sign-in, list of allowed servers, SSH terminal or Remote Desktop in a tab. It is not used for administration. SSH goes through the Gate's own SSH server with a one-time token: same rules, same vault, same recording, same log. Remote Desktop goes through the Gate's RDCleanPath gateway (every mode, see [Remote Desktop](#remote-desktop-rdp)). A web session is replayed in the audit like any other; its address is followed by "(web)".
 
+**Phone and tablet (0.46).** On a touch screen, the terminal has a key bar below it: Esc, Tab, arrows, Home, End, PgUp, PgDn, a few symbols, A− and A+ for the text size; Ctrl and Alt apply to the next key (Ctrl then c sends Ctrl+C). Remote Desktop works with the fingers: tap to click, long press or two-finger tap for a right click, drag to move with the button held, two fingers to scroll. The **Keyboard** button opens the phone's keyboard: text is sent as Unicode, whatever the layout of the Windows keyboard; a bar adds Esc, Tab, Ctrl, Alt, Win, arrows, Del, Home, End and the Windows key. For shortcuts (Ctrl+C, Win+R…), the bar sets the layout of the Windows keyboard (AZERTY or QWERTY, remembered by the browser). The **Portunia Gate** Android app (`fr.portunia.gate`, shipped with Portunia 0.91) opens the same portal: address remembered, screen kept on during a session, full screen, links to other sites opened in the browser. Nothing to set on the Gate.
+
 **Security**
 
 | | |
