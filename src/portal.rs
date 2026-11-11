@@ -31,7 +31,7 @@ use axum::{
     http::{header, HeaderMap, HeaderValue, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{any, get, post},
+    routing::{any, delete, get, post},
     Json, Router,
 };
 // TCP_NODELAY sur chaque connexion : la frappe et la souris (terminal, Bureau à distance)
@@ -50,7 +50,7 @@ use tokio::sync::watch;
 use uuid::Uuid;
 
 use crate::{
-    audit, auth,
+    appareil, audit, auth,
     keys::{random, sha256_hex},
     model::{self, User},
     State,
@@ -676,6 +676,11 @@ fn build_router(portal: Portal) -> Router {
         .route("/api/connexion", post(login))
         .route("/api/deconnexion", post(logout))
         .route("/api/serveurs", get(servers))
+        // Téléphones enrôlés (application Android) : enrôlement, défi, connexion par signature.
+        .route("/api/appareils", post(device_enrol))
+        .route("/api/appareils/{id}", delete(device_remove))
+        .route("/api/appareil/defi", post(device_challenge))
+        .route("/api/appareil/connexion", post(device_login))
         .route("/ws/{nom}", get(terminal))
         .route("/bureau/{nom}", get(page_desktop))
         .route("/api/rdp/{nom}", post(desktop_ticket))
@@ -991,18 +996,22 @@ fn cookie_token(headers: &HeaderMap) -> Option<String> {
 struct WebSession {
     user: User,
     expires: DateTime<Utc>,
+    /// Connexion au portail (l'enrôlement d'un téléphone la suit de près).
+    created: DateTime<Utc>,
+    /// Téléphone enrôlé qui a ouvert la session (sinon mot de passe et code).
+    device: Option<Uuid>,
 }
 
 /// Session du navigateur : valable, pas expirée, compte actif et toujours dans le groupe.
 async fn web_session(portal: &Portal, headers: &HeaderMap, s: &Settings) -> Result<Option<WebSession>> {
     let Some(token) = cookie_token(headers) else { return Ok(None) };
     let db = &portal.state.db;
-    let row: Option<(Uuid, DateTime<Utc>, DateTime<Utc>)> =
-        sqlx::query_as("SELECT user_id, expires_at, last_seen FROM web_sessions WHERE token_hash = $1")
+    let row: Option<(Uuid, DateTime<Utc>, DateTime<Utc>, DateTime<Utc>, Option<Uuid>)> =
+        sqlx::query_as("SELECT user_id, expires_at, last_seen, created_at, appareil FROM web_sessions WHERE token_hash = $1")
             .bind(sha256_hex(token.as_bytes()))
             .fetch_optional(db)
             .await?;
-    let Some((user_id, expires, last_seen)) = row else { return Ok(None) };
+    let Some((user_id, expires, last_seen, created, device)) = row else { return Ok(None) };
     let idle = Utc::now() - last_seen > chrono::Duration::minutes(s.idle_min);
     if expires < Utc::now() || idle || !s.enabled {
         sqlx::query("DELETE FROM web_sessions WHERE token_hash = $1").bind(sha256_hex(token.as_bytes())).execute(db).await?;
@@ -1016,7 +1025,7 @@ async fn web_session(portal: &Portal, headers: &HeaderMap, s: &Settings) -> Resu
         .bind(sha256_hex(token.as_bytes()))
         .execute(db)
         .await?;
-    Ok(Some(WebSession { user, expires }))
+    Ok(Some(WebSession { user, expires, created, device }))
 }
 
 pub(crate) async fn in_group(db: &sqlx::PgPool, user: Uuid, group: &str) -> Result<bool> {
@@ -1156,18 +1165,8 @@ async fn login(AxState(portal): Ctx, axum::Extension(entry): axum::Extension<Ent
             return Ok(err(StatusCode::FORBIDDEN, t!("This account has no access to the web portal", "Ce compte n'a pas accès au portail web")));
         }
         state.limits.success(&login, &ip);
-        let token = B64URL.encode(random::<32>()?);
-        let expires = Utc::now() + chrono::Duration::hours(s.hours);
-        sqlx::query("DELETE FROM web_sessions WHERE expires_at < now()").execute(&state.db).await?;
-        sqlx::query("INSERT INTO web_sessions (token_hash, user_id, expires_at, address) VALUES ($1, $2, $3, $4)")
-            .bind(sha256_hex(token.as_bytes()))
-            .bind(user.id)
-            .bind(expires)
-            .bind(&ip)
-            .execute(&state.db)
-            .await?;
+        let (cookie, expires) = open_session(state, &s, user.id, &ip, None).await?;
         audit::note(&state.db, &user.login, "portail.connexion", json!({ "facteurs": if need_code { json!(["mot de passe", "code"]) } else { json!(["mot de passe"]) }, "adresse": ip, "entree": entry.id() })).await;
-        let cookie = format!("{COOKIE}={token}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age={}", s.hours * 3600);
         Ok::<_, anyhow::Error>(
             (
                 [(header::SET_COOKIE, cookie)],
@@ -1175,6 +1174,201 @@ async fn login(AxState(portal): Ctx, axum::Extension(entry): axum::Extension<Ent
             )
                 .into_response(),
         )
+    }
+    .await;
+    result.unwrap_or_else(internal)
+}
+
+/// Session du portail pour ce compte ; le cookie à poser et l'expiration.
+async fn open_session(state: &State, s: &Settings, user: Uuid, ip: &str, device: Option<Uuid>) -> Result<(String, DateTime<Utc>)> {
+    let token = B64URL.encode(random::<32>()?);
+    let expires = Utc::now() + chrono::Duration::hours(s.hours);
+    sqlx::query("DELETE FROM web_sessions WHERE expires_at < now()").execute(&state.db).await?;
+    sqlx::query("INSERT INTO web_sessions (token_hash, user_id, expires_at, address, appareil) VALUES ($1, $2, $3, $4, $5)")
+        .bind(sha256_hex(token.as_bytes()))
+        .bind(user)
+        .bind(expires)
+        .bind(ip)
+        .bind(device)
+        .execute(&state.db)
+        .await?;
+    Ok((format!("{COOKIE}={token}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age={}", s.hours * 3600), expires))
+}
+
+// ---------- Téléphones enrôlés (application Android) ----------
+
+#[derive(Deserialize)]
+struct EnrolBody {
+    nom: String,
+    /// Clé publique P-256 en base64 (SubjectPublicKeyInfo, comme getEncoded() d'Android).
+    cle: String,
+}
+
+fn b64_any(text: &str) -> Option<Vec<u8>> {
+    use base64::engine::general_purpose::{STANDARD, URL_SAFE};
+    let t = text.trim();
+    STANDARD.decode(t).or_else(|_| URL_SAFE.decode(t)).or_else(|_| B64URL.decode(t.trim_end_matches('='))).ok()
+}
+
+/// Enrôle ce téléphone pour le compte de la session, juste après une connexion par mot de passe
+/// et code (pas depuis une session ouverte par un téléphone).
+async fn device_enrol(AxState(portal): Ctx, axum::Extension(entry): axum::Extension<Entry>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap, Json(body): Json<EnrolBody>) -> Response {
+    let ip = client_ip(&portal, peer, &headers);
+    let result = async {
+        let state = &portal.state;
+        let s = settings(state).await?;
+        if !same_site(&headers, s.url_for(entry)) {
+            return Ok(err(StatusCode::FORBIDDEN, t!("Request refused", "Requête refusée")));
+        }
+        let Some(w) = web_session(&portal, &headers, &s).await? else {
+            return Ok(err(StatusCode::UNAUTHORIZED, t!("Session expired", "Session expirée")));
+        };
+        if w.device.is_some() || Utc::now() - w.created > chrono::Duration::minutes(appareil::ENROL_WITHIN_MIN) {
+            return Ok(err(
+                StatusCode::FORBIDDEN,
+                t!("To enrol this phone, sign in with your password and code (less than 10 minutes ago)", "Pour enrôler ce téléphone, connectez-vous avec mot de passe et code (il y a moins de 10 minutes)"),
+            ));
+        }
+        let point = match b64_any(&body.cle).ok_or_else(|| anyhow!("base64")).and_then(|k| appareil::public_point(&k)) {
+            Ok(p) => p,
+            Err(e) => return Ok(err(StatusCode::BAD_REQUEST, &e.to_string())),
+        };
+        let id = match appareil::add(&state.db, w.user.id, &body.nom, &point, &ip).await {
+            Ok(id) => id,
+            Err(e) => return Ok(err(StatusCode::BAD_REQUEST, &e.to_string())),
+        };
+        let name = appareil::get(&state.db, id).await?.map(|d| d.name).unwrap_or_default();
+        audit::note(&state.db, &w.user.login, "appareil.enrole", json!({ "appareil": name, "id": id, "adresse": ip })).await;
+        // Le titulaire et les administrateurs sont prévenus.
+        let mut to = crate::notify::group_emails(state, None).await.unwrap_or_default();
+        let own: Option<String> = sqlx::query_scalar("SELECT email FROM users WHERE id = $1 AND email <> ''").bind(w.user.id).fetch_optional(&state.db).await?;
+        to.extend(own);
+        to.sort();
+        to.dedup();
+        crate::notify::send(
+            state.clone(),
+            crate::notify::Notice {
+                event: "appareil.enrole",
+                title: t!(format!("Phone enrolled: {}", w.user.login), format!("Téléphone enrôlé : {}", w.user.login)),
+                text: t!(
+                    format!("The phone « {name} » can now sign in to the web portal as {} with a fingerprint (from {ip}). If this was not you, remove it in Portunia (Administer › Accounts) or with « portunia-gate user devices {} --remove-all ».", w.user.login, w.user.login),
+                    format!("Le téléphone « {name} » peut désormais se connecter au portail web comme {} avec une empreinte (depuis {ip}). Si ce n'est pas vous, retirez-le dans Portunia (Administrer › Comptes) ou avec « portunia-gate user devices {} --remove-all ».", w.user.login, w.user.login)
+                ),
+                detail: json!({ "compte": w.user.login, "appareil": name, "adresse": ip }),
+                to,
+            },
+        );
+        Ok::<_, anyhow::Error>(Json(json!({ "id": id, "nom": name })).into_response())
+    }
+    .await;
+    result.unwrap_or_else(internal)
+}
+
+/// Retire un téléphone du compte de la session (« Désactiver l'empreinte » dans l'application).
+async fn device_remove(AxState(portal): Ctx, axum::Extension(entry): axum::Extension<Entry>, headers: HeaderMap, Path(id): Path<Uuid>) -> Response {
+    let result = async {
+        let state = &portal.state;
+        let s = settings(state).await?;
+        if !same_site(&headers, s.url_for(entry)) {
+            return Ok::<_, anyhow::Error>(err(StatusCode::FORBIDDEN, t!("Request refused", "Requête refusée")));
+        }
+        let Some(w) = web_session(&portal, &headers, &s).await? else {
+            return Ok(err(StatusCode::UNAUTHORIZED, t!("Session expired", "Session expirée")));
+        };
+        match appareil::get(&state.db, id).await? {
+            Some(d) if d.user == w.user.id => {
+                appareil::remove(&state.db, id).await?;
+                audit::note(&state.db, &w.user.login, "appareil.retire", json!({ "appareil": d.name, "id": id, "par": w.user.login })).await;
+                Ok(Json(json!({ "etat": "ok" })).into_response())
+            }
+            _ => Ok(err(StatusCode::NOT_FOUND, t!("Unknown phone", "Téléphone inconnu"))),
+        }
+    }
+    .await;
+    result.unwrap_or_else(internal)
+}
+
+#[derive(Deserialize)]
+struct ChallengeBody {
+    appareil: Uuid,
+}
+
+/// Défi à signer par le téléphone (valable 90 secondes, une seule fois).
+async fn device_challenge(AxState(portal): Ctx, Json(body): Json<ChallengeBody>) -> Response {
+    let result = async {
+        let s = settings(&portal.state).await?;
+        if !s.enabled {
+            return Ok(err(StatusCode::SERVICE_UNAVAILABLE, t!("Portal closed", "Portail fermé")));
+        }
+        match appareil::challenge(body.appareil) {
+            Ok(c) => Ok::<_, anyhow::Error>(Json(json!({ "defi": c })).into_response()),
+            Err(e) => Ok(err(StatusCode::TOO_MANY_REQUESTS, &e.to_string())),
+        }
+    }
+    .await;
+    result.unwrap_or_else(internal)
+}
+
+#[derive(Deserialize)]
+struct DeviceLogin {
+    appareil: Uuid,
+    defi: String,
+    signature: String,
+}
+
+/// Refus de connexion par téléphone : noté, puis retour à l'accueil, que l'application reconnaît.
+async fn device_refused(portal: &Portal, login: &str, ip: &str, device: Uuid, why: &str) -> Response {
+    audit::note(&portal.state.db, login, "portail.echec", json!({ "raison": why, "adresse": ip, "appareil": device })).await;
+    (StatusCode::SEE_OTHER, [(header::LOCATION, "/?accueil&appareil=refuse")]).into_response()
+}
+
+/// Connexion par un téléphone enrôlé : défi signé par sa clé (débloquée par l'empreinte).
+/// Envoyée en formulaire par l'application (WebView.postUrl) ; le cookie de session est posé
+/// avec la redirection vers l'accueil. Pas d'en-tête de la page ici : la signature suffit.
+async fn device_login(AxState(portal): Ctx, axum::Extension(entry): axum::Extension<Entry>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap, axum::Form(body): axum::Form<DeviceLogin>) -> Response {
+    let ip = client_ip(&portal, peer, &headers);
+    let result = async {
+        let state = &portal.state;
+        let s = settings(state).await?;
+        if !s.enabled {
+            return Ok((StatusCode::SEE_OTHER, [(header::LOCATION, "/?accueil")]).into_response());
+        }
+        let key = format!("appareil:{}", body.appareil);
+        if let crate::limits::Verdict::Blocked { first } = state.limits.attempt(&key, &ip) {
+            if first {
+                audit::note(&state.db, &key, "auth.bloquee", json!({ "methode": "appareil", "adresse": ip })).await;
+            }
+            return Ok(device_refused(&portal, &key, &ip, body.appareil, "trop d'essais").await);
+        }
+        if !appareil::take(&body.defi, body.appareil) {
+            return Ok(device_refused(&portal, &key, &ip, body.appareil, "défi inconnu ou expiré").await);
+        }
+        let Some(device) = appareil::get(&state.db, body.appareil).await? else {
+            return Ok(device_refused(&portal, &key, &ip, body.appareil, "téléphone inconnu ou retiré").await);
+        };
+        let Some(user) = model::user_by_id(&state.db, device.user).await? else {
+            return Ok(device_refused(&portal, &key, &ip, body.appareil, "compte inconnu").await);
+        };
+        if device.expired() {
+            appareil::remove(&state.db, device.id).await?;
+            audit::note(&state.db, &user.login, "appareil.expire", json!({ "appareil": device.name, "id": device.id })).await;
+            return Ok(device_refused(&portal, &user.login, &ip, body.appareil, "téléphone inutilisé depuis 90 jours").await);
+        }
+        let signature = b64_any(&body.signature).unwrap_or_default();
+        if !appareil::verify(&device.key, &appareil::message(device.id, &body.defi), &signature) {
+            return Ok(device_refused(&portal, &user.login, &ip, body.appareil, "signature du téléphone incorrecte").await);
+        }
+        if user.disabled || user.must_change_password {
+            return Ok(device_refused(&portal, &user.login, &ip, body.appareil, "compte désactivé ou mot de passe provisoire").await);
+        }
+        if !in_group(&state.db, user.id, &s.group).await? {
+            return Ok(device_refused(&portal, &user.login, &ip, body.appareil, "hors du groupe du portail").await);
+        }
+        state.limits.success(&key, &ip);
+        let (cookie, _) = open_session(state, &s, user.id, &ip, Some(device.id)).await?;
+        appareil::used(&state.db, device.id, &ip).await?;
+        audit::note(&state.db, &user.login, "portail.connexion", json!({ "facteurs": ["téléphone", "empreinte"], "appareil": device.name, "adresse": ip, "entree": entry.id() })).await;
+        Ok::<_, anyhow::Error>((StatusCode::SEE_OTHER, [(header::SET_COOKIE, cookie), (header::LOCATION, "/?accueil".to_string())]).into_response())
     }
     .await;
     result.unwrap_or_else(internal)

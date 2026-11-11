@@ -106,6 +106,8 @@ function loginForm(state) {
     submit.disabled = true;
     try {
       await api('POST', '/api/connexion', { login: login.value.trim(), mot_de_passe: pass.value, code: code.value.replace(/\s/g, ''), turnstile: turnstileToken });
+      // Application Android Portunia Gate : elle peut proposer d'enrôler ce téléphone.
+      try { window.PortuniaGateApp?.connecte(); } catch { /* application ancienne */ }
       start();
     } catch (err) {
       error.textContent = err.message;

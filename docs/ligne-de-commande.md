@@ -61,6 +61,7 @@ sudo portunia-gate user passwd marc                       # fixe le mot de passe
 sudo portunia-gate user reset-password marc               # nouveau mot de passe provisoire, affiché une fois
 sudo portunia-gate user reset-code marc                   # efface le code : un nouveau s'enrôle à la prochaine connexion
 sudo portunia-gate user rdp-password marc                 # mot de passe RDP pour mstsc sans Portunia (affiché une fois ; --remove le retire)
+sudo portunia-gate user devices marc                      # téléphones enrôlés pour la connexion par empreinte (app Android) ; --remove ID, --remove-all
 sudo portunia-gate user disable marc                      # --undo réactive
 sudo portunia-gate user delete marc                       # les sessions passées restent au journal
 ```

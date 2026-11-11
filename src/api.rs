@@ -92,6 +92,8 @@ pub async fn run(state: Arc<State>) -> anyhow::Result<()> {
         .route("/api/v1/admin/comptes/{id}/reinitialiser-code", post(admin_user_reset_totp))
         .route("/api/v1/admin/comptes/{id}/mot-de-passe-provisoire", post(admin_user_temp_password))
         .route("/api/v1/admin/comptes/{id}/cles", post(admin_user_add_key))
+        .route("/api/v1/admin/comptes/{id}/appareils", get(admin_user_devices).delete(admin_user_devices_remove))
+        .route("/api/v1/admin/appareils/{id}", axum::routing::delete(admin_device_remove))
         .route("/api/v1/admin/groupes", get(admin_groups).post(admin_group_create))
         .route("/api/v1/admin/groupes/{id}", delete(admin_group_delete))
         .route("/api/v1/admin/regles", get(admin_rules).post(admin_rule_create))
@@ -847,6 +849,7 @@ struct UserRow {
     groups: Vec<String>,
     keys: i64,
     email: String,
+    devices: i64,
 }
 
 async fn admin_users(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
@@ -854,7 +857,8 @@ async fn admin_users(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
     let rows: Vec<UserRow> = sqlx::query_as(
         "SELECT u.id, u.login, u.role, u.auth_policy, u.disabled, u.totp_secret IS NOT NULL AS enrolled, u.must_change_password, u.email,
                 COALESCE(array_agg(g.name ORDER BY g.name) FILTER (WHERE g.name IS NOT NULL), '{}') AS groups,
-                (SELECT count(*) FROM user_keys k WHERE k.user_id = u.id) AS keys
+                (SELECT count(*) FROM user_keys k WHERE k.user_id = u.id) AS keys,
+                (SELECT count(*) FROM appareils a WHERE a.user_id = u.id) AS devices
          FROM users u LEFT JOIN group_members m ON m.user_id = u.id LEFT JOIN groups g ON g.id = m.group_id
          GROUP BY u.id ORDER BY u.login",
     )
@@ -866,6 +870,7 @@ async fn admin_users(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
             json!({
                 "id": u.id, "login": u.login, "role": u.role, "politique": u.auth_policy, "desactive": u.disabled,
                 "code_enrole": u.enrolled, "mot_de_passe_provisoire": u.must_change_password, "groupes": u.groups, "cles": u.keys, "email": u.email,
+                "appareils": u.devices,
             })
         })
         .collect();
@@ -1008,6 +1013,36 @@ async fn admin_user_delete(AxState(api): Ctx, headers: HeaderMap, Path(id): Path
     sqlx::query("DELETE FROM users WHERE id = $1").bind(id).execute(db).await?;
     api.state.live.recheck();
     audit::note(db, &actor.login, "compte.supprime", json!({ "compte": user.login })).await;
+    Ok(Json(json!({ "etat": "ok" })))
+}
+
+/// Téléphones enrôlés d'un compte (application Android Portunia Gate).
+async fn admin_user_devices(AxState(api): Ctx, headers: HeaderMap, Path(id): Path<Uuid>) -> ApiResult {
+    admin(&api, &headers).await?;
+    Ok(Json(json!({ "appareils": crate::appareil::list(&api.state.db, id).await? })))
+}
+
+/// Retire tous les téléphones d'un compte.
+async fn admin_user_devices_remove(AxState(api): Ctx, headers: HeaderMap, Path(id): Path<Uuid>) -> ApiResult {
+    let actor = admin(&api, &headers).await?;
+    let db = &api.state.db;
+    let user = model::user_by_id(db, id)
+        .await?
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, t!("Unknown account", "Compte inconnu")))?;
+    let n = crate::appareil::remove_all(db, id).await?;
+    audit::note(db, &actor.login, "appareil.retire", json!({ "compte": user.login, "tous": true, "nombre": n })).await;
+    Ok(Json(json!({ "etat": "ok", "retires": n })))
+}
+
+/// Retire un téléphone (ses sessions du portail se ferment).
+async fn admin_device_remove(AxState(api): Ctx, headers: HeaderMap, Path(id): Path<Uuid>) -> ApiResult {
+    let actor = admin(&api, &headers).await?;
+    let db = &api.state.db;
+    let (user, name) = crate::appareil::remove(db, id)
+        .await?
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, t!("Unknown phone", "Téléphone inconnu")))?;
+    let login = model::user_by_id(db, user).await?.map(|u| u.login).unwrap_or_default();
+    audit::note(db, &actor.login, "appareil.retire", json!({ "compte": login, "appareil": name, "id": id })).await;
     Ok(Json(json!({ "etat": "ok" })))
 }
 

@@ -105,11 +105,14 @@ impl User {
 const USER_COLUMNS: &str =
     "id, login, display_name, role, password_hash, totp_secret, totp_last_step, auth_policy, disabled, must_change_password, totp_pending";
 
-/// Ferme les connexions ouvertes du compte : jetons de Portunia et sessions du portail.
+/// Ferme les connexions ouvertes du compte : jetons de Portunia, sessions du portail et
+/// téléphones enrôlés.
 /// Après un mot de passe ou un code réinitialisé, ou un compte désactivé.
 pub async fn revoke_logins(db: &PgPool, user: Uuid) -> Result<()> {
     sqlx::query("DELETE FROM api_sessions WHERE user_id = $1").bind(user).execute(db).await?;
     sqlx::query("DELETE FROM web_sessions WHERE user_id = $1").bind(user).execute(db).await?;
+    // Téléphones enrôlés : à refaire après une connexion par mot de passe et code.
+    sqlx::query("DELETE FROM appareils WHERE user_id = $1").bind(user).execute(db).await?;
     Ok(())
 }
 

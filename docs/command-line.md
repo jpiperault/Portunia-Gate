@@ -61,6 +61,7 @@ sudo portunia-gate user passwd marc                       # sets the password (n
 sudo portunia-gate user reset-password marc               # new temporary password, shown once
 sudo portunia-gate user reset-code marc                   # erases the code: a new one is enrolled at the next sign-in
 sudo portunia-gate user rdp-password marc                 # RDP password for mstsc without Portunia (shown once; --remove takes it away)
+sudo portunia-gate user devices marc                      # phones enrolled for fingerprint sign-in (Android app); --remove ID, --remove-all
 sudo portunia-gate user disable marc                      # --undo re-enables
 sudo portunia-gate user delete marc                       # past sessions stay in the log
 ```

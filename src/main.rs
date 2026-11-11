@@ -34,6 +34,7 @@ mod tls;
 mod tunnel;
 mod webproxy;
 mod approval;
+mod appareil;
 mod notify;
 mod status;
 mod update;
@@ -436,6 +437,16 @@ enum UserCmd {
     },
     /// E-mail address of the account (approval and alert notifications); empty to remove it.
     Email { login: String, address: String },
+    /// Phones enrolled for the web portal (Android app, fingerprint sign-in): lists them, or removes one (--remove ID) or all (--remove-all).
+    Devices {
+        login: String,
+        /// Identifier of the phone to remove (first characters are enough).
+        #[arg(long)]
+        remove: Option<String>,
+        /// Removes every phone of the account.
+        #[arg(long, conflicts_with = "remove")]
+        remove_all: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2002,6 +2013,43 @@ async fn user_cmd(state: &State, cmd: UserCmd) -> Result<()> {
                         "In mstsc: Computer = the Gate's address and native RDP port; User = login%server (or login%server%code). Native RDP must be on (« portunia-gate rdp on »).",
                         "Dans mstsc : Ordinateur = adresse de la Gate et port du RDP natif ; Utilisateur = compte%serveur (ou compte%serveur%code). Le RDP natif doit être ouvert (« portunia-gate rdp on »)."
                     )
+                );
+            }
+        }
+        UserCmd::Devices { login, remove, remove_all } => {
+            let user = find(login).await?;
+            if remove_all {
+                let n = appareil::remove_all(db, user.id).await?;
+                audit::log(db, "console", "appareil.retire", json!({ "compte": user.login, "tous": true, "nombre": n })).await?;
+                println!("{}", t!(format!("{n} phone(s) removed."), format!("{n} téléphone(s) retiré(s).")));
+                return Ok(());
+            }
+            let list = appareil::list(db, user.id).await?;
+            if let Some(prefix) = remove {
+                let found: Vec<&serde_json::Value> = list.iter().filter(|d| d["id"].as_str().is_some_and(|id| id.starts_with(prefix.trim()))).collect();
+                let [one] = found.as_slice() else {
+                    bail!("{}", t!("No phone, or several, with this identifier.", "Aucun téléphone, ou plusieurs, avec cet identifiant."));
+                };
+                let id: uuid::Uuid = one["id"].as_str().unwrap_or_default().parse()?;
+                appareil::remove(db, id).await?;
+                audit::log(db, "console", "appareil.retire", json!({ "compte": user.login, "appareil": one["nom"], "id": id })).await?;
+                println!("✓ {} {}", t!("Phone removed:", "Téléphone retiré :"), one["nom"].as_str().unwrap_or(""));
+                return Ok(());
+            }
+            if list.is_empty() {
+                println!("{}", t!("No phone enrolled.", "Aucun téléphone enrôlé."));
+            }
+            for d in &list {
+                let date = |v: &serde_json::Value| v.as_str().map(|s| s.chars().take(16).collect::<String>().replace('T', " ")).unwrap_or_else(|| "—".into());
+                println!(
+                    "{:<10} {:<28} {} {}  {} {}  {}",
+                    d["id"].as_str().unwrap_or("").chars().take(8).collect::<String>(),
+                    d["nom"].as_str().unwrap_or(""),
+                    t!("enrolled", "enrôlé"),
+                    date(&d["enrole"]),
+                    t!("last used", "dernier usage"),
+                    date(&d["utilise"]),
+                    d["adresse"].as_str().unwrap_or("")
                 );
             }
         }
