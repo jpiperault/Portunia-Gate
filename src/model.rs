@@ -291,6 +291,10 @@ pub struct Target {
     pub web_connexion: String,
     /// Texte de la vignette (portail, Portunia) ; vide : texte automatique.
     pub description: String,
+    /// Sortie web : domaines autorisés (vide : tous), bloqués, ports permis (voir egress.rs).
+    pub sortie_domaines: String,
+    pub sortie_bloques: String,
+    pub sortie_ports: String,
 }
 
 /// Protocole et mode compatibles. Bureau à distance : rebond (la Gate relaie la connexion
@@ -306,7 +310,10 @@ pub fn check_protocol(protocole: &str, mode: &str) -> Result<()> {
         // coffre, elle connecte en plus l'utilisateur avec le compte du coffre.
         "http" | "https" if mode == "enregistre" || mode == "coffre" => Ok(()),
         "http" | "https" => bail!(t!("Web interface: recorded or vault mode", "Interface web : mode enregistré ou coffre")),
-        _ => bail!(t!("Unknown protocol: ssh, rdp, http or https", "Protocole inconnu : ssh, rdp, http ou https")),
+        // Sortie web : navigation sur Internet par la Gate, toujours notée au journal.
+        "sortie" if mode == "enregistre" => Ok(()),
+        "sortie" => bail!(t!("Web egress: recorded mode only", "Sortie web : mode enregistré seulement")),
+        _ => bail!(t!("Unknown protocol: ssh, rdp, http, https or egress", "Protocole inconnu : ssh, rdp, http, https ou egress")),
     }
 }
 
@@ -317,6 +324,14 @@ pub fn web_login(value: &str) -> Result<String> {
         "remplir" | "fill" => Ok("remplir".into()),
         "basic" => Ok("basic".into()),
         _ => bail!(t!("Web login: auto, fill or basic", "Connexion web : auto, remplir ou basic")),
+    }
+}
+
+/// Nom anglais du protocole de sortie web (« egress ») : rangé sous « sortie ».
+pub fn protocol_alias(protocol: &str) -> &str {
+    match protocol {
+        "egress" => "sortie",
+        other => other,
     }
 }
 
@@ -339,7 +354,11 @@ impl Target {
         self.protocole == "http" || self.protocole == "https"
     }
     pub fn is_ssh(&self) -> bool {
-        !self.is_rdp() && !self.is_web()
+        self.protocole == "ssh"
+    }
+    /// Sortie web : navigation sur Internet par la Gate (Portunia).
+    pub fn is_egress(&self) -> bool {
+        self.protocole == "sortie"
     }
     pub fn records(&self) -> bool {
         self.mode != "rebond"
@@ -352,7 +371,8 @@ impl Target {
     }
 }
 
-const TARGET_COLUMNS: &str = "id, name, folder, host, port, mode, account, secret_kind, secret, host_key, protocole, web_connexion, description";
+const TARGET_COLUMNS: &str =
+    "id, name, folder, host, port, mode, account, secret_kind, secret, host_key, protocole, web_connexion, description, sortie_domaines, sortie_bloques, sortie_ports";
 
 pub async fn target_by_id(db: &PgPool, id: Uuid) -> Result<Option<Target>> {
     Ok(sqlx::query_as(&format!("SELECT {TARGET_COLUMNS} FROM targets WHERE id = $1"))
@@ -402,6 +422,10 @@ pub struct NewTarget {
     pub protocole: String,
     pub web_connexion: String,
     pub description: String,
+    /// Sortie web : filtre déjà vérifié (egress::domains, egress::ports).
+    pub sortie_domaines: String,
+    pub sortie_bloques: String,
+    pub sortie_ports: String,
 }
 
 /// Description d'un serveur : une ligne, 200 caractères au plus.
@@ -424,8 +448,9 @@ pub async fn create_target(db: &PgPool, t: NewTarget, seal: impl FnOnce(Uuid) ->
     let id = Uuid::new_v4();
     let secret = seal(id)?;
     sqlx::query(
-        "INSERT INTO targets (id, name, folder, host, port, mode, account, secret_kind, secret, protocole, web_connexion, description)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+        "INSERT INTO targets (id, name, folder, host, port, mode, account, secret_kind, secret, protocole, web_connexion, description,
+                              sortie_domaines, sortie_bloques, sortie_ports)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
     )
     .bind(id)
     .bind(&t.name)
@@ -439,6 +464,9 @@ pub async fn create_target(db: &PgPool, t: NewTarget, seal: impl FnOnce(Uuid) ->
     .bind(&t.protocole)
     .bind(&t.web_connexion)
     .bind(check_description(&t.description)?)
+    .bind(&t.sortie_domaines)
+    .bind(&t.sortie_bloques)
+    .bind(&t.sortie_ports)
     .execute(db)
     .await
     .map_err(|e| if is_unique(&e) { anyhow!(t!(format!("Target « {} » already exists", t.name), format!("La cible « {} » existe déjà", t.name))) } else { e.into() })?;
@@ -654,6 +682,12 @@ pub async fn session_end(db: &PgPool, id: Uuid, f: Finished) -> Result<()> {
         .bind(f.bytes)
         .execute(db)
         .await?;
+    Ok(())
+}
+
+/// Résumé d'une session à sa fermeture (sites visités d'une navigation).
+pub async fn session_detail(db: &PgPool, id: Uuid, detail: &str) -> Result<()> {
+    sqlx::query("UPDATE sessions SET detail = $2 WHERE id = $1").bind(id).bind(detail).execute(db).await?;
     Ok(())
 }
 

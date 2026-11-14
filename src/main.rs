@@ -13,6 +13,7 @@ mod auth;
 mod cert;
 mod cfaccess;
 mod config;
+mod egress;
 mod health;
 mod http;
 mod keys;
@@ -476,12 +477,13 @@ enum TargetCmd {
     /// Adds a server.
     Add {
         name: String,
+        /// Server address (not used for egress).
         #[arg(long)]
-        host: String,
+        host: Option<String>,
         /// Port (by default 22 for SSH, 3389 for Remote Desktop, 443 for https, 80 for http).
         #[arg(long)]
         port: Option<i32>,
-        /// ssh, rdp (Remote Desktop), https or http (web interface: recorded or vault mode).
+        /// ssh, rdp (Remote Desktop), https or http (web interface: recorded or vault mode), egress (web browsing from Portunia through the Gate).
         #[arg(long, default_value = "ssh")]
         protocol: String,
         /// coffre (vault), enregistre (recorded) or rebond (jump); also vault, recorded, jump.
@@ -505,6 +507,15 @@ enum TargetCmd {
         /// Text shown on the server's tile in the web portal and in Portunia (200 characters at most).
         #[arg(long, default_value = "")]
         description: String,
+        /// Egress: allowed domains, comma separated (a domain covers its subdomains); empty: all of Internet. Internal networks are always refused.
+        #[arg(long, default_value = "")]
+        domains: String,
+        /// Egress: blocked domains, comma separated.
+        #[arg(long, default_value = "")]
+        block_domains: String,
+        /// Egress: allowed ports, comma separated, or * for all.
+        #[arg(long, default_value = "80,443")]
+        ports: String,
     },
     /// Lists servers.
     List,
@@ -539,6 +550,15 @@ enum TargetCmd {
         /// Text shown on the server's tile; empty: automatic text.
         #[arg(long)]
         description: Option<String>,
+        /// Egress: allowed domains, comma separated; empty: all of Internet.
+        #[arg(long)]
+        domains: Option<String>,
+        /// Egress: blocked domains, comma separated; empty: none.
+        #[arg(long)]
+        block_domains: Option<String>,
+        /// Egress: allowed ports, comma separated, or * for all.
+        #[arg(long)]
+        ports: Option<String>,
     },
     /// Replaces the vault secret: --password, --key-file, or --generate (SSH: the Gate creates a key and installs it).
     Secret {
@@ -2209,12 +2229,26 @@ async fn target_cmd(state: &State, cmd: TargetCmd) -> Result<()> {
             key_file,
             web_login,
             description,
+            domains,
+            block_domains,
+            ports,
         } => {
-            let port = port.unwrap_or(match protocol.as_str() { "rdp" => 3389, "https" => 443, "http" => 80, _ => 22 });
+            let protocol = model::protocol_alias(&protocol).to_string();
+            let egress = protocol == "sortie";
+            // Sortie web : ni adresse, ni compte, ni secret ; la Gate va où le filtre permet.
+            let host = match host {
+                Some(h) if !h.trim().is_empty() => h.trim().to_string(),
+                _ if egress => "internet".to_string(),
+                _ => bail!(t!("Give the server's address (--host)", "Indiquez l'adresse du serveur (--host)")),
+            };
+            if egress && (password || key_file.is_some() || account.is_some()) {
+                bail!(t!("Web egress: no account nor vault secret", "Sortie web : ni compte ni secret du coffre"));
+            }
+            let port = if egress { 443 } else { port.unwrap_or(match protocol.as_str() { "rdp" => 3389, "https" => 443, "http" => 80, _ => 22 }) };
             let web = matches!(protocol.as_str(), "http" | "https");
             // Interface web sans secret : mode enregistré (le coffre, mode par défaut, en demande un).
             let mode = model::mode_alias(&mode).to_string();
-            let mode = if web && mode == "coffre" && !password { "enregistre".to_string() } else { mode };
+            let mode = if (web && mode == "coffre" && !password) || egress { "enregistre".to_string() } else { mode };
             let secret = console_secret(password, key_file.as_deref())?;
             if web && secret.as_ref().is_some_and(|s| s.0 == "key") {
                 bail!(t!("Web interface: the vault keeps a password, not an SSH key", "Interface web : le coffre garde un mot de passe, pas une clé SSH"));
@@ -2232,7 +2266,11 @@ async fn target_cmd(state: &State, cmd: TargetCmd) -> Result<()> {
                 protocole: protocol.clone(),
                 web_connexion: web_login,
                 description,
+                sortie_domaines: egress::domains(&domains)?,
+                sortie_bloques: egress::domains(&block_domains)?,
+                sortie_ports: egress::ports(&ports)?,
             };
+            let filter = json!({ "domaines": new.sortie_domaines, "bloques": new.sortie_bloques, "ports": new.sortie_ports });
             model::create_target(db, new, |id| match &secret {
                 Some((_, plain)) => Ok(Some(state.keys.seal(&format!("cible:{id}"), plain)?)),
                 None => Ok(None),
@@ -2242,13 +2280,35 @@ async fn target_cmd(state: &State, cmd: TargetCmd) -> Result<()> {
                 db,
                 "console",
                 "cible.creee",
-                json!({ "cible": name, "adresse": format!("{host}:{port}"), "mode": mode }),
+                json!({ "cible": name, "adresse": format!("{host}:{port}"), "mode": mode, "protocole": protocol, "sortie": egress.then_some(filter) }),
             )
             .await?;
-            println!("{}", t!("Target created. Its server's fingerprint will be remembered at the first connection.", "Cible créée. L'empreinte de son serveur sera mémorisée à la première connexion."));
+            if egress {
+                println!("{}", t!(
+                    "Web egress created. Give it to a group with « rule add … --targets NAME »: its members browse from Portunia through the Gate.",
+                    "Sortie web créée. Donnez-la à un groupe avec « rule add … --targets NOM » : ses membres naviguent depuis Portunia par la Gate."
+                ));
+            } else {
+                println!("{}", t!("Target created. Its server's fingerprint will be remembered at the first connection.", "Cible créée. L'empreinte de son serveur sera mémorisée à la première connexion."));
+            }
         }
         TargetCmd::List => {
             for t in model::targets(db).await? {
+                if t.is_egress() {
+                    let all = t!("all of Internet", "tout Internet");
+                    println!(
+                        "{:<16} {:<12} {:<6} {}: {} | {}: {} | ports {}",
+                        t.name,
+                        t.folder,
+                        "egress",
+                        t!("allowed", "autorisés"),
+                        if t.sortie_domaines.is_empty() { all } else { &t.sortie_domaines },
+                        t!("blocked", "bloqués"),
+                        if t.sortie_bloques.is_empty() { "-" } else { &t.sortie_bloques },
+                        t.sortie_ports
+                    );
+                    continue;
+                }
                 println!(
                     "{:<16} {:<12} {:<4} {:<24} {:<10} {:<12} {}",
                     t.name,
@@ -2273,9 +2333,24 @@ async fn target_cmd(state: &State, cmd: TargetCmd) -> Result<()> {
             key_file,
             web_login,
             description,
+            domains,
+            block_domains,
+            ports,
         } => {
             let current = find_target(db, &name).await?;
             let mut t = current.clone();
+            if !t.is_egress() && (domains.is_some() || block_domains.is_some() || ports.is_some()) {
+                bail!(t!("--domains, --block-domains and --ports only apply to a web egress", "--domains, --block-domains et --ports ne valent que pour une sortie web"));
+            }
+            if let Some(d) = domains {
+                t.sortie_domaines = egress::domains(&d)?;
+            }
+            if let Some(d) = block_domains {
+                t.sortie_bloques = egress::domains(&d)?;
+            }
+            if let Some(p) = ports {
+                t.sortie_ports = egress::ports(&p)?;
+            }
             if let Some(n) = rename {
                 if n.trim().is_empty() || n.contains('%') || n.contains(char::is_whitespace) {
                     bail!(t!("The name must contain neither spaces nor « % »", "Le nom ne doit contenir ni espace ni « % »"));
@@ -2335,7 +2410,10 @@ async fn target_cmd(state: &State, cmd: TargetCmd) -> Result<()> {
                 db,
                 "console",
                 "cible.modifiee",
-                json!({ "cible": t.name, "avant": current.name, "mode": t.mode, "adresse": format!("{}:{}", t.host, t.port), "adresse_avant": format!("{}:{}", current.host, current.port) }),
+                json!({
+                    "cible": t.name, "avant": current.name, "mode": t.mode, "adresse": format!("{}:{}", t.host, t.port), "adresse_avant": format!("{}:{}", current.host, current.port),
+                    "sortie": t.is_egress().then(|| json!({ "domaines": t.sortie_domaines, "bloques": t.sortie_bloques, "ports": t.sortie_ports })),
+                }),
             )
             .await?;
             println!("{}", t!("Server changed: open sessions are rechecked within 30 seconds.", "Serveur modifié : les sessions ouvertes sont revérifiées sous 30 secondes."));
@@ -2395,7 +2473,7 @@ async fn find_target(db: &PgPool, name: &str) -> Result<model::Target> {
 async fn save_target(db: &PgPool, t: &model::Target) -> Result<()> {
     sqlx::query(
         "UPDATE targets SET name = $2, folder = $3, host = $4, port = $5, mode = $6, account = $7, secret_kind = $8, secret = $9, host_key = $10,
-                web_connexion = $11, description = $12
+                web_connexion = $11, description = $12, sortie_domaines = $13, sortie_bloques = $14, sortie_ports = $15
          WHERE id = $1",
     )
     .bind(t.id)
@@ -2410,6 +2488,9 @@ async fn save_target(db: &PgPool, t: &model::Target) -> Result<()> {
     .bind(&t.host_key)
     .bind(&t.web_connexion)
     .bind(&t.description)
+    .bind(&t.sortie_domaines)
+    .bind(&t.sortie_bloques)
+    .bind(&t.sortie_ports)
     .execute(db)
     .await
     .map_err(|e| match &e {

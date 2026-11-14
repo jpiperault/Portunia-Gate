@@ -103,6 +103,26 @@ sudo portunia-gate target delete fw-edge                  # secret effacé ; ses
 - Bureau à distance (`--protocol rdp`) : `--mode enregistre`, `--mode rebond`, ou `--mode coffre` (0.29) avec `--account` et `--password` (un serveur RDP au coffre garde un mot de passe, pas une clé). Port 3389 par défaut.
 - Le portail web affiche les serveurs en `coffre` (SSH) et `enregistre` (SSH et RDP) ; les serveurs en `rebond` s'ouvrent depuis Portunia, ou avec `ssh -J` / `ssh -L`.
 
+### Sortie web (0.48)
+
+Une sortie web laisse les membres d'un groupe naviguer sur Internet depuis Portunia par la Gate : Portunia ouvre un Edge, un Chrome ou un Brave dédié, dont tout le trafic passe par le SSH de la Gate. Les sites voient l'adresse de la Gate. Ni adresse, ni compte, ni secret : le serveur porte son filtre.
+
+```bash
+sudo portunia-gate target add internet --protocol sortie --folder Internet       # tout Internet, ports 80 et 443
+sudo portunia-gate target add editeurs --protocol sortie --domains "microsoft.com, github.com" --block-domains "gist.github.com"
+sudo portunia-gate target add sortie-8443 --protocol sortie --ports "80,443,8443"   # ou --ports "*" pour tous
+sudo portunia-gate target edit editeurs --domains ""            # vide : de nouveau tout Internet
+sudo portunia-gate target edit editeurs --block-domains "x.com"  # remplace la liste
+sudo portunia-gate rule add internet-equipe --group equipe --targets internet   # qui peut naviguer (jours, heures, approbation comme d'habitude)
+sudo portunia-gate sessions --server internet                   # une session « navigation » par ouverture, avec les sites visités
+```
+
+- Un domaine couvre ses sous-domaines (`github.com` autorise aussi `api.github.com`) ; `*.github.com` revient au même. 200 domaines au plus par liste. Les domaines bloqués l'emportent sur les autorisés.
+- **Les réseaux internes sont toujours refusés**, quelles que soient les listes : la Gate résout le nom elle-même et refuse les adresses de boucle locale, privées (10.x, 172.16–31.x, 192.168.x), de lien local, CGNAT, multicast et IPv4 dans IPv6. La sortie n'atteint donc jamais un serveur du réseau sans passer par ses propres règles. Un nom qui se résout vers une adresse interne est refusé aussi.
+- Seul TCP passe (HTTP/1.1, HTTP/2, WebSocket) ; Portunia coupe HTTP/3 et WebRTC hors du proxy. La Gate ne déchiffre pas le HTTPS : elle voit les sites, pas les pages.
+- Journal : `navigation.ouverte`, `navigation.refusee` (premier refus d'un site dans la session, avec la raison), `navigation.fermee` (durée, octets, les 100 sites les plus chargés avec leurs connexions et octets). La liste des sessions montre les 20 premiers sites. Couper la session (Audit › En direct, `sessions cut`), retirer la règle ou désactiver le compte ferme le navigateur.
+- 256 connexions ouvertes en même temps au plus par ouverture.
+
 ## Règles d'accès
 
 ```bash

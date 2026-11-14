@@ -1425,7 +1425,9 @@ async fn logout(AxState(portal): Ctx, headers: HeaderMap) -> Response {
 /// Peut s'ouvrir dans le navigateur : tout, sauf SSH en mode rebond (de bout en bout, il faut
 /// Portunia). Bureau à distance en rebond : la Gate relaie sans enregistrer.
 fn web_ready(t: &model::Target) -> Option<&'static str> {
-    if !t.is_rdp() && t.mode == "rebond" {
+    if t.is_egress() {
+        Some(t!("Only available with Portunia (web browsing through the Gate)", "Disponible seulement avec Portunia (navigation par la Gate)"))
+    } else if !t.is_rdp() && t.mode == "rebond" {
         Some(t!("Only available with Portunia (end-to-end relay)", "Disponible seulement avec Portunia (relais de bout en bout)"))
     } else {
         None

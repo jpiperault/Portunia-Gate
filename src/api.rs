@@ -461,6 +461,8 @@ async fn servers(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
                 "tunnels": access.tunnels && t.vaulted(),
                 // Entrée RDP native ouverte pour ce serveur (fichier .rdp pour mstsc, Remmina…).
                 "rdp_natif": native.enabled && t.is_rdp() && native.allows(&t.mode),
+                // Sortie web : filtre appliqué par la Gate, affiché par Portunia.
+                "sortie": t.is_egress().then(|| json!({ "domaines": t.sortie_domaines, "bloques": t.sortie_bloques, "ports": t.sortie_ports })),
             }));
         }
     }
@@ -587,6 +589,36 @@ struct TargetBody {
     /// Texte de la vignette ; absent : inchangé (modification) ou vide (création).
     #[serde(default)]
     description: Option<String>,
+    /// Sortie web (protocole « sortie » ou « egress ») : domaines autorisés (vide : tous),
+    /// bloqués, ports permis ; absents : inchangés (modification) ou par défaut (création).
+    #[serde(default)]
+    sortie_domaines: Option<String>,
+    #[serde(default)]
+    sortie_bloques: Option<String>,
+    #[serde(default)]
+    sortie_ports: Option<String>,
+}
+
+/// Sortie web : nom anglais accepté, adresse et port sans objet (la Gate va où le filtre permet).
+fn normalize_target(body: &mut TargetBody) {
+    body.protocole = model::protocol_alias(&body.protocole).to_string();
+    if body.protocole == "sortie" {
+        if body.hote.trim().is_empty() {
+            body.hote = "internet".into();
+        }
+        body.port = 443;
+        body.mode = "enregistre".into();
+    }
+}
+
+/// Filtre de sortie web à enregistrer : donné (vérifié) ou celui d'avant.
+fn egress_filter(body: &TargetBody, before: (&str, &str, &str)) -> Result<(String, String, String), ApiError> {
+    let bad = |e: anyhow::Error| err(StatusCode::BAD_REQUEST, e.to_string());
+    Ok((
+        match &body.sortie_domaines { Some(d) => crate::egress::domains(d).map_err(bad)?, None => before.0.to_string() },
+        match &body.sortie_bloques { Some(d) => crate::egress::domains(d).map_err(bad)?, None => before.1.to_string() },
+        match &body.sortie_ports { Some(p) => crate::egress::ports(p).map_err(bad)?, None => before.2.to_string() },
+    ))
 }
 
 fn default_port() -> i32 {
@@ -611,6 +643,9 @@ fn target_json(t: &model::Target) -> Value {
         "protocole": t.protocole,
         "connexion_web": t.web_connexion,
         "description": t.description,
+        "sortie_domaines": t.sortie_domaines,
+        "sortie_bloques": t.sortie_bloques,
+        "sortie_ports": t.sortie_ports,
     })
 }
 
@@ -636,6 +671,9 @@ fn check_target(body: &TargetBody) -> Result<(), ApiError> {
         return Err(err(StatusCode::BAD_REQUEST, t!("The name must contain neither spaces nor « % »", "Le nom ne doit contenir ni espace ni « % »")));
     }
     model::check_protocol(&body.protocole, &body.mode).map_err(|e| err(StatusCode::BAD_REQUEST, e.to_string()))?;
+    if body.protocole == "sortie" && body.secret.is_some() {
+        return Err(err(StatusCode::BAD_REQUEST, t!("Web egress: no vault secret", "Sortie web : pas de secret du coffre")));
+    }
     if body.protocole != "ssh" && matches!(&body.secret, Some(SecretBody::Generer { .. }) | Some(SecretBody::Cle { .. })) {
         return Err(err(StatusCode::BAD_REQUEST, t!("Remote Desktop and web: the vault keeps a password, not an SSH key", "Bureau à distance et web : le coffre garde un mot de passe, pas une clé SSH")));
     }
@@ -679,9 +717,11 @@ async fn resolve_secret(api: &Api, actor: &str, probe: &model::Target, secret: S
     })
 }
 
-async fn admin_target_create(AxState(api): Ctx, headers: HeaderMap, Json(body): Json<TargetBody>) -> ApiResult {
+async fn admin_target_create(AxState(api): Ctx, headers: HeaderMap, Json(mut body): Json<TargetBody>) -> ApiResult {
     let actor = admin(&api, &headers).await?;
+    normalize_target(&mut body);
     check_target(&body)?;
+    let (sortie_domaines, sortie_bloques, sortie_ports) = egress_filter(&body, ("", "", "80,443"))?;
     let probe = model::Target {
         id: Uuid::new_v4(),
         name: body.nom.trim().into(),
@@ -696,6 +736,9 @@ async fn admin_target_create(AxState(api): Ctx, headers: HeaderMap, Json(body): 
         protocole: body.protocole.clone(),
         web_connexion: web_login_of(body.connexion_web.as_deref(), "auto"),
         description: body.description.clone().unwrap_or_default(),
+        sortie_domaines,
+        sortie_bloques,
+        sortie_ports,
     };
     let secret = match body.secret {
         Some(s) => Some(resolve_secret(&api, &actor.login, &probe, s).await?),
@@ -712,6 +755,9 @@ async fn admin_target_create(AxState(api): Ctx, headers: HeaderMap, Json(body): 
         protocole: probe.protocole.clone(),
         web_connexion: probe.web_connexion.clone(),
         description: probe.description.clone(),
+        sortie_domaines: probe.sortie_domaines.clone(),
+        sortie_bloques: probe.sortie_bloques.clone(),
+        sortie_ports: probe.sortie_ports.clone(),
     };
     let keys = &api.state.keys;
     let id = model::create_target(&api.state.db, new, |id| match &secret {
@@ -729,13 +775,15 @@ async fn admin_target_create(AxState(api): Ctx, headers: HeaderMap, Json(body): 
     Ok(Json(json!({ "id": id })))
 }
 
-async fn admin_target_update(AxState(api): Ctx, headers: HeaderMap, Path(id): Path<Uuid>, Json(body): Json<TargetBody>) -> ApiResult {
+async fn admin_target_update(AxState(api): Ctx, headers: HeaderMap, Path(id): Path<Uuid>, Json(mut body): Json<TargetBody>) -> ApiResult {
     let actor = admin(&api, &headers).await?;
+    normalize_target(&mut body);
     check_target(&body)?;
     let db = &api.state.db;
     let current = model::target_by_id(db, id)
         .await?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, t!("Unknown server", "Serveur inconnu")))?;
+    let (sortie_domaines, sortie_bloques, sortie_ports) = egress_filter(&body, (&current.sortie_domaines, &current.sortie_bloques, &current.sortie_ports))?;
     let mut probe = current.clone();
     probe.host = body.hote.trim().into();
     probe.port = body.port;
@@ -767,7 +815,7 @@ async fn admin_target_update(AxState(api): Ctx, headers: HeaderMap, Path(id): Pa
     }
     sqlx::query(
         "UPDATE targets SET name = $2, folder = $3, host = $4, port = $5, mode = $6, account = $7, secret_kind = $8, secret = $9, host_key = $10,
-                protocole = $11, web_connexion = $12, description = $13
+                protocole = $11, web_connexion = $12, description = $13, sortie_domaines = $14, sortie_bloques = $15, sortie_ports = $16
          WHERE id = $1",
     )
     .bind(id)
@@ -786,6 +834,9 @@ async fn admin_target_update(AxState(api): Ctx, headers: HeaderMap, Path(id): Pa
         Some(d) => model::check_description(d).unwrap_or_default(),
         None => current.description.clone(),
     })
+    .bind(&sortie_domaines)
+    .bind(&sortie_bloques)
+    .bind(&sortie_ports)
     .execute(db)
     .await
     .map_err(|e| match &e {
@@ -797,7 +848,10 @@ async fn admin_target_update(AxState(api): Ctx, headers: HeaderMap, Path(id): Pa
         db,
         &actor.login,
         "cible.modifiee",
-        json!({ "cible": body.nom, "avant": current.name, "mode": body.mode, "adresse": format!("{}:{}", probe.host, probe.port), "adresse_avant": format!("{}:{}", current.host, current.port) }),
+        json!({
+            "cible": body.nom, "avant": current.name, "mode": body.mode, "adresse": format!("{}:{}", probe.host, probe.port), "adresse_avant": format!("{}:{}", current.host, current.port),
+            "sortie": (body.protocole == "sortie").then(|| json!({ "domaines": sortie_domaines, "bloques": sortie_bloques, "ports": sortie_ports })),
+        }),
     )
     .await;
     Ok(Json(json!({ "etat": "ok" })))

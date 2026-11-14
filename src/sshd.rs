@@ -4,7 +4,8 @@
 //! Formes acceptées :
 //! - `ssh login@Gate` : menu des serveurs autorisés ;
 //! - `ssh login%cible@Gate` : accès direct (shell, commande, SFTP) ;
-//! - `ssh -J login@Gate cible` : rebond de bout en bout, cibles en mode rebond.
+//! - `ssh -J login@Gate cible` : rebond de bout en bout, cibles en mode rebond ;
+//! - `login%sortie` avec des canaux « direct-tcpip » : sortie web de Portunia (egress.rs).
 
 use std::{
     borrow::Cow,
@@ -28,6 +29,7 @@ use uuid::Uuid;
 use crate::{
     audit,
     auth::{check_password, totp_check, Factor},
+    egress,
     limits::{Slot, Verdict},
     live::{self, Cut, Watched},
     model::{self, Access, Target, User},
@@ -173,6 +175,8 @@ struct Ctx {
     /// Cible demandée dans le nom (« login%cible »), avec les droits du moment.
     target: Option<(Target, Option<Access>)>,
     requested_target: Option<String>,
+    /// Sortie web : navigation de cette connexion, ouverte au premier site demandé.
+    navigation: tokio::sync::Mutex<Option<Arc<egress::Navigation>>>,
 }
 
 impl Ctx {
@@ -190,6 +194,23 @@ impl Ctx {
         }
         let Some(target) = model::target_by_id(&self.state.db, target.id).await? else { return Ok(None) };
         Ok(model::access(&self.state.db, self.user.id, target.id).await?.map(|access| (target, access)))
+    }
+
+    /// Navigation de cette connexion (sortie web) ; sa coupure ferme toute la connexion.
+    async fn navigation(&self, target: &Target, handle: server::Handle) -> Result<Arc<egress::Navigation>> {
+        let mut slot = self.navigation.lock().await;
+        if let Some(nav) = slot.as_ref() {
+            return Ok(nav.clone());
+        }
+        let nav = egress::Navigation::start(self.state.clone(), self.user.id, &self.user.login, target, &self.addr).await?;
+        let mut cut = nav.cut();
+        tokio::spawn(async move {
+            if let Some(why) = cut.wait().await {
+                let _ = handle.disconnect(russh::Disconnect::ByApplication, why, "fr".into()).await;
+            }
+        });
+        *slot = Some(nav.clone());
+        Ok(nav)
     }
 
     fn watch(&self, target: &Target, recorded: bool, session: Uuid) -> (live::Guard, Cut) {
@@ -495,6 +516,7 @@ impl server::Handler for Conn {
             addr: self.addr.clone(),
             target,
             requested_target: wanted.map(str::to_owned),
+            navigation: tokio::sync::Mutex::new(None),
         }));
         Ok(())
     }
@@ -585,7 +607,7 @@ impl server::Handler for Conn {
         origin: &str,
         origin_port: u32,
         reply: ChannelOpenHandle,
-        _session: &mut Session,
+        session: &mut Session,
     ) -> Result<(), Self::Error> {
         let ctx = match self.ctx.clone() {
             Some(ctx) if ctx.active().await? => ctx,
@@ -595,6 +617,29 @@ impl server::Handler for Conn {
             }
         };
         let db = &self.state.db;
+        let current = ctx.current().await?;
+        // 0. Sortie web (« login%sortie ») : la cible filtre les sites, la Gate résout et relaie.
+        if let Some((t, _)) = current.as_ref().filter(|(t, _)| t.is_egress()) {
+            let nav = match ctx.navigation(t, session.handle()).await {
+                Ok(nav) if nav.closed().is_none() => nav,
+                _ => {
+                    reply.reject(ChannelOpenFailure::AdministrativelyProhibited).await;
+                    return Ok(());
+                }
+            };
+            let site = host.trim_end_matches('.').to_ascii_lowercase();
+            if let Some(why) = egress::refusal(t, &site, port) {
+                nav.refused(&site, port, why).await;
+                reply.reject(ChannelOpenFailure::AdministrativelyProhibited).await;
+                return Ok(());
+            }
+            let Some(opened) = nav.enter(&site) else {
+                reply.reject(ChannelOpenFailure::ResourceShortage).await;
+                return Ok(());
+            };
+            tokio::spawn(relay_egress(nav, opened, channel, reply, site, port as u16));
+            return Ok(());
+        }
         // 1. Rebond de bout en bout (ssh -J) vers une cible en mode rebond.
         for t in model::rebond_targets_at(db, host, port as i32).await? {
             if model::access(db, ctx.user.id, t.id).await?.is_some() {
@@ -608,7 +653,7 @@ impl server::Handler for Conn {
             }
         }
         // 2. Tunnel (ssh -L) à travers une cible du coffre, si la règle l'autorise.
-        if let Some((t, access)) = ctx.current().await? {
+        if let Some((t, access)) = current {
             if access.tunnels && t.vaulted() {
                 reply.accept().await;
                 let (host, origin) = (host.to_string(), origin.to_string());
@@ -847,7 +892,7 @@ async fn shell(ctx: Arc<Ctx>, mut channel: Channel<Msg>, mut pty: Option<PtyInfo
         return Ok(());
     };
     if !target.is_ssh() {
-        say(&channel, &t!(format!("{} is a Remote Desktop or web server: open it from Portunia or the web portal.\n", target.name), format!("{} est un serveur Bureau à distance ou web : ouvrez-le depuis Portunia ou le portail web.\n", target.name))).await;
+        say(&channel, &t!(format!("{} is not an SSH server: open it from Portunia or the web portal.\n", target.name), format!("{} n'est pas un serveur SSH : ouvrez-le depuis Portunia ou le portail web.\n", target.name))).await;
         close(&channel, 1).await;
         return Ok(());
     }
@@ -1241,6 +1286,31 @@ where
         d = &mut down => (tokio::time::timeout(std::time::Duration::from_secs(2), &mut up).await.unwrap_or(0), d),
         _ = cut.reason() => (0, 0),
     }
+}
+
+/// Sortie web : résolution sur la Gate (adresses internes refusées), connexion, puis relais
+/// jusqu'à la fin ou la coupure. Le canal n'est accepté qu'une fois le site joint : le
+/// navigateur reçoit un vrai refus sinon.
+async fn relay_egress(nav: Arc<egress::Navigation>, opened: egress::Opened, channel: Channel<Msg>, reply: ChannelOpenHandle, site: String, port: u16) {
+    let addresses = match egress::resolve(&site, port).await {
+        Ok(a) => a,
+        Err(why) => {
+            nav.refused(&site, port as u32, why).await;
+            reply.reject(ChannelOpenFailure::AdministrativelyProhibited).await;
+            return;
+        }
+    };
+    let tcp = match egress::connect(&addresses).await {
+        Ok(tcp) => tcp,
+        Err(_) => {
+            reply.reject(ChannelOpenFailure::ConnectFailed).await;
+            return;
+        }
+    };
+    reply.accept().await;
+    let mut cut = nav.cut();
+    let (up, down) = relay_counted(channel.into_stream(), tcp, &mut cut).await;
+    opened.done(up + down);
 }
 
 /// Rebond de bout en bout : la Gate relaie les octets chiffrés sans les lire.

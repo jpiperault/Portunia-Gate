@@ -129,6 +129,11 @@ impl Cut {
         self.0.borrow().clone()
     }
 
+    /// Un second signal de la même fermeture, pour une autre tâche (sans les messages).
+    pub fn follow(&self) -> Cut {
+        Cut(self.0.clone(), None)
+    }
+
     /// Messages pour l'utilisateur, à attendre à côté de la fermeture.
     pub fn notices(&mut self) -> Notices {
         Notices(self.1.take())
