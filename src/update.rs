@@ -323,12 +323,49 @@ pub fn mark_started(data_dir: &Path) {
 
 pub async fn run(state: Arc<State>) -> Result<()> {
     let mut last_check = 0i64;
+    let started = std::time::Instant::now();
+    let mut browser_checked = false;
     loop {
         if let Err(e) = tick(&state, &mut last_check).await {
             tracing::warn!("{} {e:#}", t!("update:", "mise à jour :"));
         }
+        if let Err(e) = browser_tick(&state, started, &mut browser_checked).await {
+            tracing::warn!("{} {e:#}", t!("portal browser:", "navigateur du portail :"));
+        }
         tokio::time::sleep(Duration::from_secs(20)).await;
     }
+}
+
+/// Réglage : dernière action du navigateur du portail déjà notée au journal.
+const BROWSER_NOTED: &str = "navigateur_note";
+
+async fn browser_tick(state: &Arc<State>, started: std::time::Instant, checked: &mut bool) -> Result<()> {
+    if let Some(p) = browser_progress().filter(|p| p.resultat != "en_cours" && !p.id.is_empty()) {
+        let noted = model::setting(&state.db, BROWSER_NOTED).await?.and_then(|v| v.as_str().map(str::to_owned));
+        if noted.as_deref() != Some(p.id.as_str()) {
+            model::set_setting(&state.db, BROWSER_NOTED, json!(p.id)).await?;
+            let event = if p.resultat == "reussie" { "navigateur.pret" } else { "navigateur.echec" };
+            let event = if p.action == "arreter" && p.resultat == "reussie" { "navigateur.arrete" } else { event };
+            audit::note(&state.db, &p.par, event, json!({ "id": p.id, "action": p.action, "message": p.message })).await;
+        }
+    }
+    // Une minute après le démarrage (nouvelle version) : un navigateur du portail déjà en service
+    // à qui manquent des programmes (vidéo et son de la 0.54) est complété par le service root,
+    // une fois par jour au plus si l'installation échoue.
+    if *checked || started.elapsed() < Duration::from_secs(60) || mode() != "paquet" || not_possible().is_some() {
+        return Ok(());
+    }
+    *checked = true;
+    if !browser_running() || browser_missing().is_empty() || browser_request_path(&state.config.data_dir).exists() {
+        return Ok(());
+    }
+    let recent = browser_progress().is_some_and(|p| p.action == "completer" && p.fin.is_some_and(|f| Utc::now() - f < chrono::Duration::hours(24)));
+    if recent {
+        return Ok(());
+    }
+    let r = request_browser(&state.config.data_dir, "completer", "systeme")?;
+    audit::note(&state.db, "systeme", "navigateur.demande", json!({ "id": r.id, "action": "completer", "manquants": browser_missing() })).await;
+    Ok(())
 }
 
 async fn tick(state: &Arc<State>, last_check: &mut i64) -> Result<()> {
@@ -567,9 +604,222 @@ pub fn run_root(config: &Config) -> Result<()> {
         bail!(t!("an update is already under way", "une mise à jour est déjà en cours"));
     }
     std::fs::write(&lock, std::process::id().to_string())?;
-    let result = run_locked(config, dir);
+    let result = if request_path(&config.data_dir).exists() { run_locked(config, dir) } else { Ok(()) };
+    // Navigateur du portail (0.55) : installer, compléter ou arrêter, à la demande de la Gate.
+    let browser = if browser_request_path(&config.data_dir).exists() { run_browser(config, dir) } else { Ok(()) };
     let _ = std::fs::remove_file(&lock);
-    result
+    result.and(browser)
+}
+
+// ---------- Navigateur du portail (0.55) ----------
+//
+// La Gate demande (navigateur.json, à côté de la demande de mise à jour) ; le service root
+// exécute une action d'une liste fermée, sans argument : « activer » installe Chromium, Xvfb,
+// ffmpeg et PulseAudio (paquets Debian, liste fixe) et démarre portunia-gate-navigateur ;
+// « completer » fait de même seulement s'il est déjà activé (après une mise à jour) ;
+// « arreter » l'arrête et le désactive. Une Gate compromise ne peut rien demander d'autre.
+
+const BROWSER_ACTIONS: [&str; 3] = ["activer", "completer", "arreter"];
+const BROWSER_UNIT: &str = "portunia-gate-navigateur.service";
+/// Programmes du navigateur du portail, et le paquet Debian de chacun.
+const BROWSER_PROGRAMS: [(&str, &[&str], &str); 4] = [
+    ("chromium", &["/usr/lib/chromium/chromium", "/usr/bin/chromium"], "chromium"),
+    ("xvfb", &["/usr/bin/Xvfb"], "xvfb"),
+    ("ffmpeg", &["/usr/bin/ffmpeg"], "ffmpeg"),
+    ("pulseaudio", &["/usr/bin/pulseaudio"], "pulseaudio"),
+];
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct BrowserRequest {
+    pub id: String,
+    pub action: String,
+    pub par: String,
+}
+
+pub fn browser_request_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("mise-a-jour").join("navigateur.json")
+}
+
+/// Programmes absents (noms de paquets).
+fn browser_missing() -> Vec<&'static str> {
+    BROWSER_PROGRAMS.iter().filter(|(_, paths, _)| !paths.iter().any(|p| Path::new(p).exists())).map(|(_, _, pkg)| *pkg).collect()
+}
+
+/// Le service du navigateur tourne (son socket existe).
+fn browser_running() -> bool {
+    Path::new("/run/portunia-gate-navigateur/navigateur.sock").exists()
+}
+
+/// Demande au service root (sans droits : la Gate n'écrit que ce fichier).
+pub fn request_browser(data_dir: &Path, action: &str, by: &str) -> Result<BrowserRequest> {
+    if let Some(why) = not_possible() {
+        bail!(why);
+    }
+    anyhow::ensure!(BROWSER_ACTIONS.contains(&action), "action inconnue");
+    if browser_progress().is_some_and(|p| p.resultat == "en_cours") {
+        bail!(t!("The portal browser is already being installed or stopped.", "Le navigateur du portail est déjà en cours d'installation ou d'arrêt."));
+    }
+    let r = BrowserRequest { id: uuid::Uuid::new_v4().to_string(), action: action.into(), par: by.into() };
+    let path = browser_request_path(data_dir);
+    std::fs::create_dir_all(path.parent().unwrap())?;
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, serde_json::to_vec(&r)?)?;
+    std::fs::rename(&tmp, &path)?;
+    Ok(r)
+}
+
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct BrowserProgress {
+    pub id: String,
+    pub action: String,
+    pub par: String,
+    pub debut: Option<DateTime<Utc>>,
+    pub fin: Option<DateTime<Utc>>,
+    /// en_cours, reussie, echec.
+    pub resultat: String,
+    pub message: String,
+    pub journal: Vec<String>,
+}
+
+pub fn browser_progress() -> Option<BrowserProgress> {
+    let text = std::fs::read_to_string(Path::new(RUN_DIR).join("navigateur.json")).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// Ce que Portunia montre du navigateur du portail.
+pub fn browser_status() -> Value {
+    let programs: serde_json::Map<String, Value> = BROWSER_PROGRAMS.iter().map(|(name, paths, _)| (name.to_string(), json!(paths.iter().any(|p| Path::new(p).exists())))).collect();
+    let missing = browser_missing();
+    json!({
+        "en_service": browser_running(),
+        "programmes": programs,
+        "video": missing.is_empty(),
+        "manquants": missing,
+        "impossible": not_possible(),
+        "execution": browser_progress(),
+    })
+}
+
+fn take_browser_request(data_dir: &Path) -> Result<BrowserRequest> {
+    let path = browser_request_path(data_dir);
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = opts.open(&path).with_context(|| format!("{}", path.display()));
+    let _ = std::fs::remove_file(&path);
+    let file = file?;
+    let meta = file.metadata()?;
+    anyhow::ensure!(meta.is_file() && meta.len() <= 4096, "demande invalide");
+    let mut text = String::new();
+    file.take(4096).read_to_string(&mut text)?;
+    let r: BrowserRequest = serde_json::from_str(&text).context("demande illisible")?;
+    anyhow::ensure!(!r.id.is_empty() && r.id.len() <= 64 && r.id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'), "identifiant de demande invalide");
+    anyhow::ensure!(r.par.len() <= 64 && !r.par.chars().any(char::is_control), "auteur de la demande invalide");
+    anyhow::ensure!(BROWSER_ACTIONS.contains(&r.action.as_str()), "action inconnue");
+    Ok(r)
+}
+
+struct BrowserRunner {
+    p: BrowserProgress,
+    path: PathBuf,
+}
+
+impl BrowserRunner {
+    fn line(&mut self, line: String) {
+        println!("{line}");
+        self.p.journal.push(format!("{} {line}", chrono::Local::now().format("%H:%M:%S")));
+        let tmp = self.path.with_extension("tmp");
+        if let Ok(b) = serde_json::to_vec_pretty(&self.p) {
+            if std::fs::write(&tmp, b).is_ok() {
+                set_mode(&tmp, 0o644);
+                let _ = std::fs::rename(&tmp, &self.path);
+            }
+        }
+    }
+}
+
+fn apt_install(packages: &[&str], recommends: bool) -> Result<String> {
+    let mut cmd = Command::new("apt-get");
+    cmd.args(["install", "-y", "-q"]);
+    if !recommends {
+        cmd.arg("--no-install-recommends");
+    }
+    sh(cmd.args(packages).env("DEBIAN_FRONTEND", "noninteractive"))
+}
+
+fn run_browser(config: &Config, dir: &Path) -> Result<()> {
+    let r = take_browser_request(&config.data_dir)?;
+    let mut run = BrowserRunner {
+        p: BrowserProgress { id: r.id.clone(), action: r.action.clone(), par: r.par.clone(), debut: Some(Utc::now()), resultat: "en_cours".into(), ..Default::default() },
+        path: dir.join("navigateur.json"),
+    };
+    // État « en cours » visible tout de suite dans Portunia.
+    run.line(t!(format!("Request « {} » from {}", r.action, r.par), format!("Demande « {} » de {}", r.action, r.par)).into());
+    let outcome = browser_action(&r.action, &mut run);
+    run.p.fin = Some(Utc::now());
+    match outcome {
+        Ok(message) => {
+            run.p.resultat = "reussie".into();
+            run.p.message = message;
+        }
+        Err(e) => {
+            run.p.resultat = "echec".into();
+            run.p.message = format!("{e:#}");
+        }
+    }
+    let line = format!("→ {} : {}", run.p.resultat, run.p.message);
+    run.line(line);
+    Ok(())
+}
+
+fn browser_action(action: &str, run: &mut BrowserRunner) -> Result<String> {
+    let enabled = Command::new("systemctl").args(["is-enabled", "--quiet", BROWSER_UNIT]).status().is_ok_and(|s| s.success());
+    if action == "arreter" {
+        run.line(t!("Stopping the portal browser", "Arrêt du navigateur du portail").into());
+        sh(Command::new("systemctl").args(["disable", "--now", BROWSER_UNIT]))?;
+        return Ok(t!("Portal browser stopped: web egress opens from Portunia only.", "Navigateur du portail arrêté : la sortie web ne s'ouvre plus que depuis Portunia.").into());
+    }
+    if action == "completer" && !enabled {
+        return Ok(t!("Portal browser not enabled: nothing to do.", "Navigateur du portail non activé : rien à faire.").into());
+    }
+    let missing = browser_missing();
+    if !missing.is_empty() {
+        run.line(t!(format!("Installing {}", missing.join(", ")), format!("Installation de {}", missing.join(", "))).into());
+        // Index des paquets à jour d'abord : un index ancien ne trouve plus les versions publiées.
+        let _ = sh(Command::new("apt-get").args(["update", "-q"]).env("DEBIAN_FRONTEND", "noninteractive"));
+        if missing.contains(&"chromium") {
+            apt_install(&["chromium"], true).context(t!("installing Chromium", "installation de Chromium"))?;
+        }
+        let rest: Vec<&str> = missing.iter().copied().filter(|p| *p != "chromium").collect();
+        if !rest.is_empty() {
+            if let Err(e) = apt_install(&rest, false) {
+                run.line(t!(format!("Video and sound unavailable ({e:#}): pictures of the page only."), format!("Vidéo et son indisponibles ({e:#}) : images de la page seulement.")).into());
+            }
+        }
+    }
+    let _ = sh(Command::new("systemctl").arg("daemon-reload"));
+    run.line(t!("Starting the browser service", "Démarrage du service du navigateur").into());
+    sh(Command::new("systemctl").args(["enable", BROWSER_UNIT]))?;
+    // Nouveaux programmes : le service les cherche à son démarrage (les navigations en cours se ferment).
+    let verb = if missing.is_empty() { "start" } else { "restart" };
+    sh(Command::new("systemctl").args([verb, BROWSER_UNIT]))?;
+    for _ in 0..20 {
+        if browser_running() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    anyhow::ensure!(browser_running(), "{}", t!("the browser service does not start: journalctl -u portunia-gate-navigateur", "le service du navigateur ne démarre pas : journalctl -u portunia-gate-navigateur"));
+    let left = browser_missing();
+    Ok(if left.is_empty() {
+        t!("Portal browser ready, with video and sound.", "Navigateur du portail prêt, avec la vidéo et le son.").into()
+    } else {
+        t!(format!("Portal browser ready, pictures of the page only (missing: {}).", left.join(", ")), format!("Navigateur du portail prêt, images de la page seulement (manquent : {}).", left.join(", "))).into()
+    })
 }
 
 fn run_locked(config: &Config, dir: &Path) -> Result<()> {

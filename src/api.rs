@@ -129,6 +129,7 @@ pub async fn run(state: Arc<State>) -> anyhow::Result<()> {
         .route("/api/v1/admin/notifications/essai", post(admin_notify_test))
         .route("/api/v1/admin/etat", get(admin_status))
         .route("/api/v1/admin/mise-a-jour", get(admin_update).post(admin_update_apply).delete(admin_update_cancel))
+        .route("/api/v1/admin/navigateur", get(admin_browser).post(admin_browser_action))
         .route("/api/v1/audit/sessions/{id}/couper", post(audit_cut))
         // Export d'une relecture (vidéo, sous-titres, transcription, .cast) : noté au journal.
         .route("/api/v1/audit/sessions/{id}/export", post(audit_export))
@@ -2106,6 +2107,30 @@ async fn admin_update_apply(AxState(api): Ctx, headers: HeaderMap, Json(body): J
     };
     let p = crate::update::plan(&api.state, &version, body.a, body.prevenir.unwrap_or(false), &actor.login, false).await?;
     Ok(Json(json!({ "etat": "ok", "programmee": p })))
+}
+
+/// Navigateur du portail (0.55) : état, programmes, dernière action du service root.
+async fn admin_browser(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
+    admin(&api, &headers).await?;
+    let mut s = crate::update::browser_status();
+    s["demande_en_attente"] = json!(crate::update::browser_request_path(&api.state.config.data_dir).exists());
+    Ok(Json(s))
+}
+
+#[derive(Deserialize)]
+struct BrowserBody {
+    /// activer ou arreter.
+    action: String,
+}
+
+async fn admin_browser_action(AxState(api): Ctx, headers: HeaderMap, Json(body): Json<BrowserBody>) -> ApiResult {
+    let actor = admin(&api, &headers).await?;
+    if !["activer", "arreter"].contains(&body.action.as_str()) {
+        return Err(err(StatusCode::BAD_REQUEST, t!("Action: activer or arreter", "Action : activer ou arreter")));
+    }
+    let r = crate::update::request_browser(&api.state.config.data_dir, &body.action, &actor.login).map_err(|e| err(StatusCode::CONFLICT, format!("{e:#}")))?;
+    audit::note(&api.state.db, &actor.login, "navigateur.demande", json!({ "id": r.id, "action": r.action })).await;
+    Ok(Json(json!({ "etat": "ok", "id": r.id })))
 }
 
 async fn admin_update_cancel(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {

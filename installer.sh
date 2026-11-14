@@ -536,6 +536,24 @@ update() {
   wait_api
   ok "$(t "Before:" "Avant :") $before"
   ok "$(t "After:" "Après :") $(installed_version)"
+  if [ "$MODE" != docker ]; then
+    # Navigateur du portail déjà activé : programmes de la nouvelle version (vidéo et son, 0.54).
+    if systemctl is-enabled --quiet portunia-gate-navigateur 2>/dev/null; then
+      browser_programs || warn "$(t "Chromium is missing: the portal browser is stopped." "Chromium manque : le navigateur du portail est arrêté.")"
+      systemctl restart portunia-gate-navigateur >/dev/null 2>&1 || true
+    fi
+    refresh_self
+  fi
+}
+
+# Cet assistant, remplacé par celui du paquet installé (0.55) : il connaît les commandes de la
+# version en place. Le paquet garde le sien dans /usr/lib/portunia-gate/installer.sh.
+refresh_self() {
+  local shipped=/usr/lib/portunia-gate/installer.sh
+  [ -f "$shipped" ] && [ "$SELF" != "$shipped" ] && [ -f "$SELF" ] && [ -w "$SELF" ] || return 0
+  cmp -s "$shipped" "$SELF" && return 0
+  # Nouveau fichier puis renommage : bash lit encore celui-ci pendant qu'il s'exécute.
+  cp "$shipped" "$SELF.nouveau" && chmod --reference="$SELF" "$SELF.nouveau" && mv -f "$SELF.nouveau" "$SELF" && ok "$(t "Assistant updated:" "Assistant mis à jour :") $SELF"
 }
 
 # Version installée, même si la Gate ne démarre pas (paquet, ou binaire de l'image Docker).
@@ -589,8 +607,25 @@ setup_relay() {
   echo "  $(t "The certificate is self-signed. Your own: sudo -u _portunia_gate /usr/lib/portunia-gate/portunia-gate edge certificate CERT KEY, then restart portunia-gate-relais." "Le certificat est auto-signé. Le vôtre : sudo -u _portunia_gate /usr/lib/portunia-gate/portunia-gate edge certificate CERT CLE, puis redémarrez portunia-gate-relais.")"
 }
 
+# Programmes du navigateur du portail : Chromium ; écran virtuel, encodage H.264 et Opus et son
+# (Gate 0.54 : sans eux, le portail montre des images de la page). Installe ce qui manque ; le
+# service est relancé s'il tournait. Faux : Chromium manque toujours.
+browser_programs() {
+  if ! command -v chromium >/dev/null; then
+    echo "  $(t "Installing Chromium…" "Installation de Chromium…")"
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq chromium >/dev/null || return 1
+  fi
+  if ! command -v Xvfb >/dev/null || ! command -v ffmpeg >/dev/null || ! command -v pulseaudio >/dev/null; then
+    echo "  $(t "Installing Xvfb, ffmpeg and PulseAudio (video and sound)…" "Installation de Xvfb, ffmpeg et PulseAudio (vidéo et son)…")"
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends xvfb ffmpeg pulseaudio >/dev/null ||
+      warn "$(t "Xvfb, ffmpeg or PulseAudio could not be installed: pictures of the page only." "Xvfb, ffmpeg ou PulseAudio n'a pas pu être installé : images de la page seulement.")"
+    systemctl try-restart portunia-gate-navigateur >/dev/null 2>&1 || true
+  fi
+}
+
 # Navigateur du portail web (Gate 0.53) : Chromium et le service qui le lance, pour ouvrir une
-# sortie web dans un onglet du portail. « off » / « arret » l'arrête.
+# sortie web dans un onglet du portail. « off » / « arret » l'arrête. Aussi depuis Portunia
+# (Administrer › Portail web, Gate 0.55).
 setup_browser() {
   [ "$MODE" != docker ] || die "$(t "The portal browser needs the Debian package (not Docker)." "Le navigateur du portail demande le paquet Debian (pas Docker).")"
   if [ "$ACTION_ARG" = off ] || [ "$ACTION_ARG" = arret ]; then
@@ -598,18 +633,7 @@ setup_browser() {
     ok "$(t "Portal browser stopped: web egress opens from Portunia only." "Navigateur du portail arrêté : la sortie web ne s'ouvre plus que depuis Portunia.")"
     return
   fi
-  if ! command -v chromium >/dev/null; then
-    echo "  $(t "Installing Chromium…" "Installation de Chromium…")"
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq chromium >/dev/null || die "$(t "Chromium could not be installed (apt-get install chromium)." "Chromium n'a pas pu être installé (apt-get install chromium).")"
-  fi
-  # Vidéo et son (Gate 0.54) : écran virtuel, encodage H.264 et Opus, son du navigateur. Sans eux,
-  # le portail montre des images de la page.
-  if ! command -v Xvfb >/dev/null || ! command -v ffmpeg >/dev/null || ! command -v pulseaudio >/dev/null; then
-    echo "  $(t "Installing Xvfb, ffmpeg and PulseAudio (video and sound)…" "Installation de Xvfb, ffmpeg et PulseAudio (vidéo et son)…")"
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends xvfb ffmpeg pulseaudio >/dev/null ||
-      warn "$(t "Xvfb, ffmpeg or PulseAudio could not be installed: pictures of the page only." "Xvfb, ffmpeg ou PulseAudio n'a pas pu être installé : images de la page seulement.")"
-    systemctl try-restart portunia-gate-navigateur >/dev/null 2>&1 || true
-  fi
+  browser_programs || die "$(t "Chromium could not be installed (apt-get install chromium)." "Chromium n'a pas pu être installé (apt-get install chromium).")"
   systemctl daemon-reload
   systemctl enable --now portunia-gate-navigateur >/dev/null 2>&1 ||
     { journalctl -u portunia-gate-navigateur -n 20 --no-pager >&2; die "$(t "The browser service does not start." "Le service du navigateur ne démarre pas.")"; }

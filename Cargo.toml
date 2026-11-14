@@ -1,6 +1,6 @@
 [package]
 name = "portunia-gate"
-version = "0.54.0"
+version = "0.55.0"
 description = "Passerelle SSH et Bureau à distance de Portunia : accès contrôlés, coffre, enregistrement et journal d'audit"
 edition = "2021"
 publish = false
@@ -66,6 +66,7 @@ maintainer-scripts = "debian/"
 assets = [
     ["target/release/portunia-gate", "usr/lib/portunia-gate/portunia-gate", "755"],
     ["debian/portunia-gate.sh", "usr/bin/portunia-gate", "755"],
+    ["installer.sh", "usr/lib/portunia-gate/installer.sh", "755"],
     ["debian/portunia-gate.service", "usr/lib/systemd/system/portunia-gate.service", "644"],
     ["debian/portunia-gate-relais.service", "usr/lib/systemd/system/portunia-gate-relais.service", "644"],
     ["debian/portunia-gate-navigateur.service", "usr/lib/systemd/system/portunia-gate-navigateur.service", "644"],

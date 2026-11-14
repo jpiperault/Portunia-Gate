@@ -5,6 +5,8 @@ Description=Portunia Gate, demandes de mise à jour
 
 [Path]
 PathExists=/var/lib/portunia-gate/mise-a-jour/demande.json
+# Navigateur du portail (0.55) : activer, compléter ou arrêter, demandé depuis Portunia.
+PathExists=/var/lib/portunia-gate/mise-a-jour/navigateur.json
 Unit=portunia-gate-update.service
 
 [Install]
