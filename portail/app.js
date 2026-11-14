@@ -249,10 +249,28 @@ function approvalPanel(info, reload) {
   });
   const recent = info.mes_demandes.filter((r) => r.etat !== 'attente').slice(0, 5).map((r) =>
     h('div', { class: 'native-hint' }, `${r.serveur} · ${status[r.etat] ?? r.etat}${r.decide_par ? T(` by ${r.decide_par}`, ` par ${r.decide_par}`) : ''}${r.jusqua && r.etat === 'accordee' ? T(` until ${when(r.jusqua)}`, ` jusqu'au ${when(r.jusqua)}`) : ''}${r.commentaire ? ` — ${r.commentaire}` : ''}`));
+  // Approbateur (Gate 0.51) : demandes à accorder ou refuser, depuis le portail ou le téléphone.
+  const durations = [[30, T('30 min', '30 min')], [60, T('1 hour', '1 heure')], [240, T('4 hours', '4 heures')], [480, T('8 hours', '8 heures')], [1440, T('1 day', '1 jour')]];
+  const decide = (info.a_traiter || []).map((r) => {
+    const length = h('select', { class: 'input appr-duree', 'aria-label': T('Duration', 'Durée') }, ...durations.map(([m, label]) => h('option', { value: String(m), selected: m === 60 }, label)));
+    const note = h('input', { class: 'input', placeholder: T('Comment (optional)', 'Commentaire (facultatif)'), maxlength: '500' });
+    const answer = async (grant) => {
+      try { await api('POST', `/api/approbations/${r.id}/decision`, { accorder: grant, minutes: Number(length.value), commentaire: note.value }); reload(); }
+      catch (e) { alert(e.message); }
+    };
+    return h('div', { class: 'appr-row appr-decide' },
+      h('b', {}, `${r.compte} → ${r.serveur}`),
+      h('span', { class: 'native-hint' }, `${when(r.demande)} · ${r.motif}${r.ticket ? ` · ${r.ticket}` : ''}`),
+      length, note,
+      h('button', { class: 'btn primary', type: 'button', onclick: () => answer(true) }, T('Grant', 'Accorder')),
+      h('button', { class: 'btn', type: 'button', onclick: () => answer(false) }, T('Refuse', 'Refuser')));
+  });
+  const decidePanel = decide.length ? [h('h3', { class: 'appr-title', id: 'approbations' }, T(`To decide (${decide.length})`, `À décider (${decide.length})`)), ...decide] : [];
   return h('details', { class: 'native', open: true },
     h('summary', {}, T('Servers on approval', 'Serveurs sur approbation')),
     h('div', { class: 'native-body' },
-      h('p', { class: 'native-hint' }, T('An approver must grant access, for a duration, before you can open these servers.', 'Un approbateur doit accorder l\'accès, pour une durée, avant que vous puissiez ouvrir ces serveurs.')),
+      ...decidePanel,
+      rows.length ? h('p', { class: 'native-hint' }, T('An approver must grant access, for a duration, before you can open these servers.', 'Un approbateur doit accorder l\'accès, pour une durée, avant que vous puissiez ouvrir ces serveurs.')) : null,
       ...rows, ...recent));
 }
 
@@ -309,11 +327,16 @@ async function home(state) {
   // Entrée RDP native ouverte et serveurs accessibles ainsi : panneau d'aide (Gate 0.34).
   const native = await api('GET', '/api/rdp-natif').catch(() => null);
   const approvals = await api('GET', '/api/approbations').catch(() => null);
+  // Application Android (Portunia 0.94) : un approbateur est prévenu des nouvelles demandes.
+  if (approvals?.approbateur) {
+    try { window.PortuniaGateApp?.approbateur((approvals.a_traiter || []).length); } catch { /* application ancienne */ }
+  }
   app.replaceChildren(
     h('header', { class: 'top' }, brand(state.nom), h('span', { class: 'grow' }), timer, h('span', { class: 'who' }, data.login), langSwitch(), logout),
     h('section', { class: 'home' }, h('div', { style: 'display:flex;gap:12px;flex-wrap:wrap;align-items:center' }, search, count), grid,
-      approvals?.a_demander?.length ? approvalPanel(approvals, () => home(state)) : null,
+      approvals?.a_demander?.length || approvals?.a_traiter?.length ? approvalPanel(approvals, () => home(state)) : null,
       native?.actif && native.serveurs.length ? nativePanel(native) : null));
+  if (location.search.includes('approbations')) document.getElementById('approbations')?.scrollIntoView({ block: 'start' });
 }
 
 // ---------- Démarrage ----------

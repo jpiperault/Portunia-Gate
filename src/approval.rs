@@ -199,6 +199,20 @@ pub async fn request(state: &Arc<State>, user: &User, target_name: &str, reason:
     get(db, id).await?.ok_or_else(|| anyhow!("demande introuvable"))
 }
 
+/// Ce compte décide-t-il de demandes (administrateur pour une règle sans groupe d'approbateurs,
+/// ou membre d'un groupe d'approbateurs) ? Sert à l'application Android pour ses notifications.
+pub async fn is_approver(db: &sqlx::PgPool, user: &User) -> Result<bool> {
+    Ok(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM rules r WHERE r.approval AND (
+            (r.approver_group IS NULL AND $2) OR
+            EXISTS (SELECT 1 FROM group_members m WHERE m.group_id = r.approver_group AND m.user_id = $1)))",
+    )
+    .bind(user.id)
+    .bind(user.role == "admin")
+    .fetch_one(db)
+    .await?)
+}
+
 /// Demandes en attente que ce compte peut décider.
 pub async fn to_decide(db: &sqlx::PgPool, approver: &User) -> Result<Vec<Request>> {
     let pending: Vec<Request> = sqlx::query_as(&format!("{SELECT} WHERE a.status = 'attente' ORDER BY a.requested_at")).fetch_all(db).await?;

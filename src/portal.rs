@@ -689,6 +689,7 @@ fn build_router(portal: Portal) -> Router {
         // Approbation : serveurs à demander, demandes du compte.
         .route("/api/approbations", get(portal_approvals).post(portal_approval_request))
         .route("/api/approbations/{id}/annuler", post(portal_approval_cancel))
+        .route("/api/approbations/{id}/decision", post(portal_approval_decide))
         .route("/api/rdp-natif/mot-de-passe", post(native_password_new).delete(native_password_remove))
         .route("/ws-rdp", get(desktop))
         // Assistance à distance : téléchargement de Portunia Assist et relais (sans compte).
@@ -873,6 +874,20 @@ async fn page_index(st: Ctx, peer: ConnectInfo<SocketAddr>, req: axum::extract::
 #[cfg(test)]
 mod static_tests {
     use super::*;
+
+    #[test]
+    fn decision_depuis_une_page_du_portail() {
+        let h = |r: &str| {
+            let mut m = HeaderMap::new();
+            m.insert(header::REFERER, HeaderValue::from_str(r).unwrap());
+            m
+        };
+        assert!(from_portal_page(&h("https://gate.acme.fr/")));
+        assert!(from_portal_page(&h("https://gate.acme.fr/?approbations")));
+        assert!(!from_portal_page(&h("https://gate.acme.fr/web/idrac/index.html")));
+        assert!(!from_portal_page(&h("https://gate.acme.fr/static/x.js")));
+        assert!(!from_portal_page(&HeaderMap::new()), "sans Referer : refusé");
+    }
 
     #[test]
     fn requete_d_un_autre_site() {
@@ -1073,6 +1088,15 @@ struct WebSession {
 
 /// Session du navigateur : valable, pas expirée, compte actif et toujours dans le groupe.
 async fn web_session(portal: &Portal, headers: &HeaderMap, s: &Settings) -> Result<Option<WebSession>> {
+    web_session_touch(portal, headers, s, true).await
+}
+
+/// Même contrôle, sans prolonger la session (lecture de fond : l'inactivité compte toujours).
+async fn web_session_quiet(portal: &Portal, headers: &HeaderMap, s: &Settings) -> Result<Option<WebSession>> {
+    web_session_touch(portal, headers, s, false).await
+}
+
+async fn web_session_touch(portal: &Portal, headers: &HeaderMap, s: &Settings, touch: bool) -> Result<Option<WebSession>> {
     let Some(token) = cookie_token(headers) else { return Ok(None) };
     let db = &portal.state.db;
     let row: Option<(Uuid, DateTime<Utc>, DateTime<Utc>, DateTime<Utc>, Option<Uuid>)> =
@@ -1090,10 +1114,12 @@ async fn web_session(portal: &Portal, headers: &HeaderMap, s: &Settings) -> Resu
     if !in_group(db, user.id, &s.group).await? {
         return Ok(None);
     }
-    sqlx::query("UPDATE web_sessions SET last_seen = now() WHERE token_hash = $1")
-        .bind(sha256_hex(token.as_bytes()))
-        .execute(db)
-        .await?;
+    if touch {
+        sqlx::query("UPDATE web_sessions SET last_seen = now() WHERE token_hash = $1")
+            .bind(sha256_hex(token.as_bytes()))
+            .execute(db)
+            .await?;
+    }
     Ok(Some(WebSession { user, token_hash: sha256_hex(token.as_bytes()), expires, created, device }))
 }
 
@@ -1668,11 +1694,19 @@ async fn native_info(AxState(portal): Ctx, headers: HeaderMap) -> Response {
 }
 
 /// Serveurs que le compte peut demander, et ses demandes récentes.
-async fn portal_approvals(AxState(portal): Ctx, headers: HeaderMap) -> Response {
+#[derive(Deserialize, Default)]
+struct ApprovalsQuery {
+    /// Lecture de fond (application Android) : la session n'est pas prolongée par elle.
+    #[serde(default)]
+    veille: Option<String>,
+}
+
+async fn portal_approvals(AxState(portal): Ctx, headers: HeaderMap, Query(q): Query<ApprovalsQuery>) -> Response {
     let result = async {
         let state = &portal.state;
         let s = settings(state).await?;
-        let Some(w) = web_session(&portal, &headers, &s).await? else {
+        let session = if q.veille.is_some() { web_session_quiet(&portal, &headers, &s).await? } else { web_session(&portal, &headers, &s).await? };
+        let Some(w) = session else {
             return Ok(err(StatusCode::UNAUTHORIZED, t!("Session expired", "Session expirée")));
         };
         let open: Vec<serde_json::Value> = crate::approval::requestable(&state.db, &w.user)
@@ -1681,7 +1715,57 @@ async fn portal_approvals(AxState(portal): Ctx, headers: HeaderMap) -> Response 
             .map(|(t, pending)| json!({ "serveur": t.name, "description": t.description, "demande": pending.map(|p| p.json()) }))
             .collect();
         let mine: Vec<serde_json::Value> = crate::approval::mine(&state.db, w.user.id).await?.iter().take(10).map(|r| r.json()).collect();
-        Ok::<_, anyhow::Error>(Json(json!({ "a_demander": open, "mes_demandes": mine })).into_response())
+        // Demandes que ce compte peut accorder ou refuser (approbateur), depuis la Gate 0.51.
+        let decide: Vec<serde_json::Value> = crate::approval::to_decide(&state.db, &w.user).await?.iter().map(|r| r.json()).collect();
+        let approver = crate::approval::is_approver(&state.db, &w.user).await?;
+        Ok::<_, anyhow::Error>(Json(json!({ "a_demander": open, "mes_demandes": mine, "a_traiter": decide, "approbateur": approver })).into_response())
+    }
+    .await;
+    result.unwrap_or_else(internal)
+}
+
+#[derive(serde::Deserialize)]
+struct PortalDecision {
+    accorder: bool,
+    #[serde(default)]
+    minutes: i64,
+    #[serde(default)]
+    commentaire: String,
+}
+
+/// Une page relayée (/web/…) partage l'origine du portail (A1) : elle ne décide jamais d'une
+/// approbation. La décision doit venir d'une page du portail lui-même.
+fn from_portal_page(headers: &HeaderMap) -> bool {
+    let Some(referer) = headers.get(header::REFERER).and_then(|v| v.to_str().ok()) else { return false };
+    let path = referer.split_once("://").map(|(_, rest)| rest.find('/').map(|i| &rest[i..]).unwrap_or("/")).unwrap_or(referer);
+    !path.starts_with("/web/") && !path.starts_with("/static/")
+}
+
+async fn portal_approval_decide(
+    AxState(portal): Ctx,
+    axum::Extension(entry): axum::Extension<Entry>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(body): Json<PortalDecision>,
+) -> Response {
+    let ip = client_ip(&portal, peer, &headers);
+    let result = async {
+        let state = &portal.state;
+        let s = settings(state).await?;
+        if !same_site(&headers, s.url_for(entry)) || !from_portal_page(&headers) {
+            return Ok(err(StatusCode::FORBIDDEN, t!("Request refused", "Requête refusée")));
+        }
+        let Some(w) = web_session(&portal, &headers, &s).await? else {
+            return Ok(err(StatusCode::UNAUTHORIZED, t!("Session expired", "Session expirée")));
+        };
+        match crate::approval::decide(state, &w.user, id, body.accorder, body.minutes, &body.commentaire).await {
+            Ok(r) => {
+                tracing::info!("{} {} ({ip})", t!("approval decided from the portal by", "approbation décidée depuis le portail par"), w.user.login);
+                Ok::<_, anyhow::Error>(Json(r.json()).into_response())
+            }
+            Err(e) => Ok(err(StatusCode::BAD_REQUEST, &e.to_string())),
+        }
     }
     .await;
     result.unwrap_or_else(internal)

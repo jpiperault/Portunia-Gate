@@ -100,6 +100,9 @@ input.code { letter-spacing: .3em; font-family: var(--mono); }
 .appr-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .appr-row b { min-width: 120px; }
 .appr-row .input { flex: 1; min-width: 180px; }
+.appr-row .appr-duree { flex: none; min-width: 0; width: auto; }
+.appr-decide { padding: 8px 0; border-bottom: 1px solid var(--line); }
+.appr-title { font-size: 14px; margin: 4px 0; }
 .appr-row .appr-ticket { flex: 0 1 140px; min-width: 110px; }
 .appr-state { color: var(--muted); }
 
