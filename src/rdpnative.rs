@@ -339,7 +339,7 @@ async fn handle(state: &Arc<State>, mut tcp: TcpStream, peer: SocketAddr, permit
     let s = settings(state).await?;
     let addr = format!("{} (natif)", peer.ip());
     let credentials = take_credentials(&token);
-    let a = rdp::authorize(db, &token, addr, None, |t| s.allows(&t.mode)).await.map_err(|(_, e)| e)?;
+    let a = rdp::authorize(db, &token, crate::api::Usage::RdpNative, addr, None, |t| s.allows(&t.mode)).await.map_err(|(_, e)| e)?;
     drop(permit);
     rdp::check_space(state, &a).await.map_err(|(_, e)| e)?;
     if a.target.mode == "rebond" {
@@ -576,7 +576,7 @@ async fn jump(state: &Arc<State>, a: Allowed, mut client: TcpStream, request: &R
     model::session_start(db, id, user.id, target.id, "rebond", "rdp (natif)", &a.addr).await?;
     audit::note(db, &user.login, "rebond.ouvert", json!({ "session": id, "cible": target.name, "protocole": "rdp", "adresse": a.addr })).await;
     let started = Instant::now();
-    let (_watch, mut cut) = state.live.watch(crate::live::Watched { user: user.id, login: &user.login, target: Some(target), web: false, recorded: false, session: Some(id) });
+    let (_watch, mut cut) = state.live.watch(crate::live::Watched { user: user.id, login: &user.login, target: Some(target), web: false, recorded: false, session: Some(id), portal: None });
     // Chaque sens compte ses octets : un poste qui coupe brutalement ne les efface pas.
     let moved = AtomicU64::new(0);
     let reason = {

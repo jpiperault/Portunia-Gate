@@ -194,7 +194,7 @@ impl Navigation {
         let id = Uuid::new_v4();
         model::session_start(&state.db, id, user, target.id, "navigation", "navigation", addr).await?;
         audit::note(&state.db, login, "navigation.ouverte", json!({ "session": id, "cible": target.name, "adresse": addr })).await;
-        let (guard, cut) = state.live.watch(Watched { user, login, target: Some(target), web: false, recorded: false, session: Some(id) });
+        let (guard, cut) = state.live.watch(Watched { user, login, target: Some(target), web: false, recorded: false, session: Some(id), portal: None });
         Ok(Arc::new(Navigation {
             state,
             id,

@@ -49,7 +49,7 @@ use crate::{audit, keys::sha256_hex, model, State};
 /// D'où vient la demande : le portail web (sessions fermées avec le portail) ou Portunia.
 pub enum Origin {
     /// Portail : la session web fixe la durée, et le jeton doit être celui de son compte.
-    Portal { addr: String, user: Uuid, expires: DateTime<Utc>, idle: Duration },
+    Portal { addr: String, session: String, user: Uuid, expires: DateTime<Utc>, idle: Duration },
     Portunia { addr: String },
     /// Entrée RDP native (mstsc, Remmina…) : voir `rdpnative`.
     Native,
@@ -345,9 +345,9 @@ pub(crate) struct Allowed {
 
 /// Jeton à usage unique, compte, serveur et règle. `portal_user` : compte de la session web
 /// (le jeton doit être le sien) ; `mode_ok` : modes que cette entrée accepte.
-pub(crate) async fn authorize(db: &sqlx::PgPool, token: &str, addr: String, portal_user: Option<Uuid>, mode_ok: impl Fn(&model::Target) -> bool) -> Result<Allowed, Refused> {
-    // Le jeton dit qui et vers quel serveur.
-    let Some((user_id, target_id, real_addr)) = crate::api::take_ticket(db, token).await.map_err(general)? else {
+pub(crate) async fn authorize(db: &sqlx::PgPool, token: &str, usage: crate::api::Usage, addr: String, portal_user: Option<Uuid>, mode_ok: impl Fn(&model::Target) -> bool) -> Result<Allowed, Refused> {
+    // Le jeton dit qui et vers quel serveur ; il doit avoir été remis pour cette entrée (B5).
+    let Some((user_id, target_id, real_addr)) = crate::api::take_ticket(db, token, usage).await.map_err(general)? else {
         return Err((Refusal::Http(401), anyhow!(t!("invalid, expired or already used token", "jeton invalide, expiré ou déjà utilisé"))));
     };
     let addr = real_addr.unwrap_or(addr);
@@ -532,7 +532,7 @@ async fn run(state: &Arc<State>, socket: &mut WebSocket, origin: Origin) -> Resu
     // un tunnel SSH de bout en bout).
     let web = portal_user.is_some();
     let prepared = async {
-        let a = authorize(db, &proxy_auth, addr, portal_user, |t| t.mode == "enregistre" || t.vaulted() || (t.mode == "rebond" && web)).await?;
+        let a = authorize(db, &proxy_auth, crate::api::Usage::Rdp, addr, portal_user, |t| t.mode == "enregistre" || t.vaulted() || (t.mode == "rebond" && web)).await?;
         check_space(state, &a).await?;
         let mut o = open_server(db, &a, x224_connection_request.as_bytes()).await?;
         // Coffre : la Gate s'authentifie auprès du serveur avant de répondre au client.
@@ -682,7 +682,7 @@ pub(crate) async fn relay_session(
         .await;
     }
     let started = Instant::now();
-    let (_watch, mut cut) = state.live.watch(crate::live::Watched { user: user.id, login: &user.login, target: Some(target), web, recorded: !jump, session: Some(id) });
+    let (_watch, mut cut) = state.live.watch(crate::live::Watched { user: user.id, login: &user.login, target: Some(target), web, recorded: !jump, session: Some(id), portal: match origin { Origin::Portal { session, .. } => Some(session.clone()), _ => None } });
     let mut tick = tokio::time::interval(Duration::from_secs(5));
     // Octets relayés (rebond : sans enregistrement pour les compter).
     let moved = AtomicU64::new(0);

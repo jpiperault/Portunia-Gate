@@ -63,6 +63,19 @@ pub fn parse_version(v: &str) -> Option<(u64, u64, u64)> {
     it.next().is_none().then_some(out)
 }
 
+/// Version demandée pour une mise à jour : exactement « a.b.c » (1 à 4 chiffres chacun, « v »
+/// devant toléré), rendue sous sa forme canonique. Elle sert à construire l'adresse et le nom du
+/// paquet : rien d'autre (suffixe, chemin, « .. ») ne doit pouvoir y passer.
+pub fn strict_version(v: &str) -> Option<String> {
+    let v = v.trim().strip_prefix('v').unwrap_or(v.trim());
+    let parts: Vec<&str> = v.split('.').collect();
+    if parts.len() != 3 || parts.iter().any(|p| p.is_empty() || p.len() > 4 || !p.bytes().all(|b| b.is_ascii_digit())) {
+        return None;
+    }
+    let n: Vec<u64> = parts.iter().map(|p| p.parse().unwrap_or(0)).collect();
+    Some(format!("{}.{}.{}", n[0], n[1], n[2]))
+}
+
 /// `a` est plus récente que `b`.
 pub fn newer(a: &str, b: &str) -> bool {
     matches!((parse_version(a), parse_version(b)), (Some(x), Some(y)) if x > y)
@@ -205,6 +218,10 @@ pub async fn plan(state: &State, version: &str, at: Option<DateTime<Utc>>, notic
     if let Some(why) = not_possible() {
         bail!(why);
     }
+    let Some(version) = strict_version(version) else {
+        bail!(t!(format!("Invalid version « {version} »: expected 1.2.3"), format!("Version « {version} » invalide : forme 1.2.3 attendue")));
+    };
+    let version = version.as_str();
     if !newer(version, CURRENT) {
         bail!(t!(format!("Version {version} is not newer than the installed one ({CURRENT})."), format!("La version {version} n'est pas plus récente que celle installée ({CURRENT}).")));
     }
@@ -444,11 +461,12 @@ fn take_request(data_dir: &Path) -> Result<Request> {
     let r: Request = serde_json::from_str(&text).context("demande illisible")?;
     anyhow::ensure!(!r.id.is_empty() && r.id.len() <= 64 && r.id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'), "identifiant de demande invalide");
     anyhow::ensure!(r.par.len() <= 64 && !r.par.chars().any(char::is_control), "auteur de la demande invalide");
-    anyhow::ensure!(parse_version(&r.version).is_some(), "version invalide");
+    anyhow::ensure!(strict_version(&r.version).as_deref() == Some(r.version.as_str()), "version invalide");
     Ok(r)
 }
 
 fn download_checked(version: &str, dest: &Path) -> Result<()> {
+    anyhow::ensure!(strict_version(version).as_deref() == Some(version), "version invalide");
     let base = format!("{}/download/v{version}", source());
     let sums = String::from_utf8_lossy(&get(&format!("{base}/SHA256SUMS"), 64 * 1024)?).into_owned();
     let expected = sum_of(&sums, "portunia-gate_amd64.deb").ok_or_else(|| anyhow!(t!(format!("no portunia-gate_amd64.deb in the SHA256SUMS of {version}"), format!("pas de portunia-gate_amd64.deb dans le SHA256SUMS de la {version}"))))?;
@@ -596,6 +614,7 @@ enum Done {
 }
 
 fn attempt(config: &Config, dir: &Path, r: &Request, run: &mut Runner) -> Result<Done> {
+    anyhow::ensure!(strict_version(&r.version).as_deref() == Some(r.version.as_str()), "version invalide");
     if !newer(&r.version, CURRENT) {
         bail!(t!(format!("version {} refused: not newer than {CURRENT}", r.version), format!("version {} refusée : pas plus récente que la {CURRENT}", r.version)));
     }
@@ -665,6 +684,12 @@ mod tests {
         assert_eq!(parse_version("0.39.0-1"), Some((0, 39, 0)));
         assert_eq!(parse_version("0.39"), None);
         assert_eq!(parse_version("0.39.0.1"), None);
+        // A3 : seule la forme exacte passe vers l'adresse du paquet.
+        assert_eq!(strict_version("v0.49.0").as_deref(), Some("0.49.0"));
+        assert_eq!(strict_version(" 1.02.3 ").as_deref(), Some("1.2.3"));
+        for bad in ["99.0.0-/../../evil/repo/releases/download/v1", "99.0.0-1", r"99.0.0\..\x","1.2", "1.2.3.4", "12345.0.0", "1.2.x", "", "+1.2.3", "1. 2.3"] {
+            assert_eq!(strict_version(bad), None, "{bad}");
+        }
         assert!(newer("0.40.0", "0.39.9"));
         assert!(newer("1.0.0", "0.99.99"));
         assert!(!newer("0.39.0", "0.39.0"));

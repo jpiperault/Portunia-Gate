@@ -13,6 +13,13 @@
 //! Le mot de passe ne part jamais vers le navigateur. Un jeton ne sert qu'une fois, 10 minutes
 //! au plus, et seulement pour le compte et le serveur qui l'ont reçu ; chaque usage est noté
 //! au journal (`web.coffre`, avec le chemin), pour voir où le mot de passe a été envoyé.
+//!
+//! Depuis la 0.49 (A2 de l'audit du 11 novembre), le jeton n'est remplacé que dans un envoi qui
+//! ressemble à une connexion : méthode POST, formulaire ou JSON, jeton présent une seule fois et
+//! valeur entière d'un seul champ « mot de passe » (pass, pwd, mdp, secret). Jamais dans le
+//! chemin, ni dans un autre champ (recherche, profil) : une page qui recopierait ce qu'elle reçoit
+//! montrerait sinon le mot de passe. Un jeton vu ailleurs est brûlé et noté (`web.coffre_refuse`),
+//! et si la réponse contient malgré tout le mot de passe, il y est masqué (`web.coffre_masque`).
 
 use std::{
     collections::{HashMap, HashSet},
@@ -73,38 +80,148 @@ fn take_markers(text: &str, user: Uuid, target: Uuid) -> Vec<String> {
     found
 }
 
-/// Remplace dans le corps d'une requête les jetons de ce compte par le mot de passe, encodé
-/// selon le type du corps. `None` : aucun jeton.
-pub fn substitute_body(body: &[u8], content_type: &str, user: Uuid, target: Uuid, password: &str) -> Option<Vec<u8>> {
-    let text = std::str::from_utf8(body).ok()?;
-    let markers = take_markers(text, user, target);
-    if markers.is_empty() {
-        return None;
-    }
-    let ct = content_type.to_ascii_lowercase();
-    let value = if ct.contains("x-www-form-urlencoded") {
-        form_encode(password)
-    } else if ct.contains("json") {
-        let quoted = serde_json::to_string(password).unwrap_or_default();
-        quoted[1..quoted.len() - 1].to_string()
-    } else {
-        password.to_string()
-    };
-    let mut out = text.to_string();
-    for m in &markers {
-        out = out.replace(m, &value);
-    }
-    Some(out.into_bytes())
+/// Ce que devient le corps d'une requête en mode coffre.
+#[derive(Debug, PartialEq)]
+pub enum Substitution {
+    /// Aucun jeton de ce compte : le corps part tel quel.
+    None,
+    /// Jeton présent hors d'un envoi de connexion : brûlé, le corps part tel quel (sans le mot de passe).
+    Refused(&'static str),
+    /// Connexion : le jeton est remplacé par le mot de passe.
+    Done(Vec<u8>),
 }
 
-/// Chemin et paramètres : jetons remplacés (encodés pour une adresse).
-pub fn substitute_path(path: &str, user: Uuid, target: Uuid, password: &str) -> Option<String> {
-    let markers = take_markers(path, user, target);
-    if markers.is_empty() {
+/// Nom d'un champ de mot de passe (« password », « j_password », « pwd », « mdp »…).
+fn password_field(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    ["pass", "pwd", "mdp", "secret"].iter().any(|k| n.contains(k))
+}
+
+fn form_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'+' => out.push(b' '),
+            b'%' if i + 2 < b.len() => {
+                match u8::from_str_radix(std::str::from_utf8(&b[i + 1..i + 3]).unwrap_or("zz"), 16) {
+                    Ok(v) => {
+                        out.push(v);
+                        i += 2;
+                    }
+                    Err(_) => out.push(b'%'),
+                }
+            }
+            c => out.push(c),
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Champs (nom, valeur) d'un objet JSON, à toutes les profondeurs ; `f` peut changer la valeur.
+fn json_fields(v: &mut serde_json::Value, f: &mut dyn FnMut(&str, &mut serde_json::Value)) {
+    match v {
+        serde_json::Value::Object(map) => {
+            for (k, val) in map.iter_mut() {
+                f(k, val);
+                json_fields(val, f);
+            }
+        }
+        serde_json::Value::Array(list) => list.iter_mut().for_each(|x| json_fields(x, f)),
+        _ => {}
+    }
+}
+
+/// Remplace le jeton par le mot de passe, seulement dans un envoi de connexion (voir l'en-tête
+/// du module). `post` : la requête est un POST.
+pub fn substitute_body(body: &[u8], content_type: &str, post: bool, user: Uuid, target: Uuid, password: &str) -> Substitution {
+    let Ok(text) = std::str::from_utf8(body) else { return Substitution::None };
+    let markers = take_markers(text, user, target);
+    let Some(marker) = markers.first() else { return Substitution::None };
+    if !post {
+        return Substitution::Refused("jeton envoyé hors d'un POST");
+    }
+    if markers.len() != 1 || text.matches(marker.as_str()).count() != 1 {
+        return Substitution::Refused("jeton répété");
+    }
+    let ct = content_type.to_ascii_lowercase();
+    if ct.contains("x-www-form-urlencoded") {
+        let pairs: Vec<(String, String)> = text.split('&').map(|p| {
+            let (k, v) = p.split_once('=').unwrap_or((p, ""));
+            (form_decode(k), form_decode(v))
+        }).collect();
+        let Some(i) = pairs.iter().position(|(_, v)| v == marker) else { return Substitution::Refused("jeton mêlé à un autre texte") };
+        if !password_field(&pairs[i].0) {
+            return Substitution::Refused("jeton hors d'un champ mot de passe");
+        }
+        if pairs.iter().filter(|(k, v)| password_field(k) && !v.is_empty()).count() != 1 {
+            return Substitution::Refused("plusieurs champs mot de passe (changement de mot de passe ?)");
+        }
+        let parts: Vec<&str> = text.split('&').collect();
+        let out: Vec<String> = parts.iter().enumerate().map(|(j, p)| {
+            if j == i {
+                format!("{}={}", p.split_once('=').map(|x| x.0).unwrap_or(p), form_encode(password))
+            } else {
+                p.to_string()
+            }
+        }).collect();
+        return Substitution::Done(out.join("&").into_bytes());
+    }
+    if ct.contains("json") {
+        let Ok(mut v) = serde_json::from_str::<serde_json::Value>(text) else { return Substitution::Refused("JSON illisible") };
+        let (mut hits, mut wrong, mut filled) = (0, 0, 0);
+        json_fields(&mut v, &mut |k, val| {
+            let is_pw = password_field(k);
+            if is_pw && val.as_str().is_some_and(|s| !s.is_empty()) {
+                filled += 1;
+            }
+            if val.as_str() == Some(marker.as_str()) {
+                if is_pw {
+                    hits += 1;
+                    *val = serde_json::Value::String(password.to_string());
+                } else {
+                    wrong += 1;
+                }
+            }
+        });
+        if wrong > 0 || hits != 1 {
+            return Substitution::Refused("jeton hors d'un champ mot de passe");
+        }
+        if filled != 1 {
+            return Substitution::Refused("plusieurs champs mot de passe (changement de mot de passe ?)");
+        }
+        return Substitution::Done(serde_json::to_vec(&v).unwrap_or_default());
+    }
+    Substitution::Refused("format d'envoi non pris en charge")
+}
+
+/// Jeton de ce compte dans le chemin ou les paramètres : jamais remplacé (une page 404 qui
+/// recopie l'adresse montrerait le mot de passe), seulement brûlé. Vrai s'il y en avait un.
+pub fn marker_in_path(path: &str, user: Uuid, target: Uuid) -> bool {
+    !take_markers(path, user, target).is_empty()
+}
+
+/// Le mot de passe, sous ses formes courantes (brut, HTML, URL, JSON), masqué dans une réponse.
+/// `None` : il n'y était pas.
+pub fn mask_password(page: &[u8], password: &str) -> Option<Vec<u8>> {
+    if password.len() < 4 {
         return None;
     }
-    let value = form_encode(password).replace('+', "%20");
-    Some(markers.iter().fold(path.to_string(), |p, m| p.replace(m, &value)))
+    let text = String::from_utf8_lossy(page);
+    let html = password.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&#39;");
+    let quoted = serde_json::to_string(password).unwrap_or_default();
+    let forms = [password.to_string(), html, form_encode(password), form_encode(password).replace('+', "%20"), quoted[1..quoted.len() - 1].to_string()];
+    let mut out = text.to_string();
+    let mut found = false;
+    for f in forms.iter().filter(|f| !f.is_empty()) {
+        if out.contains(f.as_str()) {
+            found = true;
+            out = out.replace(f.as_str(), "********");
+        }
+    }
+    found.then(|| out.into_bytes())
 }
 
 /// En-tête `Authorization: Basic` calculé par l'application avec le jeton.
@@ -256,33 +373,73 @@ mod tests {
         let pw = "p@ss w\"rd&é";
         let m = new_marker(u, t).unwrap();
         let json = format!(r#"{{"user":"admin","password":"{m}"}}"#);
-        let out = substitute_body(json.as_bytes(), "application/json", u, t, pw).unwrap();
+        let Substitution::Done(out) = substitute_body(json.as_bytes(), "application/json", true, u, t, pw) else { panic!("JSON") };
         let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(v["password"], pw);
         // Usage unique.
-        assert!(substitute_body(json.as_bytes(), "application/json", u, t, pw).is_none());
+        assert_eq!(substitute_body(json.as_bytes(), "application/json", true, u, t, pw), Substitution::None);
 
         let m = new_marker(u, t).unwrap();
         let form = format!("login=admin&pass={m}&x=1");
-        let out = String::from_utf8(substitute_body(form.as_bytes(), "application/x-www-form-urlencoded; charset=UTF-8", u, t, pw).unwrap()).unwrap();
-        assert_eq!(out, "login=admin&pass=p%40ss+w%22rd%26%C3%A9&x=1");
+        let Substitution::Done(out) = substitute_body(form.as_bytes(), "application/x-www-form-urlencoded; charset=UTF-8", true, u, t, pw) else { panic!("formulaire") };
+        assert_eq!(String::from_utf8(out).unwrap(), "login=admin&pass=p%40ss+w%22rd%26%C3%A9&x=1");
 
         let m = new_marker(u, t).unwrap();
         let basic = format!("Basic {}", STANDARD.encode(format!("admin:{m}")));
         assert_eq!(substitute_basic(&basic, u, t, pw).unwrap(), basic_header("admin", pw));
+    }
 
+    /// A2 : le jeton ne devient le mot de passe que dans un POST de connexion.
+    #[test]
+    fn jeton_refuse_hors_connexion() {
+        let (u, t) = (Uuid::new_v4(), Uuid::new_v4());
+        let pw = "Secret-Du-Coffre-42";
+        let form = "application/x-www-form-urlencoded";
+        let cases: Vec<(String, &str, bool)> = vec![
+            // Champ de recherche, autre champ, texte brut, GET, jeton répété, changement de mot de passe.
+            ("q={m}".into(), form, true),
+            ("user={m}&password=x".into(), form, true),
+            ("{m}".into(), "text/plain", true),
+            ("password={m}".into(), form, false),
+            ("password={m}&password2={m}".into(), form, true),
+            ("old_password={m}&new_password=abc&confirm_password=abc".into(), form, true),
+            ("password=avant{m}".into(), form, true),
+            (r#"{"q":"{m}"}"#.into(), "application/json", true),
+            (r#"{"user":{"password":"{m}","new_password":"x"}}"#.into(), "application/json", true),
+        ];
+        for (body, ct, post) in cases {
+            let m = new_marker(u, t).unwrap();
+            let body = body.replace("{m}", &m);
+            let r = substitute_body(body.as_bytes(), ct, post, u, t, pw);
+            assert!(matches!(r, Substitution::Refused(_)), "{body} : {r:?}");
+            // Brûlé : la page suivante en reçoit un autre.
+            assert_eq!(substitute_body(body.as_bytes(), ct, post, u, t, pw), Substitution::None);
+        }
+        // JSON imbriqué, un seul champ : accepté.
         let m = new_marker(u, t).unwrap();
-        assert_eq!(substitute_path(&format!("/login?p={m}"), u, t, "a b").unwrap(), "/login?p=a%20b");
+        let body = format!(r#"{{"auth":{{"login":"admin","pwd":"{m}"}}}}"#);
+        assert!(matches!(substitute_body(body.as_bytes(), "application/json", true, u, t, pw), Substitution::Done(_)));
+        // Chemin : jamais remplacé, seulement brûlé.
+        let m = new_marker(u, t).unwrap();
+        assert!(marker_in_path(&format!("/introuvable-{m}"), u, t));
+        assert!(!marker_in_path(&format!("/introuvable-{m}"), u, t));
+        // Réponse qui recopie le mot de passe : masqué, sous toutes ses formes.
+        let page = format!("<p>Recherche : {pw}</p><a href=\"?q=a%20b\">", );
+        assert_eq!(String::from_utf8(mask_password(page.as_bytes(), pw).unwrap()).unwrap(), "<p>Recherche : ********</p><a href=\"?q=a%20b\">");
+        assert_eq!(String::from_utf8(mask_password(b"x=p%40ss", "p@ss").unwrap()).unwrap(), "x=********");
+        assert_eq!(mask_password(b"rien", pw), None);
     }
 
     #[test]
     fn jeton_d_un_autre_compte_ignore() {
         let (u, t) = (Uuid::new_v4(), Uuid::new_v4());
         let m = new_marker(u, t).unwrap();
-        assert!(substitute_body(m.as_bytes(), "text/plain", Uuid::new_v4(), t, "x").is_none());
-        assert!(substitute_body(m.as_bytes(), "text/plain", u, Uuid::new_v4(), "x").is_none());
+        let body = format!("password={m}");
+        let form = "application/x-www-form-urlencoded";
+        assert_eq!(substitute_body(body.as_bytes(), form, true, Uuid::new_v4(), t, "x"), Substitution::None);
+        assert_eq!(substitute_body(body.as_bytes(), form, true, u, Uuid::new_v4(), "x"), Substitution::None);
         // Toujours valable pour son compte (le refus ne l'a pas consommé).
-        assert_eq!(substitute_body(m.as_bytes(), "text/plain", u, t, "x").unwrap(), b"x");
+        assert_eq!(substitute_body(body.as_bytes(), form, true, u, t, "x"), Substitution::Done(b"password=x".to_vec()));
     }
 
     #[test]

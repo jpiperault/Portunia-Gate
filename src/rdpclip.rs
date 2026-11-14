@@ -15,7 +15,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use crate::rdpcap::{gcc_block, send_data, u16le, u32le, Framer, Pdu};
+use crate::rdpcap::{channel_name, gcc_block, send_data, u16le, u32le, Framer, Pdu};
 
 /// Capacités générales du presse-papiers liées aux fichiers : flux de fichiers (0x04),
 /// verrouillage des données (0x10), fichiers de plus de 4 Go (0x20).
@@ -79,7 +79,7 @@ impl Side {
                 let count = u32le(net, 4).unwrap_or(0).min(31) as usize;
                 shared.channel_names = (0..count)
                     .filter_map(|i| net.get(8 + 12 * i..16 + 12 * i))
-                    .map(|n| String::from_utf8_lossy(n).trim_end_matches('\0').to_ascii_lowercase())
+                    .map(channel_name)
                     .collect();
             }
             return Ok(true);
@@ -89,6 +89,11 @@ impl Side {
                 let count = u16le(net, 6).unwrap_or(0) as usize;
                 let ids: Vec<u16> = (0..count).filter_map(|i| u16le(net, 8 + 2 * i)).collect();
                 shared.cliprdr = shared.channel_names.iter().position(|n| n == "cliprdr").and_then(|i| ids.get(i).copied());
+            }
+            // Le poste a demandé le presse-papiers mais son numéro reste inconnu : sans lui, le
+            // filtre ne verrait rien passer (A4). La session est coupée plutôt que laissée libre.
+            if shared.cliprdr.is_none() && shared.channel_names.iter().any(|n| n == "cliprdr") {
+                return Err(t!("unreadable Remote Desktop channels: file copy could not be blocked", "canaux du Bureau à distance illisibles : la copie de fichiers ne pourrait pas être bloquée"));
             }
             return Ok(true);
         }

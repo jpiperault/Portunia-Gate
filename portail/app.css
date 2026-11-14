@@ -114,6 +114,9 @@ input.code { letter-spacing: .3em; font-family: var(--mono); }
 .native-row b { min-width: 120px; }
 .native-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .native-pw { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.native-confirm { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.native-confirm input { max-width: 14em; }
+.native-confirm .native-hint, .native-confirm .error { flex-basis: 100%; margin: 0; }
 .native code { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 2px 6px; overflow-wrap: anywhere; }
 
 /* Copie de fichiers du Bureau à distance */

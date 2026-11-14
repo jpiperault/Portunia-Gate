@@ -59,16 +59,42 @@ pub fn verify(point: &[u8], msg: &[u8], signature: &[u8]) -> bool {
 
 static CHALLENGES: LazyLock<Mutex<HashMap<String, (Uuid, Instant)>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// Défi à usage unique pour ce téléphone.
+/// Défi à usage unique pour ce téléphone (enrôlé : vérifié par l'appelant). Un seul défi en
+/// attente par téléphone : un nouveau remplace l'ancien, la table ne grossit pas.
 pub fn challenge(device: Uuid) -> Result<String> {
     let c = B64URL.encode(random::<32>()?);
     let mut map = CHALLENGES.lock().unwrap();
-    map.retain(|_, (_, at)| at.elapsed() < CHALLENGE_TTL);
-    if map.len() > 2000 {
+    map.retain(|_, (d, at)| at.elapsed() < CHALLENGE_TTL && *d != device);
+    if map.len() > 20_000 {
         bail!("{}", t!("Too many requests: try again in a minute", "Trop de demandes : réessayez dans une minute"));
     }
     map.insert(c.clone(), (device, Instant::now()));
     Ok(c)
+}
+
+/// Jetons d'enrôlement : remis par une connexion avec mot de passe et code, valables 10 minutes,
+/// un par compte (empreinte SHA-256 gardée).
+static ENROL: LazyLock<Mutex<HashMap<Uuid, (String, Instant)>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+pub fn enrol_token(user: Uuid) -> Result<String> {
+    let token = B64URL.encode(random::<32>()?);
+    let mut map = ENROL.lock().unwrap();
+    map.retain(|_, (_, at)| at.elapsed() < std::time::Duration::from_secs(ENROL_WITHIN_MIN as u64 * 60));
+    map.insert(user, (crate::keys::sha256_hex(token.as_bytes()), Instant::now()));
+    Ok(token)
+}
+
+/// Le jeton d'enrôlement de ce compte ; consommé s'il est bon.
+pub fn take_enrol_token(user: Uuid, token: &str) -> bool {
+    if token.is_empty() {
+        return false;
+    }
+    let mut map = ENROL.lock().unwrap();
+    let ok = map.get(&user).is_some_and(|(hash, at)| *hash == crate::keys::sha256_hex(token.as_bytes()) && at.elapsed() < std::time::Duration::from_secs(ENROL_WITHIN_MIN as u64 * 60));
+    if ok {
+        map.remove(&user);
+    }
+    ok
 }
 
 /// Défi encore valable, donné à ce téléphone ; consommé dans tous les cas.

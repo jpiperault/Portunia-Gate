@@ -119,16 +119,35 @@ fn fastpath_size(b: &[u8]) -> Option<usize> {
     }
 }
 
-/// Bloc de données GCC (type sur 2 octets, longueur sur 2 octets) cherché dans un message MCS.
+/// Bloc de données GCC (type sur 2 octets, longueur sur 2 octets) d'un message MCS de connexion.
+///
+/// Les blocs commencent après la clé H.221 (« Duca » du poste, « McDn » du serveur) et sa
+/// longueur PER ; ils sont parcourus dans l'ordre, chacun sautant le précédent (A4). Chercher
+/// les octets du type n'importe où laissait un nom de poste choisi par le client contenir un
+/// faux bloc des canaux, sans « cliprdr » : le filtre du presse-papiers ne voyait plus rien.
 pub(crate) fn gcc_block(data: &[u8], kind: u16) -> Option<&[u8]> {
-    let tag = kind.to_le_bytes();
-    (0..data.len().saturating_sub(4)).find_map(|i| {
-        if data[i..i + 2] != tag {
+    let key = data.windows(4).position(|w| w == b"Duca" || w == b"McDn")?;
+    let mut at = key + 4;
+    let l = *data.get(at)?;
+    at += if l & 0x80 != 0 { 2 } else { 1 };
+    while at + 4 <= data.len() {
+        let tag = u16::from_le_bytes([data[at], data[at + 1]]);
+        let len = u16::from_le_bytes([data[at + 2], data[at + 3]]) as usize;
+        if len < 4 || at + len > data.len() {
             return None;
         }
-        let len = u16::from_le_bytes([data[i + 2], data[i + 3]]) as usize;
-        (len >= 8 && i + len <= data.len()).then(|| &data[i..i + len])
-    })
+        if tag == kind {
+            return (len >= 8).then(|| &data[at..at + len]);
+        }
+        at += len;
+    }
+    None
+}
+
+/// Nom d'un canal virtuel (8 octets) : coupé au premier zéro, en minuscules.
+pub(crate) fn channel_name(raw: &[u8]) -> String {
+    let end = raw.iter().position(|b| *b == 0).unwrap_or(raw.len());
+    String::from_utf8_lossy(&raw[..end]).to_ascii_lowercase()
 }
 
 pub(crate) fn u16le(b: &[u8], at: usize) -> Option<u16> {
@@ -277,7 +296,7 @@ impl Tap {
                             let count = u32le(net, 4).unwrap_or(0).min(31) as usize;
                             self.channel_names = (0..count)
                                 .filter_map(|i| net.get(8 + 12 * i..16 + 12 * i))
-                                .map(|n| String::from_utf8_lossy(n).trim_end_matches('\0').to_ascii_lowercase())
+                                .map(channel_name)
                                 .collect();
                         }
                         continue;
@@ -828,6 +847,34 @@ mod tests {
     }
 
     #[test]
+    fn blocs_gcc_dans_l_ordre() {
+        // Bloc du poste dont le nom contient un faux bloc des canaux (0xC003) sans « cliprdr ».
+        let mut core = vec![0x01, 0xc0, 0, 0];
+        core.extend_from_slice(&[0; 12]);
+        core.extend_from_slice(&[0x03, 0xc0, 20, 0, 1, 0, 0, 0]);
+        core.extend_from_slice(b"rdpsnd\0\0");
+        core.extend_from_slice(&[0; 4]);
+        core[2] = core.len() as u8;
+        let mut net = vec![0x03, 0xc0, 20, 0, 1, 0, 0, 0];
+        net.extend_from_slice(b"cliprdr\0");
+        net.extend_from_slice(&[0; 4]);
+        let mut ci = vec![0x7f, 0x65, 0, 0];
+        ci.extend_from_slice(b"Duca");
+        ci.push((core.len() + net.len()) as u8);
+        ci.extend_from_slice(&core);
+        ci.extend_from_slice(&net);
+        let found = gcc_block(&ci, 0xc003).unwrap();
+        assert_eq!(channel_name(&found[8..16]), "cliprdr", "le vrai bloc, pas celui caché dans le nom");
+        // Nom coupé au premier zéro : « cliprdr\0xx » vaut « cliprdr ».
+        assert_eq!(channel_name(b"CLIPRDR\0xx"), "cliprdr");
+        // Sans clé H.221, ou bloc qui déborde : rien.
+        assert!(gcc_block(&core, 0xc003).is_none());
+        let mut bad = b"Duca\x05".to_vec();
+        bad.extend_from_slice(&[0x03, 0xc0, 0xff, 0]);
+        assert!(gcc_block(&bad, 0xc003).is_none());
+    }
+
+    #[test]
     fn tri_de_session() {
         let mut tap = Tap::new(false);
         // NLA (DER) puis résultat anticipé : rien n'est gardé.
@@ -844,6 +891,9 @@ mod tests {
         net.extend_from_slice(b"cliprdr\0");
         net.extend_from_slice(&0u32.to_le_bytes());
         let mut ci = vec![0x02, 0xf0, 0x80, 0x7f, 0x65];
+        ci.extend_from_slice(b"Duca");
+        ci.push((core.len() + net.len()) as u8 | 0x80);
+        ci.push(0);
         ci.extend_from_slice(&core);
         ci.extend_from_slice(&net);
         let r = tap.client(0.1, &tpkt(&ci));
@@ -853,6 +903,8 @@ mod tests {
         sn.extend_from_slice(&1004u16.to_le_bytes());
         sn.extend_from_slice(&1005u16.to_le_bytes());
         let mut cr = vec![0x02, 0xf0, 0x80, 0x7f, 0x66];
+        cr.extend_from_slice(b"McDn");
+        cr.push(sn.len() as u8);
         cr.extend_from_slice(&sn);
         assert!(matches!(&tap.server(0.2, &tpkt(&cr))[..], [Record::Display(..)]));
         assert_eq!(tap.cliprdr, Some(1005));

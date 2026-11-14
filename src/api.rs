@@ -490,7 +490,16 @@ async fn ticket(AxState(api): Ctx, headers: HeaderMap, Path(nom): Path<String>) 
             t!(format!("{} is not allowed for you at the moment", target.name), format!("{} ne vous est pas autorisé en ce moment", target.name)),
         ));
     }
-    let ticket = issue_ticket(db, user.id, target.id, None).await?;
+    // Usage du jeton selon ce que Portunia en fera : interface web, Bureau à distance par le
+    // passage de la Gate, ou connexion SSH (terminal, rebond, tunnel, sortie web).
+    let usage = if target.is_web() {
+        Usage::Web
+    } else if target.is_rdp() && target.mode != "rebond" {
+        Usage::Rdp
+    } else {
+        Usage::Ssh
+    };
+    let ticket = issue_ticket(db, user.id, target.id, None, usage).await?;
     Ok(Json(json!({
         "ticket": ticket,
         "utilisateur_ssh": format!("{}%{}", user.login, target.name),
@@ -505,22 +514,47 @@ async fn ticket(AxState(api): Ctx, headers: HeaderMap, Path(nom): Path<String>) 
 
 /// Jeton SSH à usage unique (60 s) pour ce compte et ce serveur. `client_addr` : adresse
 /// réelle de l'utilisateur quand c'est le portail web qui se connecte pour lui.
-pub async fn issue_ticket(db: &sqlx::PgPool, user: Uuid, target: Uuid, client_addr: Option<&str>) -> anyhow::Result<String> {
-    issue_ticket_for(db, user, target, client_addr, 60).await
+/// Usage d'un jeton à usage unique : vérifié quand il est présenté (B5).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Usage {
+    /// Mot de passe du SSH de la Gate (Portunia, terminal du portail).
+    Ssh,
+    /// Passage RDCleanPath (Portunia, Bureau à distance du portail).
+    Rdp,
+    /// Fichier .rdp de l'entrée native.
+    RdpNative,
+    /// Entrée d'une interface web dans Portunia.
+    Web,
+}
+
+impl Usage {
+    pub fn name(self) -> &'static str {
+        match self {
+            Usage::Ssh => "ssh",
+            Usage::Rdp => "rdp",
+            Usage::RdpNative => "rdp-natif",
+            Usage::Web => "web",
+        }
+    }
+}
+
+pub async fn issue_ticket(db: &sqlx::PgPool, user: Uuid, target: Uuid, client_addr: Option<&str>, usage: Usage) -> anyhow::Result<String> {
+    issue_ticket_for(db, user, target, client_addr, 60, usage).await
 }
 
 /// Même jeton, valable `seconds` secondes (fichier .rdp de l'entrée native).
-pub async fn issue_ticket_for(db: &sqlx::PgPool, user: Uuid, target: Uuid, client_addr: Option<&str>, seconds: i64) -> anyhow::Result<String> {
+pub async fn issue_ticket_for(db: &sqlx::PgPool, user: Uuid, target: Uuid, client_addr: Option<&str>, seconds: i64, usage: Usage) -> anyhow::Result<String> {
     let ticket = format!("hj1_{}", token()?);
     sqlx::query("DELETE FROM ssh_tickets WHERE expires_at < now()").execute(db).await?;
     sqlx::query(
-        "INSERT INTO ssh_tickets (ticket_hash, user_id, target_id, expires_at, client_addr) VALUES ($1, $2, $3, now() + make_interval(secs => $5), $4)",
+        "INSERT INTO ssh_tickets (ticket_hash, user_id, target_id, expires_at, client_addr, usage) VALUES ($1, $2, $3, now() + make_interval(secs => $5), $4, $6)",
     )
     .bind(sha256_hex(ticket.as_bytes()))
     .bind(user)
     .bind(target)
     .bind(client_addr)
     .bind(seconds as f64)
+    .bind(usage.name())
     .execute(db)
     .await?;
     Ok(ticket)
@@ -528,13 +562,15 @@ pub async fn issue_ticket_for(db: &sqlx::PgPool, user: Uuid, target: Uuid, clien
 
 /// Jeton présenté sans compte ni serveur (passage Bureau à distance) : consommé, il dit
 /// pour qui et vers quoi il a été émis, et l'adresse réelle qu'il porte.
-pub async fn take_ticket(db: &sqlx::PgPool, ticket: &str) -> anyhow::Result<Option<(Uuid, Uuid, Option<String>)>> {
-    Ok(sqlx::query_as(
-        "DELETE FROM ssh_tickets WHERE ticket_hash = $1 AND expires_at > now() RETURNING user_id, target_id, client_addr",
+/// Un jeton présenté pour un autre usage est refusé et brûlé.
+pub async fn take_ticket(db: &sqlx::PgPool, ticket: &str, usage: Usage) -> anyhow::Result<Option<(Uuid, Uuid, Option<String>)>> {
+    let row: Option<(Uuid, Uuid, Option<String>, String)> = sqlx::query_as(
+        "DELETE FROM ssh_tickets WHERE ticket_hash = $1 AND expires_at > now() RETURNING user_id, target_id, client_addr, usage",
     )
     .bind(sha256_hex(ticket.as_bytes()))
     .fetch_optional(db)
-    .await?)
+    .await?;
+    Ok(row.filter(|r| r.3 == usage.name()).map(|r| (r.0, r.1, r.2)))
 }
 
 /// Utilisé par le serveur SSH : un jeton valide pour ce compte et ce serveur est consommé.
@@ -542,7 +578,7 @@ pub async fn take_ticket(db: &sqlx::PgPool, ticket: &str) -> anyhow::Result<Opti
 pub async fn consume_ticket(db: &sqlx::PgPool, ticket: &str, user: Uuid, target: Option<Uuid>) -> anyhow::Result<Option<String>> {
     let Some(target) = target else { return Ok(None) };
     let done: Option<Option<String>> = sqlx::query_scalar(
-        "DELETE FROM ssh_tickets WHERE ticket_hash = $1 AND user_id = $2 AND target_id = $3 AND expires_at > now() RETURNING client_addr",
+        "DELETE FROM ssh_tickets WHERE ticket_hash = $1 AND user_id = $2 AND target_id = $3 AND expires_at > now() AND usage = 'ssh' RETURNING client_addr",
     )
     .bind(sha256_hex(ticket.as_bytes()))
     .bind(user)
@@ -1084,6 +1120,7 @@ async fn admin_user_devices_remove(AxState(api): Ctx, headers: HeaderMap, Path(i
         .await?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, t!("Unknown account", "Compte inconnu")))?;
     let n = crate::appareil::remove_all(db, id).await?;
+    api.state.live.recheck();
     audit::note(db, &actor.login, "appareil.retire", json!({ "compte": user.login, "tous": true, "nombre": n })).await;
     Ok(Json(json!({ "etat": "ok", "retires": n })))
 }
@@ -1096,6 +1133,7 @@ async fn admin_device_remove(AxState(api): Ctx, headers: HeaderMap, Path(id): Pa
         .await?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, t!("Unknown phone", "Téléphone inconnu")))?;
     let login = model::user_by_id(db, user).await?.map(|u| u.login).unwrap_or_default();
+    api.state.live.recheck();
     audit::note(db, &actor.login, "appareil.retire", json!({ "compte": login, "appareil": name, "id": id })).await;
     Ok(Json(json!({ "etat": "ok" })))
 }
@@ -2244,7 +2282,7 @@ async fn web_entry(AxState(api): Ctx, ConnectInfo(peer): ConnectInfo<SocketAddr>
     let state = &api.state;
     let cookie_name = crate::webproxy::key_cookie_name(&headers);
     let result = async {
-        let Some((user_id, target_id, _)) = take_ticket(&state.db, &q.jeton).await? else {
+        let Some((user_id, target_id, _)) = take_ticket(&state.db, &q.jeton, Usage::Web).await? else {
             return Ok(web_refused(StatusCode::UNAUTHORIZED, t!("Invalid, expired or already used token: open the server again from Portunia", "Jeton invalide, expiré ou déjà utilisé : rouvrez le serveur depuis Portunia")));
         };
         let user = model::user_by_id(&state.db, user_id).await?.filter(|u| !u.disabled);
@@ -2432,7 +2470,7 @@ async fn native_rdp(AxState(api): Ctx, headers: HeaderMap, Path(nom): Path<Strin
             t!(format!("{} is not allowed for you at the moment", target.name), format!("{} ne vous est pas autorisé en ce moment", target.name)),
         ));
     }
-    let ticket = issue_ticket_for(db, user.id, target.id, None, s.ticket_s).await?;
+    let ticket = issue_ticket_for(db, user.id, target.id, None, s.ticket_s, Usage::RdpNative).await?;
     let account = body.compte.map(|c| c.trim().to_string()).filter(|c| !c.is_empty());
     let password = body.mot_de_passe.filter(|p| !p.is_empty());
     let given = target.mode == "enregistre" && account.is_some() && password.is_some();

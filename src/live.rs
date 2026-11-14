@@ -43,6 +43,8 @@ struct Entry {
     recorded: bool,
     /// Session de la liste des sessions (absente : connexion sans serveur).
     session: Option<Uuid>,
+    /// Session du portail (empreinte de son cookie) dont dépend cette connexion.
+    portal: Option<String>,
     cut: watch::Sender<Option<String>>,
     /// Message pour l'utilisateur (session suivie en direct), affiché par les terminaux.
     notice: watch::Sender<Option<String>>,
@@ -76,6 +78,9 @@ pub struct Watched<'a> {
     pub recorded: bool,
     /// Ligne de la liste des sessions : suivie en direct et coupée depuis l'Audit.
     pub session: Option<Uuid>,
+    /// Ouverte depuis le portail : empreinte du cookie de sa session web. Déconnexion, téléphone
+    /// retiré ou sessions fermées par l'administrateur : la connexion se ferme (B2).
+    pub portal: Option<String>,
 }
 
 /// Inscription, retirée quand elle est lâchée.
@@ -160,6 +165,7 @@ impl Registry {
             web: w.web,
             recorded: w.recorded,
             session: w.session,
+            portal: w.portal,
             cut,
             notice,
         };
@@ -274,6 +280,19 @@ async fn sweep(state: &State) -> Result<()> {
         .iter()
         .map(|(id, e)| (*id, e.user, e.login.clone(), e.target.clone(), e.web, e.recorded))
         .collect();
+    // Connexions du portail dont la session web n'existe plus (déconnexion, téléphone retiré).
+    let portals: Vec<(u64, String, String)> =
+        state.live.entries.lock().unwrap().iter().filter_map(|(id, e)| e.portal.clone().map(|p| (*id, e.login.clone(), p))).collect();
+    for (id, login, hash) in portals {
+        let alive: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM web_sessions WHERE token_hash = $1 AND expires_at > now())").bind(&hash).fetch_one(&state.db).await?;
+        if !alive {
+            let why = t!("Your web portal session has ended: connection closed.", "Votre session du portail web a pris fin : connexion fermée.");
+            let sent = state.live.entries.lock().unwrap().get(&id).map(|e| e.cut.send_replace(Some(why.to_string()))).is_some();
+            if sent {
+                audit::note(&state.db, &login, "session.coupee", json!({ "raison": why })).await;
+            }
+        }
+    }
 
     let free = free_bytes(&state.config.data_dir);
     let minimum = state.config.min_free_bytes();
@@ -408,7 +427,7 @@ mod tests {
     use super::*;
 
     fn watched(login: &str) -> Watched<'_> {
-        Watched { user: Uuid::nil(), login, target: None, web: false, recorded: false, session: None }
+        Watched { user: Uuid::nil(), login, target: None, web: false, recorded: false, session: None, portal: None }
     }
 
     #[tokio::test]

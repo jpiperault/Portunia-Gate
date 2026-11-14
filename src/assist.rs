@@ -319,7 +319,7 @@ enum End {
 /// proprement : il voit la coupure et revient avec son jeton.
 async fn relay(state: &State, session: &mut Session, mut agent: WebSocket, mut helper: WebSocket) -> End {
     // Compte du dépanneur désactivé : la session se ferme.
-    let (_watch, mut cut) = state.live.watch(crate::live::Watched { user: session.user, login: &session.login, target: None, web: false, recorded: false, session: None });
+    let (_watch, mut cut) = state.live.watch(crate::live::Watched { user: session.user, login: &session.login, target: None, web: false, recorded: false, session: None, portal: None });
     let mut closing = state.assist.closing();
     let left = Duration::from_secs(session.hours as u64 * 3600).saturating_sub(session.started.elapsed());
     let limit = tokio::time::sleep(left);

@@ -105,9 +105,12 @@ function loginForm(state) {
     if (state.turnstile && !turnstileToken) { error.textContent = T('Wait for the anti-bot check.', 'Patientez pendant la vérification anti-robots.'); return; }
     submit.disabled = true;
     try {
-      await api('POST', '/api/connexion', { login: login.value.trim(), mot_de_passe: pass.value, code: code.value.replace(/\s/g, ''), turnstile: turnstileToken });
-      // Application Android Portunia Gate : elle peut proposer d'enrôler ce téléphone.
-      try { window.PortuniaGateApp?.connecte(); } catch { /* application ancienne */ }
+      const r = await api('POST', '/api/connexion', { login: login.value.trim(), mot_de_passe: pass.value, code: code.value.replace(/\s/g, ''), turnstile: turnstileToken });
+      // Application Android Portunia Gate : elle peut proposer d'enrôler ce téléphone, avec le
+      // jeton remis par cette connexion seulement (Gate 0.49 ; absent sans code).
+      if (r && r.enrolement) {
+        try { window.PortuniaGateApp?.connecteAvec(r.enrolement); } catch { /* application ancienne */ }
+      }
       start();
     } catch (err) {
       error.textContent = err.message;
@@ -148,18 +151,40 @@ function nativePanel(info) {
     create.textContent = info.mot_de_passe ? T('New password', 'Nouveau mot de passe') : T('Create my RDP password', 'Créer mon mot de passe RDP');
     remove.hidden = !info.mot_de_passe;
   };
-  create.onclick = async () => {
+  // Créer un mot de passe RDP : mot de passe et code redemandés (Gate 0.49).
+  const ask = h('form', { class: 'native-confirm', hidden: true });
+  const askPass = h('input', { type: 'password', autocomplete: 'current-password', placeholder: T('Your password', 'Votre mot de passe'), 'aria-label': T('Your password', 'Votre mot de passe') });
+  const askCode = h('input', { type: 'text', inputmode: 'numeric', autocomplete: 'one-time-code', maxlength: '8', placeholder: T('Code', 'Code'), 'aria-label': T('Code', 'Code') });
+  const askError = h('p', { class: 'error', role: 'alert' });
+  ask.append(
+    h('p', { class: 'native-hint' }, T('Confirm with your password and code.', 'Confirmez avec votre mot de passe et votre code.')),
+    askPass, askCode,
+    h('button', { class: 'btn primary', type: 'submit' }, T('Confirm', 'Confirmer')),
+    h('button', { class: 'btn', type: 'button', onclick: () => { ask.hidden = true; } }, T('Cancel', 'Annuler')),
+    askError);
+  create.onclick = () => {
     if (info.mot_de_passe && !confirm(T('The current RDP password will stop working. Continue?', 'Le mot de passe RDP actuel ne marchera plus. Continuer ?'))) return;
+    askError.textContent = '';
+    askPass.value = '';
+    askCode.value = '';
+    ask.hidden = false;
+    askPass.focus();
+  };
+  ask.onsubmit = async (e) => {
+    e.preventDefault();
     create.disabled = true;
     try {
-      const r = await api('POST', '/api/rdp-natif/mot-de-passe');
+      const r = await api('POST', '/api/rdp-natif/mot-de-passe', { mot_de_passe: askPass.value, code: askCode.value.replace(/\s/g, '') });
+      ask.hidden = true;
+      askPass.value = '';
       info.mot_de_passe = new Date().toISOString();
       const code = h('code', {}, r.mot_de_passe);
       const copy = h('button', { class: 'btn', type: 'button', onclick: () => navigator.clipboard?.writeText(r.mot_de_passe).then(() => { copy.textContent = T('Copied', 'Copié'); }, () => {}) }, T('Copy', 'Copier'));
       shown.replaceChildren(code, copy, h('span', { class: 'native-hint' }, T('Shown only once: save it in the RDP client or a password manager.', 'Affiché une seule fois : enregistrez-le dans le client RDP ou un gestionnaire de mots de passe.')));
       shown.hidden = false;
     } catch (err) {
-      alert(err.message);
+      askError.textContent = err.message;
+      askCode.value = '';
     }
     create.disabled = false;
     paint();
@@ -197,6 +222,7 @@ function nativePanel(info) {
         h('b', {}, srv), h('code', {}, user(srv)),
         h('button', { class: 'btn', type: 'button', title: T('Shortcut for mstsc with the address and user filled in', 'Raccourci pour mstsc, adresse et utilisateur remplis'), onclick: () => shortcut(srv) }, '.rdp')))),
       h('div', { class: 'native-actions' }, create, remove),
+      ask,
       state, shown));
 }
 

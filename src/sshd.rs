@@ -91,6 +91,7 @@ pub async fn run(state: Arc<State>) -> Result<()> {
             slot: Some(slot),
             authenticated: authenticated.clone(),
             watch: None,
+            by_ticket: false,
         };
         tokio::spawn(serve(config.clone(), tcp, conn, authenticated, LOGIN_TIMEOUT));
     }
@@ -165,6 +166,8 @@ struct Conn {
     authenticated: Arc<AtomicBool>,
     /// Inscription de la connexion : fermée si le compte perd son accès.
     watch: Option<live::Guard>,
+    /// Authentifié par un jeton à usage unique : la connexion ne vaut que pour sa cible (B5).
+    by_ticket: bool,
 }
 
 /// Ce qui est connu une fois l'utilisateur authentifié.
@@ -175,6 +178,8 @@ struct Ctx {
     /// Cible demandée dans le nom (« login%cible »), avec les droits du moment.
     target: Option<(Target, Option<Access>)>,
     requested_target: Option<String>,
+    /// Connexion par jeton : rebond seulement vers la cible du jeton.
+    by_ticket: bool,
     /// Sortie web : navigation de cette connexion, ouverte au premier site demandé.
     navigation: tokio::sync::Mutex<Option<Arc<egress::Navigation>>>,
 }
@@ -214,7 +219,7 @@ impl Ctx {
     }
 
     fn watch(&self, target: &Target, recorded: bool, session: Uuid) -> (live::Guard, Cut) {
-        self.state.live.watch(Watched { user: self.user.id, login: &self.user.login, target: Some(target), web: false, recorded, session: Some(session) })
+        self.state.live.watch(Watched { user: self.user.id, login: &self.user.login, target: Some(target), web: false, recorded, session: Some(session), portal: None })
     }
 }
 
@@ -362,6 +367,7 @@ impl server::Handler for Conn {
                     json!({ "facteurs": [via], "adresse": self.addr }),
                 )
                 .await;
+                self.by_ticket = true;
                 return Ok(Auth::Accept);
             }
             if self.attempt(requested, "jeton").await {
@@ -389,21 +395,21 @@ impl server::Handler for Conn {
         self.decide(&user).await
     }
 
-    async fn auth_publickey_offered(&mut self, requested: &str, key: &russh::keys::PublicKey) -> Result<Auth, Self::Error> {
+    async fn auth_publickey_offered(&mut self, requested: &str, offer: server::PublicKeyOffer<'_>) -> Result<Auth, Self::Error> {
         let Some(user) = self.load(requested).await? else {
             return Ok(Auth::reject());
         };
-        let fingerprint = key.fingerprint(HashAlg::Sha256).to_string();
+        let fingerprint = offer.public_key.fingerprint(HashAlg::Sha256).to_string();
         let owned = model::user_key_owner(&self.state.db, &fingerprint).await? == Some(user.id);
         let usable = user.policy(&self.state.db).await?.could_use(&self.factors, Factor::Key);
         Ok(if owned && usable { Auth::Accept } else { Auth::reject() })
     }
 
-    async fn auth_publickey(&mut self, requested: &str, key: &russh::keys::PublicKey) -> Result<Auth, Self::Error> {
+    async fn auth_publickey(&mut self, requested: &str, verified: server::VerifiedPublicKey<'_>) -> Result<Auth, Self::Error> {
         let Some(user) = self.load(requested).await? else {
             return Ok(Auth::reject());
         };
-        let fingerprint = key.fingerprint(HashAlg::Sha256).to_string();
+        let fingerprint = verified.public_key.fingerprint(HashAlg::Sha256).to_string();
         if model::user_key_owner(&self.state.db, &fingerprint).await? != Some(user.id) {
             if self.attempt(requested, "clé").await {
                 self.fail("clé", "clé inconnue").await;
@@ -491,7 +497,7 @@ impl server::Handler for Conn {
         self.authenticated.store(true, Ordering::SeqCst);
         self.slot = None;
         // Compte désactivé ou supprimé : la connexion entière se ferme.
-        let (guard, mut cut) = self.state.live.watch(Watched { user: user.id, login: &user.login, target: None, web: false, recorded: false, session: None });
+        let (guard, mut cut) = self.state.live.watch(Watched { user: user.id, login: &user.login, target: None, web: false, recorded: false, session: None, portal: None });
         self.watch = Some(guard);
         let handle = session.handle();
         tokio::spawn(async move {
@@ -516,6 +522,7 @@ impl server::Handler for Conn {
             addr: self.addr.clone(),
             target,
             requested_target: wanted.map(str::to_owned),
+            by_ticket: self.by_ticket,
             navigation: tokio::sync::Mutex::new(None),
         }));
         Ok(())
@@ -642,6 +649,9 @@ impl server::Handler for Conn {
         }
         // 1. Rebond de bout en bout (ssh -J) vers une cible en mode rebond.
         for t in model::rebond_targets_at(db, host, port as i32).await? {
+            if ctx.by_ticket && ctx.target.as_ref().map(|(own, _)| own.id) != Some(t.id) {
+                continue;
+            }
             if model::access(db, ctx.user.id, t.id).await?.is_some() {
                 reply.accept().await;
                 tokio::spawn(async move {
@@ -681,6 +691,24 @@ impl server::Handler for Conn {
 fn is_file_copy(command: &str) -> bool {
     let first = command.split_whitespace().next().unwrap_or("");
     matches!(first.rsplit('/').next().unwrap_or(""), "scp" | "rsync" | "sftp-server")
+}
+
+/// Copie de fichiers côté serveur et rien d'autre : « scp -t/-f », « rsync --server » ou
+/// « sftp-server », sans aucun caractère que le shell de la cible interpréterait. Seule une telle
+/// commande n'est pas enregistrée (A5) : « rsync x; bash -i » l'est, comme toute commande.
+fn pure_file_copy(command: &str) -> bool {
+    const SHELL: &str = ";&|`$<>()\\{}*?![]#~'\"";
+    if command.chars().any(|c| SHELL.contains(c) || c.is_control()) {
+        return false;
+    }
+    let words: Vec<&str> = command.split_whitespace().collect();
+    let Some(first) = words.first() else { return false };
+    match first.rsplit('/').next().unwrap_or("") {
+        "scp" => words[1..].iter().any(|w| w.starts_with('-') && (w.contains('t') || w.contains('f'))),
+        "rsync" => words.get(1) == Some(&"--server"),
+        "sftp-server" => words.len() == 1,
+        _ => false,
+    }
 }
 
 #[derive(Clone)]
@@ -1160,7 +1188,7 @@ async fn exec(ctx: Arc<Ctx>, mut channel: Channel<Msg>, pty: Option<PtyInfo>, co
         close(&channel, 1).await;
         return Ok(());
     }
-    let recorded = target.records() && !is_file_copy(&command);
+    let recorded = target.records() && !pure_file_copy(&command);
     if recorded && !live::can_record(&ctx.state) {
         audit::note(&ctx.state.db, &ctx.user.login, "enregistrement.echec", json!({ "cible": target.name, "raison": "espace disque insuffisant", "adresse": ctx.addr })).await;
         say(&channel, &format!("{}\n", live::no_space_message())).await;
@@ -1429,6 +1457,21 @@ mod tests {
     struct Nobody;
     impl server::Handler for Nobody {
         type Error = anyhow::Error;
+    }
+
+    #[test]
+    fn copie_pure_ou_commande_enregistree() {
+        for ok in ["scp -t /tmp", "scp -f fichier.txt", "/usr/bin/scp -r -t dossier", "rsync --server -vlogDtpre.iLsfxCIvu . /srv/x", "sftp-server", "/usr/lib/openssh/sftp-server"] {
+            assert!(pure_file_copy(ok), "{ok}");
+        }
+        for bad in [
+            "rsync x; bash -i", "rsync --version & whoami", "rsync --server . /x | sh", "scp -t /tmp && id", "scp -t $(id)", "scp -t `id`",
+            "rsync --server .\nbash", "scp /etc/passwd", "rsync -av a b", "sftp-server -l DEBUG3", "bash -c 'rsync'", "scp -t > /etc/x", "",
+        ] {
+            assert!(!pure_file_copy(bad), "{bad:?}");
+        }
+        // Le droit SFTP reste demandé pour tout ce qui commence par une copie.
+        assert!(is_file_copy("rsync x; bash -i"));
     }
 
     /// Lance `serve` avec une limite d'une seconde et renvoie le côté client.

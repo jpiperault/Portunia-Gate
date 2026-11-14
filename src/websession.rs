@@ -114,7 +114,7 @@ pub async fn touch(state: &State, user: &User, target: &Target, client_addr: &st
             return Err(t!("The Gate cannot record this session", "La Gate ne peut pas enregistrer cette session").to_string());
         }
     };
-    let (guard, cut) = state.live.watch(live::Watched { user: user.id, login: &user.login, target: Some(target), web: portal, recorded: true, session: Some(id) });
+    let (guard, cut) = state.live.watch(live::Watched { user: user.id, login: &user.login, target: Some(target), web: portal, recorded: true, session: Some(id), portal: None });
     let now = Instant::now();
     let active = Active { id, login: user.login.clone(), target: target.name.clone(), started: now, last: now, path, out, actions: 0, failed: false, index: String::new(), _guard: guard, cut };
     // Deux premières requêtes en même temps : la seconde session, inutile, est fermée aussitôt.

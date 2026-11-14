@@ -792,6 +792,21 @@ fn same_site(headers: &HeaderMap, public_url: &str) -> bool {
     }
 }
 
+/// Requête envoyée par un autre site (formulaire posté depuis une page étrangère).
+fn cross_site(headers: &HeaderMap, public_url: &str) -> bool {
+    if headers.get("sec-fetch-site").and_then(|v| v.to_str().ok()) == Some("cross-site") {
+        return true;
+    }
+    let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) else { return false };
+    if origin == "null" {
+        return false;
+    }
+    let host = headers.get(header::HOST).and_then(|v| v.to_str().ok()).unwrap_or_default();
+    let origin = origin.trim_end_matches('/');
+    let own = public_url.trim_end_matches('/');
+    !((!own.is_empty() && origin == own) || origin.split_once("://").is_some_and(|(_, h)| !host.is_empty() && h == host))
+}
+
 fn err(status: StatusCode, text: &str) -> Response {
     (status, Json(json!({ "erreur": text }))).into_response()
 }
@@ -858,6 +873,24 @@ async fn page_index(st: Ctx, peer: ConnectInfo<SocketAddr>, req: axum::extract::
 #[cfg(test)]
 mod static_tests {
     use super::*;
+
+    #[test]
+    fn requete_d_un_autre_site() {
+        let h = |pairs: &[(&str, &str)]| {
+            let mut m = HeaderMap::new();
+            for (k, v) in pairs {
+                m.insert(axum::http::HeaderName::from_bytes(k.as_bytes()).unwrap(), HeaderValue::from_str(v).unwrap());
+            }
+            m
+        };
+        assert!(cross_site(&h(&[("sec-fetch-site", "cross-site")]), ""));
+        assert!(cross_site(&h(&[("origin", "https://site-pirate.example"), ("host", "gate.acme.fr")]), "https://gate.acme.fr"));
+        assert!(!cross_site(&h(&[("origin", "https://gate.acme.fr"), ("host", "gate.acme.fr")]), ""));
+        assert!(!cross_site(&h(&[("origin", "https://acces.acme.fr")]), "https://acces.acme.fr/"));
+        assert!(!cross_site(&h(&[("origin", "null")]), ""));
+        assert!(!cross_site(&h(&[("sec-fetch-site", "none")]), ""));
+        assert!(!cross_site(&HeaderMap::new(), ""));
+    }
 
     #[test]
     fn statique_du_portail_ou_de_l_interface() {
@@ -1029,6 +1062,8 @@ fn cookie_token(headers: &HeaderMap) -> Option<String> {
 
 struct WebSession {
     user: User,
+    /// Empreinte du cookie : les connexions ouvertes s'y rattachent (B2).
+    token_hash: String,
     expires: DateTime<Utc>,
     /// Connexion au portail (l'enrôlement d'un téléphone la suit de près).
     created: DateTime<Utc>,
@@ -1059,7 +1094,7 @@ async fn web_session(portal: &Portal, headers: &HeaderMap, s: &Settings) -> Resu
         .bind(sha256_hex(token.as_bytes()))
         .execute(db)
         .await?;
-    Ok(Some(WebSession { user, expires, created, device }))
+    Ok(Some(WebSession { user, token_hash: sha256_hex(token.as_bytes()), expires, created, device }))
 }
 
 pub(crate) async fn in_group(db: &sqlx::PgPool, user: Uuid, group: &str) -> Result<bool> {
@@ -1166,6 +1201,12 @@ async fn login(AxState(portal): Ctx, axum::Extension(entry): axum::Extension<Ent
             auth::burn_password(body.mot_de_passe.clone()).await;
             return Ok(failed(&portal, &login, &ip, "compte inconnu ou désactivé").await);
         };
+        // Compte hors du groupe du portail : refusé comme un mauvais mot de passe, avant de le
+        // vérifier, pour que la réponse ne dise pas s'il était juste.
+        if !in_group(&state.db, user.id, &s.group).await? {
+            auth::burn_password(body.mot_de_passe.clone()).await;
+            return Ok(failed(&portal, &login, &ip, "hors du groupe du portail").await);
+        }
         if !auth::check_password(user.password_hash.clone(), body.mot_de_passe.clone()).await {
             return Ok(failed(&portal, &login, &ip, "mot de passe incorrect").await);
         }
@@ -1194,17 +1235,16 @@ async fn login(AxState(portal): Ctx, axum::Extension(entry): axum::Extension<Ent
                 return Ok(failed(&portal, &login, &ip, "code incorrect ou déjà utilisé").await);
             }
         }
-        if !in_group(&state.db, user.id, &s.group).await? {
-            audit::note(&state.db, &login, "portail.echec", json!({ "raison": "hors du groupe du portail", "adresse": ip })).await;
-            return Ok(err(StatusCode::FORBIDDEN, t!("This account has no access to the web portal", "Ce compte n'a pas accès au portail web")));
-        }
         state.limits.success(&login, &ip);
         let (cookie, expires) = open_session(state, &s, user.id, &ip, None).await?;
+        // Enrôlement d'un téléphone : seulement après une connexion avec le code (B1), et avec ce
+        // jeton remis dans cette réponse seulement (A1 : une page relayée ne peut pas le lire).
+        let enrol = if need_code { Some(appareil::enrol_token(user.id)?) } else { None };
         audit::note(&state.db, &user.login, "portail.connexion", json!({ "facteurs": if need_code { json!(["mot de passe", "code"]) } else { json!(["mot de passe"]) }, "adresse": ip, "entree": entry.id() })).await;
         Ok::<_, anyhow::Error>(
             (
                 [(header::SET_COOKIE, cookie)],
-                Json(json!({ "etat": "ok", "login": user.login, "expire": expires })),
+                Json(json!({ "etat": "ok", "login": user.login, "expire": expires, "enrolement": enrol })),
             )
                 .into_response(),
         )
@@ -1236,6 +1276,9 @@ struct EnrolBody {
     nom: String,
     /// Clé publique P-256 en base64 (SubjectPublicKeyInfo, comme getEncoded() d'Android).
     cle: String,
+    /// Jeton remis par la connexion avec mot de passe et code (0.49).
+    #[serde(default)]
+    jeton: String,
 }
 
 fn b64_any(text: &str) -> Option<Vec<u8>> {
@@ -1261,6 +1304,13 @@ async fn device_enrol(AxState(portal): Ctx, axum::Extension(entry): axum::Extens
             return Ok(err(
                 StatusCode::FORBIDDEN,
                 t!("To enrol this phone, sign in with your password and code (less than 10 minutes ago)", "Pour enrôler ce téléphone, connectez-vous avec mot de passe et code (il y a moins de 10 minutes)"),
+            ));
+        }
+        if !appareil::take_enrol_token(w.user.id, &body.jeton) {
+            audit::note(&state.db, &w.user.login, "appareil.refuse", json!({ "raison": "jeton d'enrôlement absent ou invalide", "adresse": ip })).await;
+            return Ok(err(
+                StatusCode::FORBIDDEN,
+                t!("To enrol this phone, sign in again with your password and code (update the app if needed)", "Pour enrôler ce téléphone, reconnectez-vous avec mot de passe et code (mettez l'application à jour au besoin)"),
             ));
         }
         let point = match b64_any(&body.cle).ok_or_else(|| anyhow!("base64")).and_then(|k| appareil::public_point(&k)) {
@@ -1312,6 +1362,7 @@ async fn device_remove(AxState(portal): Ctx, axum::Extension(entry): axum::Exten
         match appareil::get(&state.db, id).await? {
             Some(d) if d.user == w.user.id => {
                 appareil::remove(&state.db, id).await?;
+                state.live.recheck();
                 audit::note(&state.db, &w.user.login, "appareil.retire", json!({ "appareil": d.name, "id": id, "par": w.user.login })).await;
                 Ok(Json(json!({ "etat": "ok" })).into_response())
             }
@@ -1333,6 +1384,11 @@ async fn device_challenge(AxState(portal): Ctx, Json(body): Json<ChallengeBody>)
         let s = settings(&portal.state).await?;
         if !s.enabled {
             return Ok(err(StatusCode::SERVICE_UNAVAILABLE, t!("Portal closed", "Portail fermé")));
+        }
+        // Téléphone inconnu : un défi qui ne sera jamais accepté, sans rien garder (pas de table
+        // pleine pour les autres, et la réponse ne dit pas si le téléphone existe).
+        if appareil::get(&portal.state.db, body.appareil).await?.is_none() {
+            return Ok(Json(json!({ "defi": B64URL.encode(random::<32>()?) })).into_response());
         }
         match appareil::challenge(body.appareil) {
             Ok(c) => Ok::<_, anyhow::Error>(Json(json!({ "defi": c })).into_response()),
@@ -1368,6 +1424,9 @@ async fn device_login(AxState(portal): Ctx, axum::Extension(entry): axum::Extens
             return Ok((StatusCode::SEE_OTHER, [(header::LOCATION, "/?accueil")]).into_response());
         }
         let key = format!("appareil:{}", body.appareil);
+        if cross_site(&headers, s.url_for(entry)) {
+            return Ok(device_refused(&portal, &key, &ip, body.appareil, "requête venue d'un autre site").await);
+        }
         if let crate::limits::Verdict::Blocked { first } = state.limits.attempt(&key, &ip) {
             if first {
                 audit::note(&state.db, &key, "auth.bloquee", json!({ "methode": "appareil", "adresse": ip })).await;
@@ -1414,9 +1473,15 @@ async fn logout(AxState(portal): Ctx, headers: HeaderMap) -> Response {
             .bind(sha256_hex(token.as_bytes()))
             .execute(&portal.state.db)
             .await;
+        // Terminaux et bureaux ouverts depuis cette session : fermés tout de suite (B2).
+        portal.state.live.recheck();
     }
     (
-        [(header::SET_COOKIE, format!("{COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0"))],
+        [
+            (header::SET_COOKIE, format!("{COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0")),
+            // Service worker ou cache laissés par une page relayée : effacés (A1).
+            (header::HeaderName::from_static("clear-site-data"), "\"cache\", \"storage\"".to_string()),
+        ],
         Json(json!({ "etat": "ok" })),
     )
         .into_response()
@@ -1497,7 +1562,7 @@ async fn terminal(
         if model::access(&state.db, w.user.id, target.id).await?.is_none() {
             return Ok(Err(err(StatusCode::FORBIDDEN, t!("Server not allowed at the moment", "Serveur non autorisé en ce moment"))));
         }
-        let ticket = crate::api::issue_ticket(&state.db, w.user.id, target.id, Some(&format!("{ip} (web)"))).await?;
+        let ticket = crate::api::issue_ticket(&state.db, w.user.id, target.id, Some(&format!("{ip} (web)")), crate::api::Usage::Ssh).await?;
         Ok::<_, anyhow::Error>(Ok((w, target, ticket, s.idle_min)))
     }
     .await;
@@ -1514,7 +1579,7 @@ async fn terminal(
         let state = portal.state.clone();
         state.web.active.fetch_add(1, Ordering::Relaxed);
         let user = format!("{}%{}", w.user.login, target.name);
-        let (_watch, cut) = state.live.watch(crate::live::Watched { user: w.user.id, login: &w.user.login, target: Some(&target), web: true, recorded: false, session: None });
+        let (_watch, cut) = state.live.watch(crate::live::Watched { user: w.user.id, login: &w.user.login, target: Some(&target), web: true, recorded: false, session: None, portal: Some(w.token_hash.clone()) });
         if let Err(e) = bridge(&state, socket, &user, &ticket, cols, rows, w.expires, idle_min, cut).await {
             tracing::warn!("{} {user}: {e:#}", t!("portal: terminal", "portail : terminal"));
         }
@@ -1556,7 +1621,7 @@ async fn desktop_ticket(AxState(portal): Ctx, axum::Extension(entry): axum::Exte
         let Some(access) = model::access(&state.db, w.user.id, target.id).await? else {
             return Ok(err(StatusCode::FORBIDDEN, t!("Server not allowed at the moment", "Serveur non autorisé en ce moment")));
         };
-        let ticket = crate::api::issue_ticket(&state.db, w.user.id, target.id, Some(&format!("{ip} (web)"))).await?;
+        let ticket = crate::api::issue_ticket(&state.db, w.user.id, target.id, Some(&format!("{ip} (web)")), crate::api::Usage::Rdp).await?;
         // « fichiers » : la page propose la copie de fichiers (la Gate la bloque sinon).
         // « coffre » : la Gate ouvre la session Windows ; la page s'authentifie avec le jeton.
         Ok::<_, anyhow::Error>(Json(json!({ "jeton": ticket, "compte": target.account, "fichiers": access.files, "coffre": target.vaulted() })).into_response())
@@ -1669,7 +1734,48 @@ async fn portal_approval_cancel(AxState(portal): Ctx, axum::Extension(entry): ax
 }
 
 /// Nouveau mot de passe RDP du compte (l'ancien ne vaut plus), montré une seule fois.
-async fn native_password_new(AxState(portal): Ctx, axum::Extension(entry): axum::Extension<Entry>, headers: HeaderMap) -> Response {
+#[derive(Deserialize, Default)]
+struct Confirm {
+    #[serde(default)]
+    mot_de_passe: String,
+    #[serde(default)]
+    code: String,
+}
+
+/// Mot de passe (et code, si le compte en a un) redemandés pour une action sensible : une page
+/// relayée par le portail, qui partage son origine, ne peut pas les fournir (A1).
+async fn confirm_identity(portal: &Portal, user: &model::User, ip: &str, c: &Confirm) -> Result<bool> {
+    let state = &portal.state;
+    if let crate::limits::Verdict::Blocked { .. } = state.limits.attempt(&user.login, ip) {
+        return Ok(false);
+    }
+    if !auth::check_password(user.password_hash.clone(), c.mot_de_passe.clone()).await {
+        audit::note(&state.db, &user.login, "portail.echec", json!({ "raison": "confirmation : mot de passe incorrect", "adresse": ip })).await;
+        return Ok(false);
+    }
+    if let Some(sealed) = &user.totp_secret {
+        let secret = state.keys.open(&format!("totp:{}", user.id), sealed)?;
+        let ok = match auth::totp_check(&secret, c.code.trim(), user.totp_last_step) {
+            Some(step) => model::consume_totp_step(&state.db, user.id, step).await?,
+            None => false,
+        };
+        if !ok {
+            audit::note(&state.db, &user.login, "portail.echec", json!({ "raison": "confirmation : code incorrect", "adresse": ip })).await;
+            return Ok(false);
+        }
+    }
+    state.limits.success(&user.login, ip);
+    Ok(true)
+}
+
+async fn native_password_new(
+    AxState(portal): Ctx,
+    axum::Extension(entry): axum::Extension<Entry>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Option<Json<Confirm>>,
+) -> Response {
+    let ip = client_ip(&portal, peer, &headers);
     let result = async {
         let state = &portal.state;
         let s = settings(state).await?;
@@ -1679,6 +1785,10 @@ async fn native_password_new(AxState(portal): Ctx, axum::Extension(entry): axum:
         let Some(w) = web_session(&portal, &headers, &s).await? else {
             return Ok(err(StatusCode::UNAUTHORIZED, t!("Session expired", "Session expirée")));
         };
+        let confirm = body.map(|b| b.0).unwrap_or_default();
+        if !confirm_identity(&portal, &w.user, &ip, &confirm).await? {
+            return Ok(err(StatusCode::FORBIDDEN, t!("Password or code incorrect", "Mot de passe ou code incorrect")));
+        }
         let password = crate::rdplogin::new_password(state, &w.user, &w.user.login).await?;
         Ok::<_, anyhow::Error>(Json(json!({ "mot_de_passe": password })).into_response())
     }
@@ -1723,6 +1833,7 @@ async fn desktop(AxState(portal): Ctx, axum::Extension(entry): axum::Extension<E
     let lang = crate::lang::get();
     let origin = crate::rdp::Origin::Portal {
         addr,
+        session: session.token_hash.clone(),
         user: session.user.id,
         expires: session.expires,
         idle: Duration::from_secs(s.idle_min as u64 * 60),

@@ -160,6 +160,13 @@ fn strip_own_cookies(value: &str) -> String {
 
 /// `Set-Cookie` du serveur, valable pour la Gate : sans `Domain` ; relais en http simple
 /// (Portunia, 127.0.0.1) : sans `Secure`, et `SameSite=None` devient `Lax`.
+/// Cookie au nom de la Gate (« portunia_gate… », préfixes __Host- et __Secure- compris).
+fn own_cookie(set_cookie: &str) -> bool {
+    let name = set_cookie.split(['=', ';']).next().unwrap_or("").trim().to_ascii_lowercase();
+    let name = name.strip_prefix("__host-").or_else(|| name.strip_prefix("__secure-")).unwrap_or(&name);
+    name.starts_with("portunia_gate")
+}
+
 fn rewrite_cookie(value: &str, plain: bool) -> String {
     value
         .split(';')
@@ -251,6 +258,10 @@ fn page(status: StatusCode, text: &str) -> Response<Body> {
 /// Relaie la requête vers le serveur (`path` : chemin et paramètres côté serveur).
 /// `plain` : le navigateur parle en http simple (relais local de Portunia).
 pub async fn forward(state: &State, user: &User, target: &Target, mut req: Request<Body>, path: &str, plain: bool, client_addr: &str) -> Response<Body> {
+    // Script de service worker : refusé, il pourrait capter le portail entier (A1).
+    if req.headers().get("service-worker").is_some_and(|v| v.as_bytes().eq_ignore_ascii_case(b"script")) {
+        return page(StatusCode::FORBIDDEN, t!("Service workers are not allowed through the Gate", "Service workers refusés par la Gate"));
+    }
     // Session web : ouverte à la première requête ; refus si elle a été coupée.
     if let Err(why) = websession::touch(state, user, target, client_addr, !plain).await {
         return page(StatusCode::FORBIDDEN, &why);
@@ -291,12 +302,11 @@ async fn relay(state: &State, user: &User, target: &Target, req: &mut Request<Bo
     let mut substituted = false;
     // Chemin d'origine pour le journal : jamais celui où le mot de passe a été mis.
     let original = path;
-    let mut path = path.to_string();
-    if let Some((_, password)) = &vault {
-        if let Some(p) = webvault::substitute_path(&path, user.id, target.id, password) {
-            path = p;
-            substituted = true;
-        }
+    let path = path.to_string();
+    // Coffre : jeton glissé ailleurs que dans l'envoi de connexion (A2), brûlé et noté.
+    let mut refused: Option<&'static str> = None;
+    if vault.is_some() && webvault::marker_in_path(&path, user.id, target.id) {
+        refused = Some("jeton dans l'adresse");
     }
     let mut body = std::mem::replace(req.body_mut(), Body::empty());
     let mut new_length = None;
@@ -307,13 +317,17 @@ async fn relay(state: &State, user: &User, target: &Target, req: &mut Request<Bo
         // Connexion : petit corps de texte. Les envois de fichiers passent sans être lus.
         if textual && length.is_some_and(|n| n > 0 && n <= webvault::MAX_REQUEST) {
             let bytes = axum::body::to_bytes(body, webvault::MAX_REQUEST).await?;
-            body = match webvault::substitute_body(&bytes, &content_type, user.id, target.id, password) {
-                Some(changed) => {
+            body = match webvault::substitute_body(&bytes, &content_type, method == axum::http::Method::POST, user.id, target.id, password) {
+                webvault::Substitution::Done(changed) => {
                     substituted = true;
                     new_length = Some(changed.len());
                     Body::from(changed)
                 }
-                None => Body::from(bytes),
+                webvault::Substitution::Refused(why) => {
+                    refused = Some(why);
+                    Body::from(bytes)
+                }
+                webvault::Substitution::None => Body::from(bytes),
             };
         }
     }
@@ -326,6 +340,10 @@ async fn relay(state: &State, user: &User, target: &Target, req: &mut Request<Bo
         }
         // Page à compléter par le script : demandée entière et non compressée.
         if fill && document && (name == header::ACCEPT_ENCODING || name == header::IF_NONE_MATCH || name == header::IF_MODIFIED_SINCE) {
+            continue;
+        }
+        // Envoi de connexion : réponse non compressée, pour y masquer le mot de passe s'il revient.
+        if substituted && name == header::ACCEPT_ENCODING {
             continue;
         }
         if name == header::CONTENT_LENGTH && new_length.is_some() {
@@ -376,6 +394,10 @@ async fn relay(state: &State, user: &User, target: &Target, req: &mut Request<Bo
         let shown = original.split('?').next().unwrap_or(original);
         audit::note(&state.db, &user.login, "web.coffre", json!({ "cible": target.name, "chemin": shown, "compte": vault.as_ref().map(|v| &v.0), "adresse": client_addr })).await;
     }
+    if let Some(why) = refused {
+        let shown = original.split('?').next().unwrap_or(original);
+        audit::note(&state.db, &user.login, "web.coffre_refuse", json!({ "cible": target.name, "chemin": shown, "methode": method.as_str(), "raison": why, "adresse": client_addr })).await;
+    }
     let out = out.body(body)?;
 
     let io = connect(state, user, target).await?;
@@ -424,7 +446,11 @@ async fn relay(state: &State, user: &User, target: &Target, req: &mut Request<Bo
         }
         let value = match name.as_str() {
             "location" => HeaderValue::from_str(&rewrite_location(value.to_str().unwrap_or_default(), &origin, &prefix))?,
+            // Cookie de la Gate (session du portail, interface ouverte) : jamais posé par une interface (A1).
+            "set-cookie" if own_cookie(value.to_str().unwrap_or_default()) => continue,
             "set-cookie" => HeaderValue::from_str(&rewrite_cookie(value.to_str().unwrap_or_default(), plain))?,
+            // Ni service worker sur tout le site, ni effacement des données du portail (A1).
+            "service-worker-allowed" | "clear-site-data" => continue,
             // Le serveur relayé ne doit pas imposer HTTPS à 127.0.0.1 (relais de Portunia).
             "strict-transport-security" if plain => continue,
             // Coffre : jamais la fenêtre de connexion du navigateur (la Gate s'authentifie).
@@ -449,6 +475,21 @@ async fn relay(state: &State, user: &User, target: &Target, req: &mut Request<Bo
             headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
             Body::from(page)
         }
+        // Connexion faite avec le mot de passe du coffre : s'il revient dans la réponse (page
+        // qui recopie ce qu'elle reçoit), il y est masqué.
+        Some((_, password)) if substituted && parts.status != StatusCode::SWITCHING_PROTOCOLS => {
+            let page = axum::body::to_bytes(Body::new(incoming), webvault::MAX_PAGE).await?;
+            match (encoded, webvault::mask_password(&page, password)) {
+                (false, Some(masked)) => {
+                    audit::note(&state.db, &user.login, "web.coffre_masque", json!({ "cible": target.name, "chemin": original.split('?').next().unwrap_or(original), "adresse": client_addr })).await;
+                    headers.remove(header::CONTENT_LENGTH);
+                    headers.remove(header::ETAG);
+                    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+                    Body::from(masked)
+                }
+                _ => Body::from(page),
+            }
+        }
         _ => Body::new(incoming),
     };
 
@@ -467,6 +508,16 @@ pub async fn opened(state: &State, user: &User, target: &Target, client_addr: &s
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cookies_de_la_gate_jamais_poses() {
+        for c in ["portunia_gate_portail=x; Path=/", "Portunia_Gate_Web=y", "__Host-portunia_gate_portail=z; Secure", "__Secure-portunia_gate=1", " portunia_gate_x=1"] {
+            assert!(own_cookie(c), "{c}");
+        }
+        for c in ["session=abc; Path=/", "portunia=1", "gate_portunia_gate=1"] {
+            assert!(!own_cookie(c), "{c}");
+        }
+    }
 
     #[test]
     fn cookies_de_la_gate_retires() {
