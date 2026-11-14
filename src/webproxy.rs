@@ -84,6 +84,13 @@ pub fn new_key(user: Uuid, target: Uuid) -> Result<String> {
     Ok(key)
 }
 
+/// Clés web de Portunia de ce compte effacées (mot de passe ou code réinitialisé, compte
+/// désactivé, connexions fermées par un administrateur) : la session web ne survit pas (B9).
+pub fn forget_user(user: Uuid) {
+    KEYS.lock().unwrap().retain(|_, k| k.user != user);
+    CHECKED.lock().unwrap().retain(|(u, _), _| *u != user);
+}
+
 /// Compte et serveur d'une clé encore valable.
 pub fn key_owner(key: &str) -> Option<(Uuid, Uuid)> {
     KEYS.lock().unwrap().get(key).filter(|k| k.expires > Instant::now()).map(|k| (k.user, k.target))

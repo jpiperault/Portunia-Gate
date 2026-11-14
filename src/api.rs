@@ -87,6 +87,7 @@ pub async fn run(state: Arc<State>) -> anyhow::Result<()> {
         .route("/api/v1/admin/cibles", get(admin_targets).post(admin_target_create))
         .route("/api/v1/admin/cibles/{id}", put(admin_target_update).delete(admin_target_delete))
         .route("/api/v1/admin/cibles/{id}/oublier-empreinte", post(admin_target_forget_key))
+        .route("/api/v1/admin/cibles/{id}/empreinte", get(admin_target_probe).post(admin_target_trust))
         .route("/api/v1/admin/comptes", get(admin_users).post(admin_user_create))
         .route("/api/v1/admin/comptes/{id}", put(admin_user_update).delete(admin_user_delete))
         .route("/api/v1/admin/comptes/{id}/reinitialiser-code", post(admin_user_reset_totp))
@@ -460,7 +461,7 @@ async fn servers(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
                 "sftp": access.sftp && t.vaulted(),
                 "tunnels": access.tunnels && t.vaulted(),
                 // Entrée RDP native ouverte pour ce serveur (fichier .rdp pour mstsc, Remmina…).
-                "rdp_natif": native.enabled && t.is_rdp() && native.allows(&t.mode),
+                "rdp_natif": native.enabled && t.is_rdp() && native.allows(&t.mode) && (t.mode != "rebond" || access.files),
                 // Sortie web : filtre appliqué par la Gate, affiché par Portunia.
                 "sortie": t.is_egress().then(|| json!({ "domaines": t.sortie_domaines, "bloques": t.sortie_bloques, "ports": t.sortie_ports })),
             }));
@@ -903,6 +904,33 @@ async fn admin_target_delete(AxState(api): Ctx, headers: HeaderMap, Path(id): Pa
     api.state.live.recheck();
     audit::note(db, &actor.login, "cible.supprimee", json!({ "cible": t.name })).await;
     Ok(Json(json!({ "etat": "ok" })))
+}
+
+/// Empreinte que présente le serveur Bureau à distance en ce moment (à confirmer).
+async fn admin_target_probe(AxState(api): Ctx, headers: HeaderMap, Path(id): Path<Uuid>) -> ApiResult {
+    admin(&api, &headers).await?;
+    let t = model::target_by_id(&api.state.db, id).await?.filter(|t| t.is_rdp()).ok_or_else(|| err(StatusCode::NOT_FOUND, t!("Unknown Remote Desktop server", "Serveur Bureau à distance inconnu")))?;
+    let seen = crate::rdp::probe_fingerprint(&t.host, t.port as u16).await.map_err(|e| err(StatusCode::BAD_GATEWAY, e.to_string()))?;
+    Ok(Json(json!({ "empreinte": seen, "memorisee": t.host_key })))
+}
+
+#[derive(Deserialize)]
+struct TrustBody {
+    empreinte: String,
+}
+
+/// Confirme l'empreinte vue par l'administrateur : gardée seulement si le serveur la présente encore.
+async fn admin_target_trust(AxState(api): Ctx, headers: HeaderMap, Path(id): Path<Uuid>, Json(body): Json<TrustBody>) -> ApiResult {
+    let actor = admin(&api, &headers).await?;
+    let db = &api.state.db;
+    let t = model::target_by_id(db, id).await?.filter(|t| t.is_rdp()).ok_or_else(|| err(StatusCode::NOT_FOUND, t!("Unknown Remote Desktop server", "Serveur Bureau à distance inconnu")))?;
+    let seen = crate::rdp::probe_fingerprint(&t.host, t.port as u16).await.map_err(|e| err(StatusCode::BAD_GATEWAY, e.to_string()))?;
+    if !seen.eq_ignore_ascii_case(body.empreinte.trim()) {
+        return Err(err(StatusCode::CONFLICT, t!(format!("The server now presents {seen}: nothing remembered"), format!("Le serveur présente maintenant {seen} : rien n'est mémorisé"))));
+    }
+    sqlx::query("UPDATE targets SET host_key = $2 WHERE id = $1").bind(t.id).bind(&seen).execute(db).await?;
+    audit::note(db, &actor.login, "cible.empreinte_confirmee", json!({ "cible": t.name, "empreinte": seen, "ancienne": t.host_key })).await;
+    Ok(Json(json!({ "etat": "ok", "empreinte": seen })))
 }
 
 async fn admin_target_forget_key(AxState(api): Ctx, headers: HeaderMap, Path(id): Path<Uuid>) -> ApiResult {

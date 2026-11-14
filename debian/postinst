@@ -16,6 +16,12 @@ if [ "$1" = configure ]; then
   # portunia-gate-update l'exécute et écrit son avancement dans /var/lib/portunia-gate-update.
   install -d -o _portunia_gate -g _portunia_gate -m 700 /var/lib/portunia-gate/mise-a-jour
   install -d -o root -g root -m 755 /var/lib/portunia-gate-update
+  # État du durcissement (Gate 0.50) : l'ancien script copiait à travers un éventuel lien
+  # symbolique ; sa ligne d'écriture est remplacée par un fichier neuf suivi d'un renommage.
+  h=/etc/portunia-gate/durcissement/etat.sh
+  if [ -f "$h" ] && grep -q '^cp "$tmp" /var/lib/portunia-gate/durcissement.json$' "$h"; then
+    sed -i 's|^cp "$tmp" /var/lib/portunia-gate/durcissement.json$|t2=$(mktemp /var/lib/portunia-gate/.durcissement.XXXXXX) \&\& cat "$tmp" >"$t2" \&\& chmod 644 "$t2" \&\& mv -f "$t2" /var/lib/portunia-gate/durcissement.json|' "$h"
+  fi
   if [ -d /run/systemd/system ]; then
     systemctl daemon-reload
     systemctl enable --now portunia-gate-update.path >/dev/null 2>&1 || true

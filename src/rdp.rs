@@ -440,6 +440,15 @@ pub(crate) async fn open_server(db: &sqlx::PgPool, a: &Allowed, x224_request: &[
     };
     let fingerprint = cert_fingerprint(leaf);
     match &target.host_key {
+        // Mode coffre : la Gate va donner le mot de passe du coffre à ce serveur. Une empreinte
+        // jamais vue pourrait être celle d'un faux serveur : un administrateur la confirme d'abord (B6).
+        None if target.vaulted() => {
+            audit::note(db, &a.user.login, "cible.empreinte_a_confirmer", json!({ "cible": target.name, "recue": fingerprint })).await;
+            return Err(general(anyhow!(t!(
+                format!("{}: fingerprint {fingerprint} not confirmed yet; an administrator confirms it in Portunia (Administer › Servers) or with « portunia-gate target trust {} »", target.name, target.name),
+                format!("{} : empreinte {fingerprint} pas encore confirmée ; un administrateur la confirme dans Portunia (Administrer › Serveurs) ou avec « portunia-gate target trust {} »", target.name, target.name)
+            ))));
+        }
         None => {
             if model::pin_host_key(db, target.id, &fingerprint).await.map_err(general)? {
                 audit::note(db, &a.user.login, "cible.empreinte_memorisee", json!({ "cible": target.name, "empreinte": fingerprint })).await;
@@ -455,6 +464,31 @@ pub(crate) async fn open_server(db: &sqlx::PgPool, a: &Allowed, x224_request: &[
         _ => {}
     }
     Ok(Opened { tls, x224, chain, server })
+}
+
+/// Empreinte du certificat TLS d'un serveur Bureau à distance, lue sans s'authentifier
+/// (négociation X.224 puis TLS), pour qu'un administrateur la confirme.
+pub(crate) async fn probe_fingerprint(host: &str, port: u16) -> Result<String> {
+    let address = crate::target::addresses(host, port).await?;
+    let mut tcp = tokio::time::timeout(Duration::from_secs(10), tokio::net::TcpStream::connect(&address[..]))
+        .await
+        .map_err(|_| anyhow!(t!(format!("{host}:{port} unreachable (timed out)"), format!("{host}:{port} injoignable (délai dépassé)"))))??;
+    let request = crate::rdpnative::build_request(Some(crate::rdpnative::neg_request(SSL | HYBRID | HYBRID_EX)));
+    tcp.write_all(&request).await?;
+    let x224 = tokio::time::timeout(Duration::from_secs(10), read_tpkt(&mut tcp, 4096)).await.map_err(|_| anyhow!("X.224"))??;
+    if x224.len() >= 19 && x224[11] == 0x03 {
+        anyhow::bail!(t!("the server refused the TLS negotiation", "le serveur a refusé la négociation TLS"));
+    }
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let config = rustls::ClientConfig::builder_with_provider(provider.clone())
+        .with_safe_default_protocol_versions()?
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(Capture(provider)))
+        .with_no_client_auth();
+    let name = ServerName::try_from(host.to_string()).map_err(|_| anyhow!(t!("invalid server address", "adresse du serveur invalide")))?;
+    let tls = tokio::time::timeout(Duration::from_secs(10), tokio_rustls::TlsConnector::from(Arc::new(config)).connect(name, tcp)).await.map_err(|_| anyhow!("TLS"))??;
+    let leaf = tls.get_ref().1.peer_certificates().and_then(|c| c.first().map(|c| c.to_vec())).ok_or_else(|| anyhow!(t!("no certificate", "aucun certificat")))?;
+    Ok(cert_fingerprint(&leaf))
 }
 
 /// La Gate ouvre la session Windows (NLA) avec ce compte : celui du coffre, ou celui que

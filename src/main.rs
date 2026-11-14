@@ -575,6 +575,13 @@ enum TargetCmd {
     },
     /// Forgets the remembered fingerprint (server reinstalled); the next one is remembered at the next connection.
     Forget { name: String },
+    /// Reads the Remote Desktop server's certificate fingerprint and remembers it once you confirm (required in vault mode before the first connection).
+    Trust {
+        name: String,
+        /// Fingerprint expected (TLS:AB:CD:…), checked without a question; otherwise it is asked.
+        #[arg(long)]
+        fingerprint: Option<String>,
+    },
     /// Deletes a server: its secret is erased, its sessions and recordings stay.
     Delete { name: String },
 }
@@ -2453,6 +2460,32 @@ async fn target_cmd(state: &State, cmd: TargetCmd) -> Result<()> {
             sqlx::query("UPDATE targets SET host_key = NULL WHERE id = $1").bind(t.id).execute(db).await?;
             audit::log(db, "console", "cible.empreinte_oubliee", json!({ "cible": t.name, "ancienne": t.host_key })).await?;
             println!("{}", t!("Fingerprint forgotten: the next one will be remembered at the next connection.", "Empreinte oubliée : la suivante sera mémorisée à la prochaine connexion."));
+        }
+        TargetCmd::Trust { name, fingerprint } => {
+            let t = find_target(db, &name).await?;
+            if !t.is_rdp() {
+                bail!(t!("Only for a Remote Desktop server: SSH servers are remembered at the first connection", "Seulement pour un serveur Bureau à distance : les serveurs SSH sont mémorisés à la première connexion"));
+            }
+            let seen = rdp::probe_fingerprint(&t.host, t.port as u16).await?;
+            println!("{} {}:{}\n  {seen}", t!("Certificate of", "Certificat de"), t.host, t.port);
+            if let Some(known) = &t.host_key {
+                println!("{} {known}", t!("Remembered now:", "Mémorisée aujourd'hui :"));
+            }
+            let ok = match fingerprint {
+                Some(f) => f.trim().eq_ignore_ascii_case(&seen),
+                None => {
+                    eprint!("{}", t!("Compare it with the one shown on the server (Windows: certificate of « Remote Desktop »). Remember it? [y/N] ", "Comparez-la avec celle du serveur (Windows : certificat « Bureau à distance »). La mémoriser ? [o/N] "));
+                    let mut line = String::new();
+                    std::io::stdin().read_line(&mut line)?;
+                    matches!(line.trim().to_lowercase().as_str(), "o" | "oui" | "y" | "yes")
+                }
+            };
+            if !ok {
+                bail!(t!("Fingerprint not remembered.", "Empreinte non mémorisée."));
+            }
+            sqlx::query("UPDATE targets SET host_key = $2 WHERE id = $1").bind(t.id).bind(&seen).execute(db).await?;
+            audit::log(db, "console", "cible.empreinte_confirmee", json!({ "cible": t.name, "empreinte": seen, "ancienne": t.host_key })).await?;
+            println!("{}", t!("Fingerprint confirmed and remembered.", "Empreinte confirmée et mémorisée."));
         }
         TargetCmd::Delete { name } => {
             let t = find_target(db, &name).await?;

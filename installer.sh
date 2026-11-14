@@ -1005,7 +1005,9 @@ harden_state_install() {
   if [ "$MODE" = docker ]; then
     write="cd $DIR && docker compose cp \"\$tmp\" portunia-gate:$HARDEN_STATE"
   else
-    write="cp \"\$tmp\" $HARDEN_STATE"
+    # Fichier neuf puis renommage : root ne suit jamais un lien symbolique posé dans le dossier
+    # du service (B13 de l'audit du 11 novembre).
+    write="t2=\$(mktemp $(dirname "$HARDEN_STATE")/.durcissement.XXXXXX) && cat \"\$tmp\" >\"\$t2\" && chmod 644 \"\$t2\" && mv -f \"\$t2\" $HARDEN_STATE"
   fi
   harden_state_script "$HARDEN_DIR" "$HARDEN_SSH" "$HARDEN_SYSCTL" "$HARDEN_UNIT" "$write" >"$HARDEN_DIR/etat.sh"
   chmod 700 "$HARDEN_DIR/etat.sh"

@@ -58,8 +58,11 @@ impl Framer {
         self.buf.extend_from_slice(data);
         loop {
             let Some(&first) = self.buf.first() else { break };
-            let size = if first == 0x30 {
-                der_size(&self.buf)
+            // DER (NLA) seulement avant la phase RDP : ensuite, 0x30 est un en-tête fast-path
+            // ordinaire (B10). Un élément DER de plus de 64 Kio n'existe pas en NLA.
+            let der = first == 0x30 && !self.rdp;
+            let size = if der {
+                der_size(&self.buf).map(|n| if n > 64 * 1024 { 0 } else { n })
             } else if first == 0x03 {
                 (self.buf.len() >= 4).then(|| u16::from_be_bytes([self.buf[2], self.buf[3]]) as usize)
             } else if !self.rdp {
@@ -80,7 +83,7 @@ impl Framer {
                 break;
             }
             let pdu: Vec<u8> = self.buf.drain(..size).collect();
-            out.push(if first == 0x30 {
+            out.push(if der {
                 Pdu::Der(pdu)
             } else if first == 0x03 {
                 self.rdp = true;
@@ -183,6 +186,8 @@ struct ClipSide {
     file_format: Option<u32>,
     /// Fichiers proposés par ce côté (dernière liste demandée par l'autre).
     offered: Vec<Offered>,
+    /// Message trop long (plus de 4 Mio) : ignoré jusqu'au prochain premier morceau (B11).
+    skip: bool,
 }
 
 /// Fichier proposé dans le presse-papiers (MS-RDPECLIP, FILEDESCRIPTORW).
@@ -202,6 +207,8 @@ struct Transfer {
     in_order: bool,
     /// Copie gardée pour l'audit (tant qu'elle tient dans la limite).
     copy: Option<Vec<u8>>,
+    /// Place réservée pour la copie : au-delà, elle est abandonnée (B11).
+    reserved: u64,
 }
 
 /// Trie une session RDP (les deux sens, en clair) en blocs d'image et événements.
@@ -385,9 +392,19 @@ impl Tap {
         }
         if flags & 1 != 0 {
             self.clip[side].chunk.clear();
+            self.clip[side].skip = false;
+        }
+        if self.clip[side].skip {
+            return;
         }
         self.clip[side].chunk.extend_from_slice(chunk);
-        if flags & 2 == 0 || self.clip[side].chunk.len() > 4 * 1024 * 1024 {
+        // Message sans fin : la mémoire n'est pas gardée, le reste du message est ignoré (B11).
+        if self.clip[side].chunk.len() > 4 * 1024 * 1024 {
+            self.clip[side].chunk = Vec::new();
+            self.clip[side].skip = true;
+            return;
+        }
+        if flags & 2 == 0 {
             return;
         }
         let pdu = std::mem::take(&mut self.clip[side].chunk);
@@ -448,7 +465,7 @@ impl Tap {
             let offer = self.clip[side].offered.get(index as usize).cloned().unwrap_or(Offered { name: format!("#{index}"), size: u64::MAX });
             let copy = (self.keep_budget >= offer.size).then(Vec::new);
             self.keep_budget = self.keep_budget.saturating_sub(if copy.is_some() { offer.size } else { 0 });
-            self.transfers.insert(key, Transfer { name: offer.name, size: offer.size, received: 0, hash: ring::digest::Context::new(&ring::digest::SHA256), in_order: true, copy });
+            self.transfers.insert(key, Transfer { name: offer.name, size: offer.size, received: 0, hash: ring::digest::Context::new(&ring::digest::SHA256), in_order: true, copy, reserved: offer.size });
         }
         let Some(tr) = self.transfers.get_mut(&key) else { return };
         // Demande de taille (1) : la taille fait foi (la liste peut ne pas la donner) ; un
@@ -460,6 +477,9 @@ impl Tap {
         } else if flags & 2 != 0 {
             if position == tr.received {
                 tr.hash.update(data);
+                if tr.copy.as_ref().is_some_and(|c| c.len() as u64 + data.len() as u64 > tr.reserved) {
+                    tr.copy = None;
+                }
                 if let Some(c) = &mut tr.copy {
                     c.extend_from_slice(data);
                 }
@@ -872,6 +892,21 @@ mod tests {
         let mut bad = b"Duca\x05".to_vec();
         bad.extend_from_slice(&[0x03, 0xc0, 0xff, 0]);
         assert!(gcc_block(&bad, 0xc003).is_none());
+    }
+
+    #[test]
+    fn fast_path_0x30_apres_nla() {
+        let mut f = Framer::default();
+        // NLA : DER accepté avant la phase RDP.
+        assert!(matches!(&f.push(&[0x30, 0x02, 1, 2])[..], [Pdu::Der(_)]));
+        // Premier TPKT : phase RDP.
+        assert!(matches!(&f.push(&[3, 0, 0, 5, 9])[..], [Pdu::Tpkt(_)]));
+        // 0x30 est alors un message fast-path (longueur 4), pas du DER.
+        assert!(matches!(&f.push(&[0x30, 4, 0, 0])[..], [Pdu::FastPath(_)]));
+        assert!(!f.lost);
+        // DER démesuré avant la phase RDP : flux perdu, pas 4 Go attendus.
+        let mut g = Framer::default();
+        assert!(matches!(&g.push(&[0x30, 0x84, 0xff, 0xff, 0xff, 0xff])[..], [Pdu::Lost]));
     }
 
     #[test]

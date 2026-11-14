@@ -18,6 +18,9 @@ const MAX_PAIR: u32 = 5;
 const MAX_ADDRESS: u32 = 20;
 const MAX_ACCOUNT: u32 = 30;
 const MAX_PENDING_PER_ADDRESS: usize = 16;
+/// Connexions non authentifiées venues de la boucle locale (portail, cloudflared) ou du tunnel
+/// Cloudflare : un plafond chacune, plus large qu'une adresse mais pas sans limite (B12).
+const MAX_PENDING_SHARED: usize = 64;
 const MAX_PENDING: usize = 512;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -103,11 +106,24 @@ impl Limiter {
     /// connexions locales (portail, surveillance) ne comptent pas.
     pub fn connection(&self, ip: IpAddr) -> Option<Slot> {
         if ip.to_canonical().is_loopback() {
-            return Some(Slot { pending: self.pending.clone(), key: None });
+            return self.shared("boucle-locale");
         }
         let key = address_key(&ip.to_string());
         let mut pending = self.pending.lock().unwrap();
         if pending.values().sum::<usize>() >= MAX_PENDING || pending.get(&key).is_some_and(|n| *n >= MAX_PENDING_PER_ADDRESS) {
+            return None;
+        }
+        *pending.entry(key.clone()).or_default() += 1;
+        Some(Slot { pending: self.pending.clone(), key: Some(key) })
+    }
+}
+
+impl Limiter {
+    /// Place pour une entrée partagée par beaucoup (boucle locale, tunnel Cloudflare).
+    pub fn shared(&self, name: &str) -> Option<Slot> {
+        let key = format!("~{name}");
+        let mut pending = self.pending.lock().unwrap();
+        if pending.get(&key).is_some_and(|n| *n >= MAX_PENDING_SHARED) {
             return None;
         }
         *pending.entry(key.clone()).or_default() += 1;

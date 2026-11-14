@@ -212,6 +212,7 @@ impl Registry {
 
     /// Ferme tout ce que le compte a d'ouvert (mot de passe ou code réinitialisé).
     pub fn cut_user(&self, user: Uuid, why: &str) {
+        crate::webproxy::forget_user(user);
         for entry in self.entries.lock().unwrap().values().filter(|e| e.user == user) {
             entry.cut.send_replace(Some(why.to_string()));
         }

@@ -82,7 +82,8 @@ async fn services(state: &State, hosts: &Hosts) -> Result<Vec<(String, String)>>
         .map(|(what, host)| {
             let port = match what {
                 "api" => port_of(&state.config.api_listen, 8443),
-                "ssh" => port_of(&state.config.ssh_listen, 2222),
+                // Écoute SSH dédiée : les connexions par Cloudflare y sont comptées à part (B12).
+                "ssh" => port_of(&state.config.ssh_cloudflare_listen, 2224),
                 _ => rdp_port,
             };
             (host.to_string(), format!("tcp://localhost:{port}"))

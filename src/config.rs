@@ -9,6 +9,9 @@ pub struct Config {
     pub data_dir: PathBuf,
     /// Écoute SSH : PORTUNIA_GATE_SSH_LISTEN (par défaut 0.0.0.0:2222).
     pub ssh_listen: String,
+    /// Écoute SSH réservée au tunnel Cloudflare (0.50) : ses connexions arrivent toutes de la
+    /// boucle locale, elles sont comptées à part et notées « cloudflare » au journal.
+    pub ssh_cloudflare_listen: String,
     /// Écoute de l'API HTTPS pour Portunia : PORTUNIA_GATE_API_LISTEN (par défaut 0.0.0.0:8443).
     pub api_listen: String,
     /// Port SSH vu des utilisateurs (redirection Docker) : PORTUNIA_GATE_SSH_PUBLIC_PORT.
@@ -48,6 +51,7 @@ impl Config {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| "/var/lib/portunia-gate".into()),
             ssh_listen: std::env::var("PORTUNIA_GATE_SSH_LISTEN").unwrap_or_else(|_| format!("0.0.0.0:{ssh_port}")),
+            ssh_cloudflare_listen: text("PORTUNIA_GATE_SSH_CLOUDFLARE_LISTEN").unwrap_or_else(|| "127.0.0.1:2224".into()),
             api_listen: std::env::var("PORTUNIA_GATE_API_LISTEN").unwrap_or_else(|_| format!("0.0.0.0:{api_port}")),
             ssh_public_port: port("PORTUNIA_GATE_SSH_PUBLIC_PORT").unwrap_or(ssh_port),
             portal_listen: text("PORTUNIA_GATE_PORTAL_LISTEN").unwrap_or_else(|| "127.0.0.1:8445".into()),

@@ -96,11 +96,12 @@ sudo portunia-gate target edit mail --description "Agency mail"       # text of 
 sudo portunia-gate target secret web-01 --password        # replaces the vault secret (or --key-file FILE)
 sudo portunia-gate target secret app-02 --generate        # SSH: the Gate creates a key and installs it with the current password, then forgets it
 sudo portunia-gate target forget srv-ad-01                # server reinstalled: forget its fingerprint
+sudo portunia-gate target trust srv-ad-01                 # Remote Desktop: read the certificate fingerprint, remember it once confirmed (0.50; required in vault mode); --fingerprint TLS:… to skip the question
 sudo portunia-gate target delete fw-edge                  # secret erased; sessions and recordings stay
 ```
 
 - Web interface (`--protocol https` or `http`, 0.30): port 443 or 80; the Gate relays every request and logs the pages opened (`web.page`). Recorded mode (taken by default without `--password`): credentials are typed in the page. Vault mode (0.32): `--mode vault --account … --password`; the Gate signs the user in and the password never reaches the browser. `--web-login auto` (default: fills the sign-in form, JavaScript applications included, and submits it; HTTP authentication when the server asks for it), `fill` (fills only, the user clicks) or `basic` (HTTP authentication on every request). Each use of the vault password is logged (`web.coffre`, with the path). Examples: `sudo portunia-gate target add vcenter --host 10.0.4.10 --protocol https`, `sudo portunia-gate target add mail --host 192.168.1.16 --protocol https --mode vault --account admin --password`, `sudo portunia-gate target edit mail --web-login fill`.
-- Remote Desktop (`--protocol rdp`): `--mode enregistre`, `--mode rebond`, or `--mode coffre` (0.29) with `--account` and `--password` (a vault RDP server keeps a password, not a key). Port 3389 by default.
+- Remote Desktop (`--protocol rdp`): `--mode enregistre`, `--mode rebond`, or `--mode coffre` (0.29) with `--account` and `--password` (a vault RDP server keeps a password, not a key). Port 3389 by default. In vault mode (0.50), confirm the fingerprint with `target trust` before the first connection: the Gate never sends the vault password to a server it has not been told to trust.
 - The web portal shows `coffre` (SSH) and `enregistre` (SSH and RDP) servers; `rebond` servers open from Portunia, or with `ssh -J` / `ssh -L`.
 
 ### Web egress (0.48)

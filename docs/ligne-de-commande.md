@@ -96,11 +96,12 @@ sudo portunia-gate target edit mail --description "Messagerie de l'agence"   # t
 sudo portunia-gate target secret web-01 --password        # remplace le secret du coffre (ou --key-file FICHIER)
 sudo portunia-gate target secret app-02 --generate        # SSH : la Gate crée une clé, l'installe avec le mot de passe actuel, puis l'oublie
 sudo portunia-gate target forget srv-ad-01                # serveur réinstallé : oublie son empreinte
+sudo portunia-gate target trust srv-ad-01                 # Bureau à distance : lit l'empreinte du certificat, la mémorise après confirmation (0.50 ; obligatoire en coffre) ; --fingerprint TLS:… sans question
 sudo portunia-gate target delete fw-edge                  # secret effacé ; sessions et enregistrements gardés
 ```
 
 - Interface web (`--protocol https` ou `http`, 0.30) : port 443 ou 80 ; la Gate relaie chaque requête et journalise les pages ouvertes (`web.page`). Mode enregistré (pris d'office sans `--password`) : les identifiants se tapent dans la page. Mode coffre (0.32) : `--mode coffre --account … --password` ; la Gate connecte l'utilisateur et le mot de passe n'arrive jamais dans le navigateur. `--web-login auto` (par défaut : remplit le formulaire de connexion, applications JavaScript comprises, et le valide ; authentification HTTP si le serveur la demande), `remplir` (remplit seulement, l'utilisateur clique) ou `basic` (authentification HTTP à chaque requête). Chaque usage du mot de passe du coffre est noté au journal (`web.coffre`, avec le chemin). Exemples : `sudo portunia-gate target add vcenter --host 10.0.4.10 --protocol https`, `sudo portunia-gate target add mail --host 192.168.1.16 --protocol https --mode coffre --account admin --password`, `sudo portunia-gate target edit mail --web-login remplir`.
-- Bureau à distance (`--protocol rdp`) : `--mode enregistre`, `--mode rebond`, ou `--mode coffre` (0.29) avec `--account` et `--password` (un serveur RDP au coffre garde un mot de passe, pas une clé). Port 3389 par défaut.
+- Bureau à distance (`--protocol rdp`) : `--mode enregistre`, `--mode rebond`, ou `--mode coffre` (0.29) avec `--account` et `--password` (un serveur RDP au coffre garde un mot de passe, pas une clé). Port 3389 par défaut. En coffre (0.50), confirmez l'empreinte avec `target trust` avant la première connexion : la Gate n'envoie jamais le mot de passe du coffre à un serveur qu'on ne lui a pas dit de croire.
 - Le portail web affiche les serveurs en `coffre` (SSH) et `enregistre` (SSH et RDP) ; les serveurs en `rebond` s'ouvrent depuis Portunia, ou avec `ssh -J` / `ssh -L`.
 
 ### Sortie web (0.48)

@@ -258,7 +258,7 @@ fn parse_request(cr: &[u8]) -> Result<Request> {
 }
 
 /// Demande X.224 envoyée au serveur : sans jeton, avec ces protocoles (ou ceux du poste).
-fn build_request(neg: Option<[u8; 8]>) -> Vec<u8> {
+pub(crate) fn build_request(neg: Option<[u8; 8]>) -> Vec<u8> {
     let mut x224 = vec![0xE0, 0, 0, 0, 0, 0];
     if let Some(n) = neg {
         x224.extend_from_slice(&n);
@@ -270,7 +270,7 @@ fn build_request(neg: Option<[u8; 8]>) -> Vec<u8> {
     out
 }
 
-fn neg_request(protocols: u32) -> [u8; 8] {
+pub(crate) fn neg_request(protocols: u32) -> [u8; 8] {
     let p = protocols.to_le_bytes();
     [0x01, 0, 8, 0, p[0], p[1], p[2], p[3]]
 }
@@ -343,6 +343,12 @@ async fn handle(state: &Arc<State>, mut tcp: TcpStream, peer: SocketAddr, permit
     drop(permit);
     rdp::check_space(state, &a).await.map_err(|(_, e)| e)?;
     if a.target.mode == "rebond" {
+        // Rebond : chiffré de bout en bout, la Gate ne peut pas filtrer le presse-papiers. Sans le
+        // droit « fichiers », mstsc pourrait copier des fichiers librement : refusé (B4).
+        if !a.access.files {
+            audit::note(db, &a.user.login, "acces.refuse", json!({ "cible": a.target.name, "type": "rdp natif", "raison": "rebond sans le droit fichiers", "adresse": a.addr })).await;
+            bail!(t!("jump mode through a native RDP client needs the « files » right (the Gate cannot block file copy end to end)", "le rebond par un client RDP natif demande le droit « fichiers » (la Gate ne peut pas bloquer la copie de bout en bout)"));
+        }
         return jump(state, a, tcp, &request).await;
     }
 
@@ -441,7 +447,13 @@ async fn resolve(state: &State, account: &str, ip: &str, s: &Settings) -> Option
     };
     let password = state.keys.open(&format!("rdp:{}", user.id), &sealed).ok().and_then(|p| String::from_utf8(p).ok())?;
     // Code à usage unique : exigé sauf si la politique du compte se contente d'un mot de passe.
-    let needs_code = !user.policy(db).await.ok()?.satisfied(&BTreeSet::from([Factor::Password]));
+    let policy = user.policy(db).await.ok()?;
+    let needs_code = !policy.satisfied(&BTreeSet::from([Factor::Password]));
+    // Politique qui exige une clé SSH : mot de passe RDP et code ne suffisent pas (B3).
+    if needs_code && !policy.satisfied(&BTreeSet::from([Factor::Password, Factor::Totp])) {
+        refuse(c.login.clone(), c.target.clone(), "la politique du compte exige une clé").await;
+        return None;
+    }
     let totp_step = match (&c.code, &user.totp_secret) {
         (Some(code), Some(secret)) => {
             let secret = state.keys.open(&format!("totp:{}", user.id), secret).ok()?;

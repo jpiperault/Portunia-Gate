@@ -68,6 +68,20 @@ pub async fn run(state: Arc<State>) -> Result<()> {
     });
     tracing::info!("{} {}", t!("SSH listening on", "SSH en écoute sur"), state.config.ssh_listen);
     let listener = tokio::net::TcpListener::bind(state.config.ssh_listen.as_str()).await?;
+    // Écoute du tunnel Cloudflare (boucle locale seulement) : une erreur ne bloque pas le reste.
+    match tokio::net::TcpListener::bind(state.config.ssh_cloudflare_listen.as_str()).await {
+        Ok(cf) => {
+            tracing::info!("{} {}", t!("SSH for the Cloudflare tunnel on", "SSH du tunnel Cloudflare sur"), state.config.ssh_cloudflare_listen);
+            tokio::spawn(accept_loop(state.clone(), config.clone(), cf, true));
+        }
+        Err(e) => tracing::warn!("{} {}: {e}", t!("SSH for the Cloudflare tunnel unavailable on", "SSH du tunnel Cloudflare indisponible sur"), state.config.ssh_cloudflare_listen),
+    }
+    accept_loop(state, config, listener, false).await
+}
+
+/// Accepte les connexions d'une écoute. `cloudflare` : écoute du tunnel, dont toutes les
+/// connexions viennent de cloudflared ; elles sont comptées ensemble et notées « cloudflare ».
+async fn accept_loop(state: Arc<State>, config: Arc<server::Config>, listener: tokio::net::TcpListener, cloudflare: bool) -> Result<()> {
     loop {
         let (tcp, peer) = match listener.accept().await {
             Ok(accepted) => accepted,
@@ -78,11 +92,12 @@ pub async fn run(state: Arc<State>) -> Result<()> {
             }
         };
         // Plafond des connexions pas encore authentifiées.
-        let Some(slot) = state.limits.connection(peer.ip()) else { continue };
+        let slot = if cloudflare { state.limits.shared("cloudflare") } else { state.limits.connection(peer.ip()) };
+        let Some(slot) = slot else { continue };
         let authenticated = Arc::new(AtomicBool::new(false));
         let conn = Conn {
             state: state.clone(),
-            addr: peer.ip().to_string(),
+            addr: if cloudflare { "cloudflare".to_string() } else { peer.ip().to_string() },
             requested: String::new(),
             user: None,
             factors: BTreeSet::new(),
