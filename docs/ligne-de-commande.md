@@ -245,6 +245,7 @@ Un relais dédié s'installe sur sa propre machine avec `sudo bash installer.sh 
 
 ```bash
 sudo portunia-gate assist set --group Dépanneurs --duration 4   # groupe des dépanneurs, durée maximale (1 à 12 h)
+sudo portunia-gate assist set --brand ACME --logo /root/logo.png   # Portunia Assistance affiche « Assistance ACME » et le logo (0.52 ; PNG, 96 Kio, 512 px au plus ; --logo aucun le retire, --brand "" revient à Portunia)
 sudo portunia-gate assist on                              # la Gate récupère Portunia Assistance sous 30 s
 sudo portunia-gate assist off                             # les sessions en cours s'arrêtent sous 30 s
 sudo portunia-gate assist show                            # état, programme prêt, personnes en attente

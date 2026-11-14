@@ -92,6 +92,28 @@ pub struct Settings {
     pub enabled: bool,
     pub group: String,
     pub hours: i64,
+    /// Nom de l'entreprise montré par Portunia Assistance (« Assistance ACME ») ; vide : Portunia.
+    pub brand: String,
+    /// Logo (PNG, base64) montré à côté du nom ; vide : aucun.
+    pub logo: String,
+}
+
+/// Nom de l'entreprise : une ligne, 40 caractères au plus.
+pub fn check_brand(name: &str) -> anyhow::Result<String> {
+    let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
+    anyhow::ensure!(name.chars().count() <= 40, "{}", t!("Company name: 40 characters at most", "Nom de l'entreprise : 40 caractères au plus"));
+    Ok(name)
+}
+
+/// Logo : une image PNG de 96 Kio au plus et 512 pixels de côté au plus, gardée en base64.
+pub fn check_logo(png: &[u8]) -> anyhow::Result<String> {
+    use base64::Engine;
+    anyhow::ensure!(png.len() <= 96 * 1024, "{}", t!("Logo: 96 KiB at most", "Logo : 96 Kio au plus"));
+    anyhow::ensure!(png.len() > 24 && png.starts_with(b"\x89PNG\r\n\x1a\n") && &png[12..16] == b"IHDR", "{}", t!("Logo: a PNG image", "Logo : une image PNG"));
+    let w = u32::from_be_bytes([png[16], png[17], png[18], png[19]]);
+    let h = u32::from_be_bytes([png[20], png[21], png[22], png[23]]);
+    anyhow::ensure!((1..=512).contains(&w) && (1..=512).contains(&h), "{}", t!("Logo: 512 × 512 pixels at most", "Logo : 512 × 512 pixels au plus"));
+    Ok(base64::engine::general_purpose::STANDARD.encode(png))
 }
 
 pub async fn settings(state: &State) -> Result<Settings> {
@@ -100,6 +122,8 @@ pub async fn settings(state: &State) -> Result<Settings> {
         enabled: get("assistance_actif").await?.and_then(|v| v.as_bool()).unwrap_or(false),
         group: get("assistance_groupe").await?.and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_else(|| "Dépanneurs".into()),
         hours: get("assistance_duree_h").await?.and_then(|v| v.as_i64()).unwrap_or(4).clamp(1, 12),
+        brand: get("assistance_marque").await?.and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default(),
+        logo: get("assistance_logo").await?.and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default(),
     })
 }
 
@@ -156,7 +180,9 @@ pub async fn agent(state: Arc<State>, mut socket: WebSocket, addr: String, resum
         send_json(&mut socket, json!({ "type": "erreur", "message": t!("Relay busy: try again in a few minutes", "Relais occupé : réessayez dans quelques minutes") })).await;
         return;
     };
-    if !send_json(&mut socket, json!({ "type": "place", "place": place, "attente_s": WAIT.as_secs() })).await {
+    // Marque de l'entreprise (0.52) : le programme la montre à la place de Portunia.
+    let brand = settings(&state).await.ok().filter(|s| !s.brand.is_empty() || !s.logo.is_empty()).map(|s| json!({ "nom": s.brand, "logo": s.logo }));
+    if !send_json(&mut socket, json!({ "type": "place", "place": place, "attente_s": WAIT.as_secs(), "marque": brand })).await {
         state.assist.waiting.lock().unwrap().remove(&place);
         return;
     }
@@ -423,4 +449,27 @@ pub async fn fetch_agent(state: Arc<State>) -> Result<()> {
     std::fs::rename(&tmp, &dest)?;
     audit::note(&state.db, "systeme", "assistance.programme", json!({ "sha256": actual, "octets": exe.len() })).await;
     Ok(())
+}
+
+#[cfg(test)]
+mod brand_tests {
+    use super::*;
+
+    fn png(w: u32, h: u32) -> Vec<u8> {
+        let mut p = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
+        p.extend_from_slice(&w.to_be_bytes());
+        p.extend_from_slice(&h.to_be_bytes());
+        p.extend_from_slice(&[8, 6, 0, 0, 0]);
+        p
+    }
+
+    #[test]
+    fn logo_et_nom_verifies() {
+        assert!(check_logo(&png(64, 64)).is_ok());
+        assert!(check_logo(&png(513, 10)).is_err(), "trop large");
+        assert!(check_logo(b"GIF89a................").is_err(), "pas un PNG");
+        assert!(check_logo(&vec![0u8; 100 * 1024]).is_err(), "trop lourd");
+        assert_eq!(check_brand("  ACME   Services ").unwrap(), "ACME Services");
+        assert!(check_brand(&"x".repeat(41)).is_err());
+    }
 }

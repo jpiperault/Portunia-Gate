@@ -2416,6 +2416,8 @@ async fn admin_assist(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
         "adresse": if portal.url.is_empty() { String::new() } else { format!("{}/assistance", portal.url.trim_end_matches('/')) },
         "programme": crate::assist::agent_file(state).exists(),
         "en_attente": state.assist.waiting_count(),
+        "marque": s.brand,
+        "logo": s.logo,
         "total": count,
         "aujourd_hui": today,
     })))
@@ -2426,6 +2428,10 @@ struct AssistBody {
     actif: Option<bool>,
     groupe: Option<String>,
     duree_h: Option<i64>,
+    /// Nom de l'entreprise (vide : Portunia).
+    marque: Option<String>,
+    /// Logo PNG en base64 (vide : aucun).
+    logo: Option<String>,
 }
 
 async fn admin_assist_update(AxState(api): Ctx, headers: HeaderMap, Json(body): Json<AssistBody>) -> ApiResult {
@@ -2443,6 +2449,22 @@ async fn admin_assist_update(AxState(api): Ctx, headers: HeaderMap, Json(body): 
         }
         model::set_setting(db, "assistance_duree_h", json!(h)).await?;
         changed.insert("duree_h".into(), json!(h));
+    }
+    if let Some(name) = body.marque {
+        let name = crate::assist::check_brand(&name).map_err(|e| err(StatusCode::BAD_REQUEST, e.to_string()))?;
+        model::set_setting(db, "assistance_marque", json!(name)).await?;
+        changed.insert("marque".into(), json!(name));
+    }
+    if let Some(logo) = body.logo {
+        use base64::Engine;
+        let stored = if logo.trim().is_empty() {
+            String::new()
+        } else {
+            let png = base64::engine::general_purpose::STANDARD.decode(logo.trim()).map_err(|_| err(StatusCode::BAD_REQUEST, t!("Logo: invalid base64", "Logo : base64 invalide")))?;
+            crate::assist::check_logo(&png).map_err(|e| err(StatusCode::BAD_REQUEST, e.to_string()))?
+        };
+        changed.insert("logo".into(), json!(if stored.is_empty() { "retiré" } else { "changé" }));
+        model::set_setting(db, "assistance_logo", json!(stored)).await?;
     }
     if let Some(on) = body.actif {
         model::set_setting(db, "assistance_actif", json!(on)).await?;

@@ -726,6 +726,12 @@ enum AssistCmd {
         /// Maximum duration of an assistance, in hours (1 to 12).
         #[arg(long)]
         duration: Option<i64>,
+        /// Company name shown by Portunia Assistance instead of Portunia (40 characters at most; empty: Portunia).
+        #[arg(long)]
+        brand: Option<String>,
+        /// Company logo: PNG file, 96 KiB and 512 × 512 pixels at most; « none » removes it.
+        #[arg(long)]
+        logo: Option<String>,
     },
 }
 
@@ -3071,6 +3077,12 @@ async fn assist_cmd(state: &State, cmd: AssistCmd) -> Result<()> {
             println!("{} {}", t!("Assistance:", "Assistance :"), if s.enabled { t!("open", "ouverte") } else { t!("closed", "fermée") });
             println!("{} {}", t!("Technicians' group:", "Groupe des dépanneurs :"), s.group);
             println!("{} {} h", t!("Maximum duration:", "Durée maximale :"), s.hours);
+            println!(
+                "{} {}{}",
+                t!("Company name shown:", "Nom de l'entreprise montré :"),
+                if s.brand.is_empty() { "Portunia" } else { &s.brand },
+                if s.logo.is_empty() { String::new() } else { t!(" (with its logo)", " (avec son logo)").to_string() }
+            );
             println!("{} {}", t!("Portunia Assistance program:", "Programme Portunia Assistance :"), if assist::agent_file(state).exists() { t!("ready", "prêt") } else { t!("not downloaded yet", "pas encore téléchargé") });
             if let Some(live) = service_snapshot(state).await? {
                 println!("{} {}", t!("People waiting for a technician:", "Personnes en attente d'un dépanneur :"), live["assistance_en_attente"]);
@@ -3095,8 +3107,15 @@ async fn assist_cmd(state: &State, cmd: AssistCmd) -> Result<()> {
                 println!("✓ {}", t!("Assistance closed: sessions under way stop within 30 seconds.", "Assistance fermée : les sessions en cours s'arrêtent sous 30 secondes."));
             }
         }
-        AssistCmd::Set { group, duration } => {
+        AssistCmd::Set { group, duration, brand, logo } => {
             let mut changed = serde_json::Map::new();
+            if let Some(b) = brand {
+                changed.insert("marque".into(), json!(assist::check_brand(&b)?));
+            }
+            if let Some(path) = logo {
+                let stored = if path == "none" || path == "aucun" { String::new() } else { assist::check_logo(&std::fs::read(&path)?)? };
+                changed.insert("logo".into(), json!(stored));
+            }
             if let Some(h) = duration {
                 if !(1..=12).contains(&h) {
                     bail!(t!("Session duration: 1 to 12 hours", "Durée d'une assistance : 1 à 12 heures"));
@@ -3106,9 +3125,13 @@ async fn assist_cmd(state: &State, cmd: AssistCmd) -> Result<()> {
             if let Some(g) = group {
                 changed.insert("groupe".into(), json!(g.trim()));
             }
-            anyhow::ensure!(!changed.is_empty(), t!("Nothing to change: --group or --duration", "Rien à changer : --group ou --duration"));
+            anyhow::ensure!(!changed.is_empty(), t!("Nothing to change: --group, --duration, --brand or --logo", "Rien à changer : --group, --duration, --brand ou --logo"));
             for (key, value) in &changed {
                 model::set_setting(db, &format!("assistance_{key}"), value.clone()).await?;
+            }
+            // Au journal, le logo n'est pas recopié.
+            if let Some(l) = changed.get_mut("logo") {
+                *l = json!(if l.as_str().is_some_and(|s| s.is_empty()) { "retiré" } else { "changé" });
             }
             audit::log(db, "console", "assistance.reglage", serde_json::Value::Object(changed)).await?;
             println!("✓ {}", t!("Assistance settings saved.", "Réglages de l'assistance enregistrés."));

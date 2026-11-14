@@ -245,6 +245,7 @@ A dedicated relay is installed on its own machine with `sudo bash installer.sh r
 
 ```bash
 sudo portunia-gate assist set --group Technicians --duration 4   # technicians' group, maximum duration (1 to 12 h)
+sudo portunia-gate assist set --brand ACME --logo /root/logo.png   # Portunia Assistance shows "ACME support" and the logo (0.52; PNG, 96 KiB, 512 px at most; --logo none removes it, --brand "" goes back to Portunia)
 sudo portunia-gate assist on                              # the Gate fetches Portunia Assistance within 30 s
 sudo portunia-gate assist off                             # sessions under way stop within 30 s
 sudo portunia-gate assist show                            # state, program ready, people waiting
