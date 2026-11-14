@@ -124,6 +124,20 @@ sudo portunia-gate sessions --server internet                   # une session «
 - Journal : `navigation.ouverte`, `navigation.refusee` (premier refus d'un site dans la session, avec la raison), `navigation.fermee` (durée, octets, les 100 sites les plus chargés avec leurs connexions et octets). La liste des sessions montre les 20 premiers sites. Couper la session (Audit › En direct, `sessions cut`), retirer la règle ou désactiver le compte ferme le navigateur.
 - 256 connexions ouvertes en même temps au plus par ouverture.
 
+#### Depuis le portail web (0.53)
+
+Une sortie web peut aussi s'ouvrir dans un onglet du portail web, depuis n'importe quel ordinateur, sans Portunia. Un Chromium sans écran tourne alors sur la Gate, et l'onglet reçoit l'image de la page (souris, clavier, barre d'adresse, copier-coller de texte). Désactivé par défaut, serveur par serveur ; paquet Debian seulement (pas Docker).
+
+```bash
+sudo bash installer.sh navigateur                   # installe Chromium et démarre portunia-gate-navigateur
+sudo portunia-gate target edit internet --portal true   # cette sortie s'ouvre aussi dans le portail
+sudo bash installer.sh navigateur arret             # arrête le navigateur du portail
+```
+
+- Chromium tourne dans son propre service (`portunia-gate-navigateur`), sous le compte `_portunia_gate_nav`, **sans aucun réseau à lui** (`PrivateNetwork`) : sa seule sortie est un socket local vers la Gate (`/run/portunia-gate/sortie.sock`), qui applique le même filtre que ci-dessus (domaines, ports, réseaux internes refusés, sites au journal). Les données et la configuration de la Gate lui sont invisibles. Chromium garde son propre bac à sable.
+- Un Chromium par ouverture, dans un profil neuf effacé à la fin. Téléchargements et envois de fichiers sont refusés. Rien n'est enregistré : le journal garde les sites, comme pour Portunia.
+- 5 navigateurs ouverts en même temps au plus (`PORTUNIA_GATE_NAVIGATEURS_MAX` dans `/etc/portunia-gate/portunia-gate.env`). L'inactivité et la fin de la session web ferment le navigateur, comme un terminal du portail.
+
 ## Règles d'accès
 
 ```bash

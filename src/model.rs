@@ -295,6 +295,8 @@ pub struct Target {
     pub sortie_domaines: String,
     pub sortie_bloques: String,
     pub sortie_ports: String,
+    /// Sortie web : aussi dans le portail web (navigateur sur la Gate, voir navigateur.rs).
+    pub sortie_portail: bool,
 }
 
 /// Protocole et mode compatibles. Bureau à distance : rebond (la Gate relaie la connexion
@@ -372,7 +374,7 @@ impl Target {
 }
 
 const TARGET_COLUMNS: &str =
-    "id, name, folder, host, port, mode, account, secret_kind, secret, host_key, protocole, web_connexion, description, sortie_domaines, sortie_bloques, sortie_ports";
+    "id, name, folder, host, port, mode, account, secret_kind, secret, host_key, protocole, web_connexion, description, sortie_domaines, sortie_bloques, sortie_ports, sortie_portail";
 
 pub async fn target_by_id(db: &PgPool, id: Uuid) -> Result<Option<Target>> {
     Ok(sqlx::query_as(&format!("SELECT {TARGET_COLUMNS} FROM targets WHERE id = $1"))
@@ -426,6 +428,7 @@ pub struct NewTarget {
     pub sortie_domaines: String,
     pub sortie_bloques: String,
     pub sortie_ports: String,
+    pub sortie_portail: bool,
 }
 
 /// Description d'un serveur : une ligne, 200 caractères au plus.
@@ -449,8 +452,8 @@ pub async fn create_target(db: &PgPool, t: NewTarget, seal: impl FnOnce(Uuid) ->
     let secret = seal(id)?;
     sqlx::query(
         "INSERT INTO targets (id, name, folder, host, port, mode, account, secret_kind, secret, protocole, web_connexion, description,
-                              sortie_domaines, sortie_bloques, sortie_ports)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
+                              sortie_domaines, sortie_bloques, sortie_ports, sortie_portail)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)",
     )
     .bind(id)
     .bind(&t.name)
@@ -467,6 +470,7 @@ pub async fn create_target(db: &PgPool, t: NewTarget, seal: impl FnOnce(Uuid) ->
     .bind(&t.sortie_domaines)
     .bind(&t.sortie_bloques)
     .bind(&t.sortie_ports)
+    .bind(t.sortie_portail && t.protocole == "sortie")
     .execute(db)
     .await
     .map_err(|e| if is_unique(&e) { anyhow!(t!(format!("Target « {} » already exists", t.name), format!("La cible « {} » existe déjà", t.name))) } else { e.into() })?;

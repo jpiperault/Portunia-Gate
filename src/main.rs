@@ -20,6 +20,7 @@ mod keys;
 mod limits;
 mod live;
 mod model;
+mod navigateur;
 mod portal;
 mod relay;
 mod rdp;
@@ -173,6 +174,9 @@ enum Command {
     /// Dedicated relay: this machine publishes the web portal of a Gate.
     #[command(subcommand)]
     Edge(EdgeCmd),
+    /// Browser service for the web portal (service portunia-gate-navigateur, account _portunia_gate_nav): one headless Chromium per browsing session.
+    #[command(name = "navigateur", alias = "browser")]
+    Navigateur,
     /// Gate status: health, hardware, services, storage, activity, update.
     Status {
         /// Full report in JSON.
@@ -516,6 +520,9 @@ enum TargetCmd {
         /// Egress: allowed ports, comma separated, or * for all.
         #[arg(long, default_value = "80,443")]
         ports: String,
+        /// Egress: also from the web portal (browser run by the Gate, service portunia-gate-navigateur).
+        #[arg(long)]
+        portal: bool,
     },
     /// Lists servers.
     List,
@@ -559,6 +566,9 @@ enum TargetCmd {
         /// Egress: allowed ports, comma separated, or * for all.
         #[arg(long)]
         ports: Option<String>,
+        /// Egress: also from the web portal (true or false).
+        #[arg(long)]
+        portal: Option<bool>,
     },
     /// Replaces the vault secret: --password, --key-file, or --generate (SSH: the Gate creates a key and installs it).
     Secret {
@@ -988,7 +998,7 @@ fn parse_days(text: &str) -> Result<i16> {
 async fn main() {
     lang::set_process(lang::from_env());
     let cli = Cli::parse();
-    let service = matches!(cli.command, Command::Serve | Command::Edge(EdgeCmd::Serve));
+    let service = matches!(cli.command, Command::Serve | Command::Edge(EdgeCmd::Serve) | Command::Navigateur);
     // Commandes d'administration : sortie lue par « head » ou un pipe fermé, s'arrêter sans erreur,
     // comme les outils Unix. Jamais pour le service : une connexion à la base fermée par PostgreSQL
     // (socket Unix) le tuerait d'un SIGPIPE, que systemd prend pour un arrêt normal.
@@ -1031,6 +1041,10 @@ async fn run(cli: Cli) -> Result<()> {
             EdgeCmd::Serve => relay::serve_edge().await,
         };
     }
+    // Service du navigateur : ni base ni clés, seulement Chromium et les sockets locaux.
+    if let Command::Navigateur = &cli.command {
+        return navigateur::serve_worker().await;
+    }
     let config = Config::from_env()?;
     // Service de mise à jour (root) : sans connexion à la base de la Gate.
     if let Command::Update(UpdateCmd::Run) = &cli.command {
@@ -1058,7 +1072,7 @@ async fn run(cli: Cli) -> Result<()> {
     let state = Arc::new(State { db, keys, config, web: portal::Live::default(), assist: assist::Rooms::default(), limits: Default::default(), live: Default::default(), exposure: Default::default(), relays: Default::default() });
 
     match cli.command {
-        Command::Init { .. } | Command::Edge(_) => unreachable!(),
+        Command::Init { .. } | Command::Edge(_) | Command::Navigateur => unreachable!(),
         Command::Info => {
             let nom = model::setting(&state.db, "nom")
                 .await?
@@ -1103,6 +1117,12 @@ async fn run(cli: Cli) -> Result<()> {
                         }
                     }
                     tokio::time::sleep(assist::AGENT_CHECK).await;
+                }
+            });
+            // Navigation du portail : socket de la sortie web pour le service du navigateur.
+            tokio::spawn(async {
+                if let Err(e) = navigateur::serve_egress().await {
+                    tracing::warn!("{} {e:#}", t!("portal browsing:", "navigation du portail :"));
                 }
             });
             tokio::try_join!(sshd::run(state.clone()), api::run(state.clone()), portal::run(state.clone()), relay::run(state.clone()), tunnel::run(state.clone()), acme::run(state.clone()), health::run(state.clone()), live::run(state.clone()), rdpnative::run(state.clone()), websession::run(state.clone()), approval::run(state.clone()), status::run(state.clone()), update::run(state.clone()))?;
@@ -2245,6 +2265,7 @@ async fn target_cmd(state: &State, cmd: TargetCmd) -> Result<()> {
             domains,
             block_domains,
             ports,
+            portal,
         } => {
             let protocol = model::protocol_alias(&protocol).to_string();
             let egress = protocol == "sortie";
@@ -2282,8 +2303,9 @@ async fn target_cmd(state: &State, cmd: TargetCmd) -> Result<()> {
                 sortie_domaines: egress::domains(&domains)?,
                 sortie_bloques: egress::domains(&block_domains)?,
                 sortie_ports: egress::ports(&ports)?,
+                sortie_portail: egress && portal,
             };
-            let filter = json!({ "domaines": new.sortie_domaines, "bloques": new.sortie_bloques, "ports": new.sortie_ports });
+            let filter = json!({ "domaines": new.sortie_domaines, "bloques": new.sortie_bloques, "ports": new.sortie_ports, "portail": new.sortie_portail });
             model::create_target(db, new, |id| match &secret {
                 Some((_, plain)) => Ok(Some(state.keys.seal(&format!("cible:{id}"), plain)?)),
                 None => Ok(None),
@@ -2310,7 +2332,7 @@ async fn target_cmd(state: &State, cmd: TargetCmd) -> Result<()> {
                 if t.is_egress() {
                     let all = t!("all of Internet", "tout Internet");
                     println!(
-                        "{:<16} {:<12} {:<6} {}: {} | {}: {} | ports {}",
+                        "{:<16} {:<12} {:<6} {}: {} | {}: {} | ports {}{}",
                         t.name,
                         t.folder,
                         "egress",
@@ -2318,7 +2340,8 @@ async fn target_cmd(state: &State, cmd: TargetCmd) -> Result<()> {
                         if t.sortie_domaines.is_empty() { all } else { &t.sortie_domaines },
                         t!("blocked", "bloqués"),
                         if t.sortie_bloques.is_empty() { "-" } else { &t.sortie_bloques },
-                        t.sortie_ports
+                        t.sortie_ports,
+                        if t.sortie_portail { t!(" | web portal", " | portail web") } else { "" }
                     );
                     continue;
                 }
@@ -2349,11 +2372,15 @@ async fn target_cmd(state: &State, cmd: TargetCmd) -> Result<()> {
             domains,
             block_domains,
             ports,
+            portal,
         } => {
             let current = find_target(db, &name).await?;
             let mut t = current.clone();
-            if !t.is_egress() && (domains.is_some() || block_domains.is_some() || ports.is_some()) {
-                bail!(t!("--domains, --block-domains and --ports only apply to a web egress", "--domains, --block-domains et --ports ne valent que pour une sortie web"));
+            if !t.is_egress() && (domains.is_some() || block_domains.is_some() || ports.is_some() || portal.is_some()) {
+                bail!(t!("--domains, --block-domains, --ports and --portal only apply to a web egress", "--domains, --block-domains, --ports et --portal ne valent que pour une sortie web"));
+            }
+            if let Some(p) = portal {
+                t.sortie_portail = p;
             }
             if let Some(d) = domains {
                 t.sortie_domaines = egress::domains(&d)?;
@@ -2425,7 +2452,7 @@ async fn target_cmd(state: &State, cmd: TargetCmd) -> Result<()> {
                 "cible.modifiee",
                 json!({
                     "cible": t.name, "avant": current.name, "mode": t.mode, "adresse": format!("{}:{}", t.host, t.port), "adresse_avant": format!("{}:{}", current.host, current.port),
-                    "sortie": t.is_egress().then(|| json!({ "domaines": t.sortie_domaines, "bloques": t.sortie_bloques, "ports": t.sortie_ports })),
+                    "sortie": t.is_egress().then(|| json!({ "domaines": t.sortie_domaines, "bloques": t.sortie_bloques, "ports": t.sortie_ports, "portail": t.sortie_portail })),
                 }),
             )
             .await?;
@@ -2512,7 +2539,8 @@ async fn find_target(db: &PgPool, name: &str) -> Result<model::Target> {
 async fn save_target(db: &PgPool, t: &model::Target) -> Result<()> {
     sqlx::query(
         "UPDATE targets SET name = $2, folder = $3, host = $4, port = $5, mode = $6, account = $7, secret_kind = $8, secret = $9, host_key = $10,
-                web_connexion = $11, description = $12, sortie_domaines = $13, sortie_bloques = $14, sortie_ports = $15
+                web_connexion = $11, description = $12, sortie_domaines = $13, sortie_bloques = $14, sortie_ports = $15,
+                sortie_portail = $16
          WHERE id = $1",
     )
     .bind(t.id)
@@ -2530,6 +2558,7 @@ async fn save_target(db: &PgPool, t: &model::Target) -> Result<()> {
     .bind(&t.sortie_domaines)
     .bind(&t.sortie_bloques)
     .bind(&t.sortie_ports)
+    .bind(t.sortie_portail && t.is_egress())
     .execute(db)
     .await
     .map_err(|e| match &e {

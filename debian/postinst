@@ -11,6 +11,11 @@ if [ "$1" = configure ]; then
     useradd --system --gid _portunia_gate --home-dir /var/lib/portunia-gate --no-create-home \
       --shell /usr/sbin/nologin --comment "Gate" _portunia_gate
   install -d -o _portunia_gate -g _portunia_gate -m 700 /var/lib/portunia-gate
+  # Navigateur du portail (0.53) : compte à part, sans accès aux données de la Gate.
+  getent group _portunia_gate_nav >/dev/null || groupadd --system _portunia_gate_nav
+  getent passwd _portunia_gate_nav >/dev/null ||
+    useradd --system --gid _portunia_gate_nav --home-dir /nonexistent --no-create-home \
+      --shell /usr/sbin/nologin --comment "Gate (navigateur)" _portunia_gate_nav
   install -d -o root -g _portunia_gate -m 750 /etc/portunia-gate
   # Mise à jour depuis Portunia (0.39) : la Gate dépose sa demande ici, le service root
   # portunia-gate-update l'exécute et écrit son avancement dans /var/lib/portunia-gate-update.
@@ -26,7 +31,7 @@ if [ "$1" = configure ]; then
     systemctl daemon-reload
     systemctl enable --now portunia-gate-update.path >/dev/null 2>&1 || true
     # Mise à jour : redémarre la Gate si elle tournait ; le schéma de la base suit au démarrage.
-    if [ -n "$2" ]; then systemctl try-restart portunia-gate.service portunia-gate-relais.service || true; fi
+    if [ -n "$2" ]; then systemctl try-restart portunia-gate.service portunia-gate-relais.service portunia-gate-navigateur.service || true; fi
   fi
 fi
 

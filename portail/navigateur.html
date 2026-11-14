@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="__L__">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>{{Browser|Navigateur}}</title>
+<link rel="icon" type="image/png" href="/static/favicon.png?v=__V__">
+<link rel="apple-touch-icon" href="/static/icone.png?v=__V__">
+<link rel="stylesheet" href="/static/app.css?v=__V__">
+</head>
+<body class="session-page browser-page">
+<header class="sbar">
+  <b id="nom"></b>
+  <span class="tag sortie">WEB</span>
+  <button class="btn icon" id="retour" type="button" title="{{Back|Précédent}}" aria-label="{{Back|Précédent}}">&#8592;</button>
+  <button class="btn icon" id="avancer" type="button" title="{{Forward|Suivant}}" aria-label="{{Forward|Suivant}}">&#8594;</button>
+  <button class="btn icon" id="recharger" type="button" title="{{Reload|Recharger}}" aria-label="{{Reload|Recharger}}">&#8635;</button>
+  <form id="barre" class="browser-bar" autocomplete="off">
+    <input id="adresse" type="text" spellcheck="false" autocapitalize="off" placeholder="{{Address or search|Adresse ou recherche}}" aria-label="{{Address|Adresse}}">
+  </form>
+  <button class="btn" id="coller" type="button" title="{{Paste the text of your clipboard into the page|Coller dans la page le texte de votre presse-papiers}}">{{Paste|Coller}}</button>
+  <a class="btn" href="/?accueil">{{My servers|Mes serveurs}}</a>
+  <button class="btn" id="fermer" type="button">{{Close|Fermer}}</button>
+</header>
+<main id="scene" class="browser-stage">
+  <canvas id="page" tabindex="-1"></canvas>
+  <textarea id="clavier" class="browser-keys" aria-hidden="true" tabindex="-1"></textarea>
+  <p id="attente" class="browser-wait">{{Starting the browser on the Gate…|Démarrage du navigateur sur la Gate…}}</p>
+</main>
+<div id="bulle" class="browser-toast" role="status" hidden></div>
+<div id="notice" class="notice" hidden>
+  <b id="notice-titre"></b>
+  <span id="notice-texte"></span>
+  <div class="notice-actions" id="notice-actions"></div>
+</div>
+<script src="/static/navigateur.js?v=__V__"></script>
+</body>
+</html>

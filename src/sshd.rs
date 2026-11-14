@@ -222,7 +222,7 @@ impl Ctx {
         if let Some(nav) = slot.as_ref() {
             return Ok(nav.clone());
         }
-        let nav = egress::Navigation::start(self.state.clone(), self.user.id, &self.user.login, target, &self.addr).await?;
+        let nav = egress::Navigation::start(self.state.clone(), self.user.id, &self.user.login, target, &self.addr, None).await?;
         let mut cut = nav.cut();
         tokio::spawn(async move {
             if let Some(why) = cut.wait().await {

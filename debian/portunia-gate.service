@@ -15,6 +15,9 @@ RestartSec=5
 # Un arrêt par signal (SIGPIPE compris) n'est jamais un arrêt voulu : relancer.
 RestartForceExitStatus=SIGPIPE
 UMask=0077
+# Socket de la sortie web pour le navigateur du portail (/run/portunia-gate/sortie.sock).
+RuntimeDirectory=portunia-gate
+RuntimeDirectoryMode=0755
 LimitNOFILE=65536
 LimitCORE=0
 

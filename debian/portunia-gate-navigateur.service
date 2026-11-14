@@ -1,0 +1,52 @@
+# Navigateur du portail web (paquet Debian, Gate 0.53) : un Chromium sans écran par session,
+# piloté par la Gate. Activé par « installer.sh navigateur » (installe Chromium) ; la sortie web
+# doit aussi être permise dans le portail, serveur par serveur (Portunia › Administrer).
+[Unit]
+Description=Portunia Gate, navigateur du portail web (Chromium sans écran)
+Documentation=https://github.com/jpiperault/Portunia-Gate
+After=portunia-gate.service
+
+[Service]
+User=_portunia_gate_nav
+Group=_portunia_gate_nav
+ExecStart=/usr/lib/portunia-gate/portunia-gate navigateur
+EnvironmentFile=-/etc/portunia-gate-navigateur.env
+Restart=on-failure
+RestartSec=5
+# Socket de contrôle : seule la Gate (vérifiée par son compte) peut s'y connecter.
+RuntimeDirectory=portunia-gate-navigateur
+RuntimeDirectoryMode=0755
+UMask=0077
+LimitCORE=0
+TasksMax=4096
+MemoryMax=75%
+
+# Aucun réseau à lui : Chromium ne joint Internet que par la Gate, à travers le socket local de
+# la sortie web (filtre de la cible, réseaux internes refusés, sites au journal).
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+# Rien de la Gate n'est visible : ni ses données, ni sa configuration, ni ses mises à jour.
+InaccessiblePaths=-/var/lib/portunia-gate -/etc/portunia-gate -/var/lib/portunia-gate-update
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+# Profils des navigateurs : dans un /tmp à part, effacés à la fin de chaque session.
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+# Chromium garde son propre bac à sable (espaces de noms) et son compilateur JavaScript :
+# ni RestrictNamespaces ni MemoryDenyWriteExecute ici.
+
+[Install]
+WantedBy=multi-user.target

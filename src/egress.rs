@@ -190,11 +190,15 @@ pub struct Navigation {
 }
 
 impl Navigation {
-    pub async fn start(state: Arc<State>, user: Uuid, login: &str, target: &Target, addr: &str) -> Result<Arc<Navigation>> {
+    /// `portal` : ouverte depuis le portail web (navigateur sur la Gate), avec l'empreinte du
+    /// cookie de la session web ; sa fin ferme la navigation.
+    pub async fn start(state: Arc<State>, user: Uuid, login: &str, target: &Target, addr: &str, portal: Option<String>) -> Result<Arc<Navigation>> {
         let id = Uuid::new_v4();
+        let from = if portal.is_some() { "portail" } else { "portunia" };
         model::session_start(&state.db, id, user, target.id, "navigation", "navigation", addr).await?;
-        audit::note(&state.db, login, "navigation.ouverte", json!({ "session": id, "cible": target.name, "adresse": addr })).await;
-        let (guard, cut) = state.live.watch(Watched { user, login, target: Some(target), web: false, recorded: false, session: Some(id), portal: None });
+        audit::note(&state.db, login, "navigation.ouverte", json!({ "session": id, "cible": target.name, "adresse": addr, "depuis": from })).await;
+        let web = portal.is_some();
+        let (guard, cut) = state.live.watch(Watched { user, login, target: Some(target), web, recorded: false, session: Some(id), portal });
         Ok(Arc::new(Navigation {
             state,
             id,
@@ -348,6 +352,7 @@ mod tests {
             sortie_domaines: domains(allow).unwrap(),
             sortie_bloques: domains(block).unwrap(),
             sortie_ports: super::ports(ports).unwrap(),
+            sortie_portail: false,
         }
     }
 

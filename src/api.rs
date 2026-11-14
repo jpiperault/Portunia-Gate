@@ -463,7 +463,7 @@ async fn servers(AxState(api): Ctx, headers: HeaderMap) -> ApiResult {
                 // Entrée RDP native ouverte pour ce serveur (fichier .rdp pour mstsc, Remmina…).
                 "rdp_natif": native.enabled && t.is_rdp() && native.allows(&t.mode) && (t.mode != "rebond" || access.files),
                 // Sortie web : filtre appliqué par la Gate, affiché par Portunia.
-                "sortie": t.is_egress().then(|| json!({ "domaines": t.sortie_domaines, "bloques": t.sortie_bloques, "ports": t.sortie_ports })),
+                "sortie": t.is_egress().then(|| json!({ "domaines": t.sortie_domaines, "bloques": t.sortie_bloques, "ports": t.sortie_ports, "portail": t.sortie_portail })),
             }));
         }
     }
@@ -634,6 +634,10 @@ struct TargetBody {
     sortie_bloques: Option<String>,
     #[serde(default)]
     sortie_ports: Option<String>,
+    /// Sortie web : aussi dans le portail web (navigateur sur la Gate) ; absent : inchangé
+    /// (modification) ou non (création).
+    #[serde(default)]
+    sortie_portail: Option<bool>,
 }
 
 /// Sortie web : nom anglais accepté, adresse et port sans objet (la Gate va où le filtre permet).
@@ -683,6 +687,7 @@ fn target_json(t: &model::Target) -> Value {
         "sortie_domaines": t.sortie_domaines,
         "sortie_bloques": t.sortie_bloques,
         "sortie_ports": t.sortie_ports,
+        "sortie_portail": t.sortie_portail,
     })
 }
 
@@ -776,6 +781,7 @@ async fn admin_target_create(AxState(api): Ctx, headers: HeaderMap, Json(mut bod
         sortie_domaines,
         sortie_bloques,
         sortie_ports,
+        sortie_portail: body.protocole == "sortie" && body.sortie_portail.unwrap_or(false),
     };
     let secret = match body.secret {
         Some(s) => Some(resolve_secret(&api, &actor.login, &probe, s).await?),
@@ -795,6 +801,7 @@ async fn admin_target_create(AxState(api): Ctx, headers: HeaderMap, Json(mut bod
         sortie_domaines: probe.sortie_domaines.clone(),
         sortie_bloques: probe.sortie_bloques.clone(),
         sortie_ports: probe.sortie_ports.clone(),
+        sortie_portail: probe.sortie_portail,
     };
     let keys = &api.state.keys;
     let id = model::create_target(&api.state.db, new, |id| match &secret {
@@ -806,7 +813,7 @@ async fn admin_target_create(AxState(api): Ctx, headers: HeaderMap, Json(mut bod
         &api.state.db,
         &actor.login,
         "cible.creee",
-        json!({ "cible": probe.name, "adresse": format!("{}:{}", probe.host, probe.port), "mode": probe.mode, "protocole": probe.protocole }),
+        json!({ "cible": probe.name, "adresse": format!("{}:{}", probe.host, probe.port), "mode": probe.mode, "protocole": probe.protocole, "portail": probe.is_egress().then_some(probe.sortie_portail) }),
     )
     .await;
     Ok(Json(json!({ "id": id })))
@@ -821,6 +828,7 @@ async fn admin_target_update(AxState(api): Ctx, headers: HeaderMap, Path(id): Pa
         .await?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, t!("Unknown server", "Serveur inconnu")))?;
     let (sortie_domaines, sortie_bloques, sortie_ports) = egress_filter(&body, (&current.sortie_domaines, &current.sortie_bloques, &current.sortie_ports))?;
+    let portal_browsing = body.protocole == "sortie" && body.sortie_portail.unwrap_or(current.sortie_portail);
     let mut probe = current.clone();
     probe.host = body.hote.trim().into();
     probe.port = body.port;
@@ -852,7 +860,8 @@ async fn admin_target_update(AxState(api): Ctx, headers: HeaderMap, Path(id): Pa
     }
     sqlx::query(
         "UPDATE targets SET name = $2, folder = $3, host = $4, port = $5, mode = $6, account = $7, secret_kind = $8, secret = $9, host_key = $10,
-                protocole = $11, web_connexion = $12, description = $13, sortie_domaines = $14, sortie_bloques = $15, sortie_ports = $16
+                protocole = $11, web_connexion = $12, description = $13, sortie_domaines = $14, sortie_bloques = $15, sortie_ports = $16,
+                sortie_portail = $17
          WHERE id = $1",
     )
     .bind(id)
@@ -874,6 +883,7 @@ async fn admin_target_update(AxState(api): Ctx, headers: HeaderMap, Path(id): Pa
     .bind(&sortie_domaines)
     .bind(&sortie_bloques)
     .bind(&sortie_ports)
+    .bind(portal_browsing)
     .execute(db)
     .await
     .map_err(|e| match &e {
@@ -887,7 +897,7 @@ async fn admin_target_update(AxState(api): Ctx, headers: HeaderMap, Path(id): Pa
         "cible.modifiee",
         json!({
             "cible": body.nom, "avant": current.name, "mode": body.mode, "adresse": format!("{}:{}", probe.host, probe.port), "adresse_avant": format!("{}:{}", current.host, current.port),
-            "sortie": (body.protocole == "sortie").then(|| json!({ "domaines": sortie_domaines, "bloques": sortie_bloques, "ports": sortie_ports })),
+            "sortie": (body.protocole == "sortie").then(|| json!({ "domaines": sortie_domaines, "bloques": sortie_bloques, "ports": sortie_ports, "portail": portal_browsing })),
         }),
     )
     .await;

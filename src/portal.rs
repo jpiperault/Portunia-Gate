@@ -683,6 +683,8 @@ fn build_router(portal: Portal) -> Router {
         .route("/api/appareil/connexion", post(device_login))
         .route("/ws/{nom}", get(terminal))
         .route("/bureau/{nom}", get(page_desktop))
+        .route("/navigateur/{nom}", get(page_browser))
+        .route("/ws-navigateur/{nom}", get(browser))
         .route("/api/rdp/{nom}", post(desktop_ticket))
         // Client RDP ordinaire sans Portunia (mstsc) : instructions et mot de passe RDP.
         .route("/api/rdp-natif", get(native_info))
@@ -823,6 +825,7 @@ const INDEX: &str = include_str!("../portail/index.html");
 const SESSION: &str = include_str!("../portail/session.html");
 const DESKTOP: &str = include_str!("../portail/bureau.html");
 const ASSIST: &str = include_str!("../portail/assistance.html");
+const BROWSER: &str = include_str!("../portail/navigateur.html");
 
 /// Pages et scripts portent la version de la Gate dans les adresses de leurs fichiers
 /// (`?v=__V__`) : après une mise à jour, le navigateur charge les nouveaux, pas ceux en cache.
@@ -975,6 +978,10 @@ async fn page_desktop(Path(_nom): Path<String>) -> Response {
     page(DESKTOP)
 }
 
+async fn page_browser(Path(_nom): Path<String>) -> Response {
+    page(BROWSER)
+}
+
 /// Version gzip d'une ressource, calculée à la première demande puis gardée.
 async fn gzipped(name: &'static str, body: &'static [u8]) -> Option<&'static [u8]> {
     static DONE: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<&'static str, &'static [u8]>>> = std::sync::LazyLock::new(Default::default);
@@ -1019,6 +1026,7 @@ async fn asset(fichier: String, headers: HeaderMap) -> Response {
         "session.js" => ("text/javascript; charset=utf-8", include_bytes!("../portail/session.js")),
         "assistance.js" => ("text/javascript; charset=utf-8", include_bytes!("../portail/assistance.js")),
         "clavier.js" => ("text/javascript; charset=utf-8", include_bytes!("../portail/clavier.js")),
+        "navigateur.js" => ("text/javascript; charset=utf-8", include_bytes!("../portail/navigateur.js")),
         "xterm.js" => ("text/javascript; charset=utf-8", include_bytes!("../portail/xterm.js")),
         "xterm.css" => ("text/css; charset=utf-8", include_bytes!("../portail/xterm.css")),
         "addon-fit.js" => ("text/javascript; charset=utf-8", include_bytes!("../portail/addon-fit.js")),
@@ -1514,10 +1522,16 @@ async fn logout(AxState(portal): Ctx, headers: HeaderMap) -> Response {
 }
 
 /// Peut s'ouvrir dans le navigateur : tout, sauf SSH en mode rebond (de bout en bout, il faut
-/// Portunia). Bureau à distance en rebond : la Gate relaie sans enregistrer.
+/// Portunia). Bureau à distance en rebond : la Gate relaie sans enregistrer. Sortie web :
+/// seulement si l'administrateur l'a permise dans le portail et que le service du navigateur
+/// tourne sur la Gate.
 fn web_ready(t: &model::Target) -> Option<&'static str> {
-    if t.is_egress() {
+    if t.is_egress() && !t.sortie_portail {
         Some(t!("Only available with Portunia (web browsing through the Gate)", "Disponible seulement avec Portunia (navigation par la Gate)"))
+    } else if t.is_egress() && !crate::navigateur::available() {
+        Some(t!("Portal browser not installed on the Gate (portunia-gate-navigateur service)", "Navigateur du portail non installé sur la Gate (service portunia-gate-navigateur)"))
+    } else if t.is_egress() {
+        None
     } else if !t.is_rdp() && t.mode == "rebond" {
         Some(t!("Only available with Portunia (end-to-end relay)", "Disponible seulement avec Portunia (relais de bout en bout)"))
     } else {
@@ -1611,6 +1625,116 @@ async fn terminal(
         }
         state.web.active.fetch_sub(1, Ordering::Relaxed);
     }))
+}
+
+// ---------- Navigateur ----------
+
+#[derive(Deserialize)]
+struct BrowserQuery {
+    l: Option<u32>,
+    h: Option<u32>,
+    url: Option<String>,
+}
+
+/// Sortie web dans un onglet : Chromium tourne sur la Gate (navigateur.rs), l'onglet reçoit
+/// l'image de la page et renvoie souris, clavier et adresse.
+#[allow(clippy::too_many_arguments)]
+async fn browser(
+    AxState(portal): Ctx,
+    axum::Extension(entry): axum::Extension<Entry>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(nom): Path<String>,
+    Query(q): Query<BrowserQuery>,
+    ws: WebSocketUpgrade,
+) -> Response {
+    let ip = client_ip(&portal, peer, &headers);
+    let prepared = async {
+        let state = &portal.state;
+        let s = settings(state).await?;
+        // Une page d'un autre site ne doit pas pouvoir ouvrir de navigateur avec le cookie.
+        if !origin_ok(&headers, s.url_for(entry)) {
+            return Ok(Err(err(StatusCode::FORBIDDEN, t!("Origin refused", "Origine refusée"))));
+        }
+        let Some(w) = web_session(&portal, &headers, &s).await? else {
+            return Ok(Err(err(StatusCode::UNAUTHORIZED, t!("Session expired", "Session expirée"))));
+        };
+        let target = model::target_by_name(&state.db, &nom).await?.filter(|t| t.is_egress() && web_ready(t).is_none());
+        let Some(target) = target else {
+            return Ok(Err(err(StatusCode::NOT_FOUND, t!("Server unavailable in the browser", "Serveur indisponible dans le navigateur"))));
+        };
+        if model::access(&state.db, w.user.id, target.id).await?.is_none() {
+            return Ok(Err(err(StatusCode::FORBIDDEN, t!("Server not allowed at the moment", "Serveur non autorisé en ce moment"))));
+        }
+        Ok::<_, anyhow::Error>(Ok((w, target, s.idle_min)))
+    }
+    .await;
+    let (w, target, idle_min) = match prepared {
+        Ok(Ok(v)) => v,
+        Ok(Err(r)) => return r,
+        Err(e) => return internal(e),
+    };
+    let opening = crate::navigateur::Opening {
+        user: w.user.id,
+        login: w.user.login.clone(),
+        target,
+        addr: ip,
+        portal: w.token_hash.clone(),
+        expires: w.expires,
+        idle: Duration::from_secs(idle_min.max(1) as u64 * 60),
+        idle_warning: IDLE_WARNING,
+        size: crate::navigateur::size(q.l.unwrap_or(1280), q.h.unwrap_or(800)),
+        url: q.url.as_deref().and_then(crate::navigateur::address),
+    };
+    let closing = portal.state.web.close.subscribe();
+    let lang = crate::lang::get();
+    ws.on_upgrade(move |socket| crate::lang::scope(lang, async move {
+        let state = portal.state.clone();
+        state.web.active.fetch_add(1, Ordering::Relaxed);
+        browser_bridge(state.clone(), socket, opening, closing).await;
+        state.web.active.fetch_sub(1, Ordering::Relaxed);
+    }))
+}
+
+/// Relie l'onglet à la session du navigateur : images en binaire, le reste en JSON.
+async fn browser_bridge(state: Arc<State>, socket: WebSocket, opening: crate::navigateur::Opening, closing: watch::Receiver<u64>) {
+    use crate::navigateur::ToTab;
+    use futures_util::{SinkExt, StreamExt};
+    let (mut sink, mut stream) = socket.split();
+    let (tab_tx, tab_rx) = tokio::sync::mpsc::channel::<Value>(64);
+    // Peu d'images d'avance : un onglet lent ralentit Chromium au lieu d'accumuler.
+    let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<ToTab>(4);
+    let writer = tokio::spawn(async move {
+        while let Some(m) = out_rx.recv().await {
+            let msg = match m {
+                ToTab::Json(v) => Message::Text(v.to_string().into()),
+                ToTab::Image(b) => Message::Binary(b.into()),
+            };
+            if sink.send(msg).await.is_err() {
+                break;
+            }
+        }
+        let _ = sink.send(Message::Close(None)).await;
+    });
+    let reader = tokio::spawn(async move {
+        while let Some(Ok(msg)) = stream.next().await {
+            match msg {
+                Message::Text(text) => {
+                    let Ok(v) = serde_json::from_str::<Value>(text.as_str()) else { continue };
+                    if tab_tx.send(v).await.is_err() {
+                        break;
+                    }
+                }
+                Message::Close(_) => break,
+                _ => {}
+            }
+        }
+    });
+    let reason = crate::navigateur::session(state, opening, tab_rx, out_tx.clone(), closing).await;
+    let _ = out_tx.send(ToTab::Json(json!({ "t": "ferme", "raison": reason }))).await;
+    drop(out_tx);
+    reader.abort();
+    let _ = writer.await;
 }
 
 // ---------- Bureau à distance ----------

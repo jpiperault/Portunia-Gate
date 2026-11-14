@@ -306,13 +306,14 @@ async function home(state) {
         const ready = !s.indisponible;
         grid.append(h('button', {
           class: 'srv', type: 'button', disabled: !ready, title: s.indisponible || T(`Open ${s.nom} in a new tab`, `Ouvrir ${s.nom} dans un nouvel onglet`),
-          onclick: () => window.open(`/${s.protocole === 'rdp' ? 'bureau' : WEB.includes(s.protocole) ? 'web' : 'session'}/${encodeURIComponent(s.nom)}`, '_blank', 'noopener'),
+          onclick: () => window.open(`/${s.protocole === 'rdp' ? 'bureau' : s.protocole === 'sortie' ? 'navigateur' : WEB.includes(s.protocole) ? 'web' : 'session'}/${encodeURIComponent(s.nom)}`, '_blank', 'noopener'),
         },
           h('b', {}, s.nom),
           h('span', { class: 'tags' }, h('span', { class: `tag ${s.protocole}` }, s.protocole.toUpperCase()), h('span', { class: `tag${s.mode === 'rebond' ? ' plain' : ''}` }, MODES[s.mode] || s.mode)),
           h('small', {}, !ready ? s.indisponible
             : s.description ? s.description
             : WEB.includes(s.protocole) ? T('Web interface in a tab, through the Gate; pages visited are logged', 'Interface web dans un onglet, par la Gate ; pages visitées journalisées')
+            : s.protocole === 'sortie' ? T('Browse the Internet in a tab, from the Gate; sites visited are logged', 'Naviguer sur Internet dans un onglet, depuis la Gate ; sites visités journalisés')
             : s.protocole === 'rdp' && s.mode === 'coffre' ? T('Remote Desktop in a tab; signed in by the Gate', 'Bureau à distance dans un onglet ; session ouverte par la Gate')
             : s.protocole === 'rdp' && s.mode === 'rebond' ? T('Remote Desktop in a tab, not recorded; Windows credentials asked', 'Bureau à distance dans un onglet, non enregistré ; identifiants Windows demandés')
             : s.protocole === 'rdp' ? T('Remote Desktop in a tab; Windows credentials asked', 'Bureau à distance dans un onglet ; identifiants Windows demandés')

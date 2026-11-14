@@ -196,6 +196,9 @@ def setup(args, state):
         host, _, port = args.web.partition(":")
         gate("target", "add", f"{PREFIX}web", "--host", host, "--port", port or "443", "--protocol", "https", "--mode", "enregistre", "--folder", FOLDER)
         targets.append(f"{PREFIX}web")
+    # Sortie web ouverte aussi dans le portail (Gate 0.53) : Chromium sur la Gate.
+    gate("target", "add", f"{PREFIX}internet", "--protocol", "sortie", "--folder", FOLDER, "--block-domains", "example.org", "--portal")
+    targets.append(f"{PREFIX}internet")
     gate("rule", "delete", f"{PREFIX}regle", check=False)
     if targets:
         gate("rule", "add", f"{PREFIX}regle", "--group", f"{PREFIX}groupe", "--targets", ",".join(targets), "--sftp", "--tunnels", "--files")
@@ -788,6 +791,83 @@ def portal_tests(args, state, api, report, admin, win_password):
                 expect(any(e["evenement"] == "web.ouvert" for e in events), "pas de web.ouvert au journal")
                 return {"detail": f"page « {title} » à travers le portail", "preuve": journal_lines(events)}
             report.check("G-POR-06", "Portail : interface web", web)
+
+    finally:
+        browser.close()
+
+
+def browsing_tests(args, state, api, report, admin):
+    """Sortie web ouverte dans le portail (Gate 0.53) : sans la VM Windows."""
+    base = f"https://127.0.0.1:{args.portal_port}"
+    try:
+        browser = Browser()
+    except Skip as e:
+        def skipped():
+            raise e
+        report.check("G-POR-09", "Portail : navigation par la Gate", skipped)
+        return
+    a = state["comptes"][f"{PREFIX}user"]
+    try:
+        expect(browser.go(base + "/"), "page du portail injoignable")
+        expect(browser.until("document.getElementById('login')", 20), "pas de formulaire de connexion")
+        code = fresh_code(state, f"{PREFIX}user")
+        browser.js(f"""(() => {{ const set = (id, v) => {{ const e = document.getElementById(id); e.value = v; }};
+            set('login', {json.dumps(f'{PREFIX}user')}); set('pass', {json.dumps(a['mot_de_passe'])}); set('code', {json.dumps(code)});
+            document.querySelector('form button[type=submit]').click(); }})()""")
+        expect(browser.until("document.querySelectorAll('.srv').length > 0", 20), "connexion au portail impossible")
+
+        def browsing():
+            since = now_utc()
+            if not os.path.exists("/run/portunia-gate-navigateur/navigateur.sock"):
+                raise Skip("service portunia-gate-navigateur absent (installer.sh navigateur)")
+            expect(browser.go(f"{base}/navigateur/{PREFIX}internet"), "page du navigateur injoignable")
+            # Première image de la page : le Chromium de la Gate a démarré.
+            expect(browser.until("document.getElementById('attente').hidden", 40), f"aucune image : {browser.js('document.body.innerText').strip()[:200]}")
+
+            def go(url, condition, timeout=40):
+                browser.js(f"(() => {{ const a = document.getElementById('adresse'); a.value = {json.dumps(url)}; document.getElementById('barre').requestSubmit(); }})()")
+                return browser.until(condition, timeout)
+            expect(go("https://example.com/", "document.title.includes('Example Domain')"), f"example.com non ouvert (titre « {browser.js('document.title')} »)")
+            time.sleep(2)
+            EVIDENCE["capture"] = browser.shot("G-POR-09")
+            size = browser.js("[document.getElementById('page').width, document.getElementById('page').height].join('×')")
+            # Clavier : recherche tapée dans la page (champ de Wikipédia, actif à l'ouverture), puis « Précédent ».
+            expect(go("https://www.wikipedia.org/", "document.title.startsWith('Wikipedia')"), f"wikipedia.org non ouvert (titre « {browser.js('document.title')} »)")
+            time.sleep(3)
+            browser.js("document.getElementById('clavier').focus()")
+            for ch in "Nantes":
+                for kind in ("keyDown", "keyUp"):
+                    browser.send("Input.dispatchKeyEvent", {"type": kind, "key": ch, "code": "Key" + ch.upper(), "windowsVirtualKeyCode": ord(ch.upper()), "text": ch if kind == "keyDown" else ""})
+            browser.key("Enter", "Enter", 13)
+            expect(browser.until("document.title.includes('Nantes')", 40), f"recherche tapée sans résultat (titre « {browser.js('document.title')} »)")
+            browser.js("document.getElementById('retour').click()")
+            expect(browser.until("document.title.startsWith('Wikipedia')", 30), f"« Précédent » sans effet (titre « {browser.js('document.title')} »)")
+            # Réseau interne et domaine bloqué : refusés par le filtre de la Gate.
+            go("http://192.168.91.40/", "false", 8)
+            go("https://example.org/", "false", 8)
+            browser.js("document.getElementById('fermer').click()")
+            closed_at = now_utc()
+            ended = None
+            for _ in range(30):
+                ended = session_end(api, admin, f"{PREFIX}internet", since)
+                if ended:
+                    break
+                time.sleep(1)
+            expect(ended, "session « navigation » toujours ouverte 30 s après « Fermer »")
+            events = events_since(api, admin, f"{PREFIX}internet", since)
+            refused = [e for e in events if e["evenement"] == "navigation.refusee"]
+            reasons = " ".join(json.dumps(e.get("detail", e), ensure_ascii=False) for e in refused)
+            expect("réseau interne" in reasons, f"192.168.91.40 non refusé : {reasons[:300]}")
+            expect("domaine bloqué" in reasons, f"example.org non refusé : {reasons[:300]}")
+            closed = [e for e in events if e["evenement"] == "navigation.fermee"]
+            expect(closed and "example.com" in json.dumps(closed[0], ensure_ascii=False), "example.com absent du résumé de la session")
+            found = sessions_since(api, admin, f"{PREFIX}internet", since)
+            expect(found and "(web)" in (found[0]["adresse"] or ""), "session sans « (web) » dans l'adresse")
+            browser.go(base + "/?accueil")
+            delay = (ended - closed_at).total_seconds()
+            return {"detail": f"example.com ouvert ({size}), recherche tapée au clavier, « Précédent », interne et domaine bloqué refusés, session fermée {max(0, round(delay))} s après « Fermer »",
+                    "preuve": journal_lines(events)}
+        report.check("G-POR-09", "Portail : navigation par la Gate (Chromium sur la Gate)", browsing)
     finally:
         browser.close()
 
@@ -958,6 +1038,8 @@ def tests(args, state, api, report, win_password, targets):
         ssh_more(args, state, api, report, admin, user, win_password)
     if want("portail") and args.windows and args.portal_port:
         portal_tests(args, state, api, report, admin, win_password)
+    if want("navigation") and args.portal_port:
+        browsing_tests(args, state, api, report, admin)
     if want("audit"):
         audit_more(args, state, api, report, admin)
 

@@ -60,6 +60,7 @@ input.code { letter-spacing: .3em; font-family: var(--mono); }
 .tag.ssh { background: var(--ssh-bg); color: var(--ssh); }
 .tag.rdp { background: var(--rdp-bg); color: var(--rdp); }
 .tag.http, .tag.https { background: var(--rdp-bg); color: var(--rdp); filter: hue-rotate(60deg); }
+.tag.sortie { background: var(--ssh-bg); color: var(--ssh); filter: hue-rotate(200deg); }
 .tag.plain { background: var(--bg); color: var(--muted); }
 .empty { color: var(--muted); }
 
@@ -90,6 +91,17 @@ input.code { letter-spacing: .3em; font-family: var(--mono); }
 .desktop.live, .desktop:fullscreen { padding: 0; place-items: stretch; }
 .term:fullscreen { padding: 8px 4px 4px 10px; background: var(--term); }
 .desktop-login { max-width: 400px; }
+
+/* Navigateur du portail (sortie web) : image de la page servie par la Gate. */
+.browser-bar { flex: 1 1 260px; min-width: 160px; display: flex; }
+.browser-bar input { flex: 1; min-width: 0; padding: 6px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--text); font-size: 13px; }
+.btn.icon { min-width: 34px; padding: 6px 8px; font-size: 15px; line-height: 1; }
+.browser-stage { flex: 1; min-height: 0; position: relative; overflow: hidden; background: #fff; }
+.browser-stage canvas { display: block; width: 100%; height: 100%; outline: none; touch-action: none; }
+.browser-keys { position: absolute; left: -9999px; top: 0; width: 1px; height: 1px; opacity: 0; }
+.browser-wait { position: absolute; inset: 0; display: grid; place-items: center; margin: 0; color: #555; font-size: 14px; background: #fff; }
+.browser-wait[hidden] { display: none; }
+.browser-toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); max-width: min(560px, calc(100% - 32px)); background: var(--card); color: var(--text); border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; box-shadow: 0 10px 30px rgb(0 0 0 / .35); z-index: 6; font-size: 13px; }
 
 /* Assistance à distance : page de téléchargement de Portunia Assist. */
 .assist-card { max-width: 440px; }

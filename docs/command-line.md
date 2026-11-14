@@ -124,6 +124,20 @@ sudo portunia-gate sessions --server internet                   # one « navigat
 - Audit log: `navigation.ouverte`, `navigation.refusee` (first refusal of a site in the session, with the reason), `navigation.fermee` (duration, bytes, the 100 busiest sites with their connections and bytes). The session list shows the first 20 sites. Cutting the session (Audit › Live, `sessions cut`), removing the rule or disabling the account closes the browser.
 - 256 connections open at once per opening at most.
 
+#### From the web portal (0.53)
+
+A web egress can also open in a tab of the web portal, from any computer, without Portunia. A headless Chromium then runs on the Gate, and the tab receives the picture of the page (mouse, keyboard, address bar, copy and paste of text). Off by default, server by server; Debian package only (not Docker).
+
+```bash
+sudo bash installer.sh browser                      # installs Chromium and starts portunia-gate-navigateur
+sudo portunia-gate target edit internet --portal true   # this egress also opens in the portal
+sudo bash installer.sh browser off                  # stops the portal browser
+```
+
+- Chromium runs in its own service (`portunia-gate-navigateur`), under the account `_portunia_gate_nav`, **without any network of its own** (`PrivateNetwork`): its only way out is a local socket to the Gate (`/run/portunia-gate/sortie.sock`), which applies the same filter as above (domains, ports, internal networks refused, sites in the log). The Gate's data and configuration are invisible to it. Chromium keeps its own sandbox.
+- One Chromium per opening, in a fresh profile deleted at the end. Downloads and file sending are refused. Nothing is recorded: the log keeps the sites, as for Portunia.
+- 5 browsers open at once at most (`PORTUNIA_GATE_NAVIGATEURS_MAX` in `/etc/portunia-gate/portunia-gate.env`). The idle time and the end of the web session close the browser, like a terminal of the portal.
+
 ## Access rules
 
 ```bash

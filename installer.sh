@@ -78,8 +78,9 @@ while [ $# -gt 0 ]; do
     harden | durcir) ACTION=harden; ACTION_ARG=${2:-}; [ -z "$ACTION_ARG" ] || shift ;;
     update | mise-a-jour) ACTION=update ;;
     portal | portail) ACTION=portal ;;
+    browser | navigateur) ACTION=browser; ACTION_ARG=${2:-}; [ -z "$ACTION_ARG" ] || shift ;;
     relay | relais) ACTION=relay; ACTION_ARG=${2:-}; RELAY_NAME=${3:-portunia-gate-relais}; [ -z "${2:-}" ] || shift; [ -z "${3:-}" ] || shift ;;
-    *) die "$(t "Usage: $0 [--docker] [--package FILE.deb] [--harden] [info | update | admin LOGIN | portal | harden [plan | status | undo] | relay CODE [NAME]]" "Usage : $0 [--docker] [--paquet FICHIER.deb] [--durcir] [info | mise-a-jour | admin IDENTIFIANT | portail | durcir [simulation | etat | annuler] | relais CODE [NOM]]")" ;;
+    *) die "$(t "Usage: $0 [--docker] [--package FILE.deb] [--harden] [info | update | admin LOGIN | portal | browser [off] | harden [plan | status | undo] | relay CODE [NAME]]" "Usage : $0 [--docker] [--paquet FICHIER.deb] [--durcir] [info | mise-a-jour | admin IDENTIFIANT | portail | navigateur [arret] | durcir [simulation | etat | annuler] | relais CODE [NOM]]")" ;;
   esac
   shift
 done
@@ -586,6 +587,29 @@ setup_relay() {
   echo "    $(t "port 8447 from the Gate only" "port 8447 depuis la Gate seulement")"
   echo "  $(t "No flow is needed from this machine to the internal network." "Aucun flux n'est nécessaire de cette machine vers le réseau interne.")"
   echo "  $(t "The certificate is self-signed. Your own: sudo -u _portunia_gate /usr/lib/portunia-gate/portunia-gate edge certificate CERT KEY, then restart portunia-gate-relais." "Le certificat est auto-signé. Le vôtre : sudo -u _portunia_gate /usr/lib/portunia-gate/portunia-gate edge certificate CERT CLE, puis redémarrez portunia-gate-relais.")"
+}
+
+# Navigateur du portail web (Gate 0.53) : Chromium et le service qui le lance, pour ouvrir une
+# sortie web dans un onglet du portail. « off » / « arret » l'arrête.
+setup_browser() {
+  [ "$MODE" != docker ] || die "$(t "The portal browser needs the Debian package (not Docker)." "Le navigateur du portail demande le paquet Debian (pas Docker).")"
+  if [ "$ACTION_ARG" = off ] || [ "$ACTION_ARG" = arret ]; then
+    systemctl disable --now portunia-gate-navigateur >/dev/null 2>&1 || true
+    ok "$(t "Portal browser stopped: web egress opens from Portunia only." "Navigateur du portail arrêté : la sortie web ne s'ouvre plus que depuis Portunia.")"
+    return
+  fi
+  if ! command -v chromium >/dev/null; then
+    echo "  $(t "Installing Chromium…" "Installation de Chromium…")"
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq chromium >/dev/null || die "$(t "Chromium could not be installed (apt-get install chromium)." "Chromium n'a pas pu être installé (apt-get install chromium).")"
+  fi
+  systemctl daemon-reload
+  systemctl enable --now portunia-gate-navigateur >/dev/null 2>&1 ||
+    { journalctl -u portunia-gate-navigateur -n 20 --no-pager >&2; die "$(t "The browser service does not start." "Le service du navigateur ne démarre pas.")"; }
+  # La Gate ouvre le socket de la sortie web à son démarrage (dossier /run/portunia-gate).
+  [ -S /run/portunia-gate/sortie.sock ] || systemctl try-restart portunia-gate || true
+  ok "$(t "Portal browser started" "Navigateur du portail démarré")"
+  echo "  $(t "Then, for each web egress: Portunia › Administer › Servers › Edit › « Also in the web portal »." "Ensuite, pour chaque sortie web : Portunia › Administrer › Serveurs › Modifier › « Aussi dans le portail web ».")"
+  echo "  $(t "Chromium runs under the account _portunia_gate_nav, without any network of its own: it only reaches the Internet through the Gate's web egress filter." "Chromium tourne sous le compte _portunia_gate_nav, sans aucun réseau à lui : il ne joint Internet que par le filtre de sortie web de la Gate.")"
 }
 
 # Tunnel sortant vers Cloudflare pour le portail web : aucun port entrant à ouvrir.
@@ -1129,6 +1153,7 @@ case $ACTION in
   update) update ;;
   admin) add_admin "$ACTION_ARG" ;;
   portal) setup_portal ;;
+  browser) setup_browser ;;
   harden) harden "$ACTION_ARG" ;;
   '') menu ;;
 esac
