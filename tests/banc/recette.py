@@ -868,6 +868,34 @@ def browsing_tests(args, state, api, report, admin):
             return {"detail": f"example.com ouvert ({size}), recherche tapée au clavier, « Précédent », interne et domaine bloqué refusés, session fermée {max(0, round(delay))} s après « Fermer »",
                     "preuve": journal_lines(events)}
         report.check("G-POR-09", "Portail : navigation par la Gate (Chromium sur la Gate)", browsing)
+
+        def video():
+            """Vidéo et son (Gate 0.54) : images décodées par l'onglet (WebCodecs) et paquets Opus."""
+            expect(browser.go(f"{base}/navigateur/{PREFIX}internet"), "page du navigateur injoignable")
+            expect(browser.until("document.getElementById('attente').hidden", 40), "aucune image")
+            mode = browser.js("window.__navigateur && window.__navigateur.mode")
+            if mode != "video":
+                raise Skip(f"mode « {mode} » : Xvfb, ffmpeg ou WebCodecs absent")
+            url = "https://upload.wikimedia.org/wikipedia/commons/transcoded/c/c0/Big_Buck_Bunny_4K.webm/Big_Buck_Bunny_4K.webm.720p.vp9.webm"
+            browser.js(f"(() => {{ const a = document.getElementById('adresse'); a.value = {json.dumps(url)}; document.getElementById('barre').requestSubmit(); }})()")
+            time.sleep(8)
+            # Geste dans la barre de l'onglet : le son de l'onglet démarre (sans mettre la vidéo en pause).
+            for kind in ("mousePressed", "mouseReleased"):
+                browser.send("Input.dispatchMouseEvent", {"type": kind, "x": 60, "y": 25, "button": "left", "buttons": 1 if kind == "mousePressed" else 0, "clickCount": 1})
+            time.sleep(4)
+            s0 = json.loads(browser.js("JSON.stringify(window.__navigateur)"))
+            time.sleep(10)
+            s1 = json.loads(browser.js("JSON.stringify(window.__navigateur)"))
+            fps = (s1["images"] - s0["images"]) / 10
+            sound = (s1["sons"] - s0["sons"]) / 10
+            EVIDENCE["capture"] = browser.shot("G-POR-10")
+            browser.js("document.getElementById('fermer').click()")
+            time.sleep(2)
+            browser.go(base + "/?accueil")
+            expect(fps >= 20, f"{fps:.1f} images/s décodées par l'onglet")
+            expect(sound >= 40, f"{sound:.1f} paquets de son/s (50 attendus)")
+            return f"vidéo 720p : {fps:.1f} images/s décodées dans l'onglet, son {sound:.1f} paquets/s"
+        report.check("G-POR-10", "Portail : vidéo et son dans le navigateur (H.264 + Opus)", video)
     finally:
         browser.close()
 

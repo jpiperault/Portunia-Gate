@@ -602,6 +602,14 @@ setup_browser() {
     echo "  $(t "Installing Chromium…" "Installation de Chromium…")"
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq chromium >/dev/null || die "$(t "Chromium could not be installed (apt-get install chromium)." "Chromium n'a pas pu être installé (apt-get install chromium).")"
   fi
+  # Vidéo et son (Gate 0.54) : écran virtuel, encodage H.264 et Opus, son du navigateur. Sans eux,
+  # le portail montre des images de la page.
+  if ! command -v Xvfb >/dev/null || ! command -v ffmpeg >/dev/null || ! command -v pulseaudio >/dev/null; then
+    echo "  $(t "Installing Xvfb, ffmpeg and PulseAudio (video and sound)…" "Installation de Xvfb, ffmpeg et PulseAudio (vidéo et son)…")"
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends xvfb ffmpeg pulseaudio >/dev/null ||
+      warn "$(t "Xvfb, ffmpeg or PulseAudio could not be installed: pictures of the page only." "Xvfb, ffmpeg ou PulseAudio n'a pas pu être installé : images de la page seulement.")"
+    systemctl try-restart portunia-gate-navigateur >/dev/null 2>&1 || true
+  fi
   systemctl daemon-reload
   systemctl enable --now portunia-gate-navigateur >/dev/null 2>&1 ||
     { journalctl -u portunia-gate-navigateur -n 20 --no-pager >&2; die "$(t "The browser service does not start." "Le service du navigateur ne démarre pas.")"; }

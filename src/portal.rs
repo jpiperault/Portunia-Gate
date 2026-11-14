@@ -1634,6 +1634,8 @@ struct BrowserQuery {
     l: Option<u32>,
     h: Option<u32>,
     url: Option<String>,
+    /// L'onglet décode H.264 et Opus (WebCodecs) : vidéo et son plutôt qu'images.
+    video: Option<u8>,
 }
 
 /// Sortie web dans un onglet : Chromium tourne sur la Gate (navigateur.rs), l'onglet reçoit
@@ -1685,6 +1687,7 @@ async fn browser(
         idle_warning: IDLE_WARNING,
         size: crate::navigateur::size(q.l.unwrap_or(1280), q.h.unwrap_or(800)),
         url: q.url.as_deref().and_then(crate::navigateur::address),
+        video: q.video == Some(1),
     };
     let closing = portal.state.web.close.subscribe();
     let lang = crate::lang::get();
@@ -1702,8 +1705,9 @@ async fn browser_bridge(state: Arc<State>, socket: WebSocket, opening: crate::na
     use futures_util::{SinkExt, StreamExt};
     let (mut sink, mut stream) = socket.split();
     let (tab_tx, tab_rx) = tokio::sync::mpsc::channel::<Value>(64);
-    // Peu d'images d'avance : un onglet lent ralentit Chromium au lieu d'accumuler.
-    let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<ToTab>(4);
+    // Peu d'avance : un onglet lent ralentit Chromium (images) ou saute des images (vidéo) au lieu
+    // d'accumuler du retard.
+    let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<ToTab>(24);
     let writer = tokio::spawn(async move {
         while let Some(m) = out_rx.recv().await {
             let msg = match m {

@@ -107,7 +107,182 @@ fn encode(text: &str) -> String {
 
 /// Taille de la page : celle de l'onglet, dans des bornes raisonnables.
 pub fn size(width: u32, height: u32) -> (u32, u32) {
-    (width.clamp(320, 3840), height.clamp(240, 2160))
+    (width.clamp(320, 3840) & !1, height.clamp(240, 2160) & !1)
+}
+
+// ---------- Vidéo et son (0.54) ----------
+
+/// Trames du service du navigateur vers la Gate : [genre][clé][longueur u32][données].
+pub const MEDIA_VIDEO: u8 = 1;
+pub const MEDIA_AUDIO: u8 = 2;
+/// Une trame au plus (image clé 4K très chargée comprise).
+const MAX_MEDIA: usize = 8 * 1024 * 1024;
+
+fn media_frame(kind: u8, key: bool, data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(6 + data.len());
+    out.push(kind);
+    out.push(key as u8);
+    out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    out.extend_from_slice(data);
+    out
+}
+
+/// Découpe le flux H.264 (Annex B) de ffmpeg en images entières, séparées par les délimiteurs
+/// d'unité d'accès (« aud=1 ») ; chaque image dit si elle est une image clé (IDR).
+#[derive(Default)]
+struct AnnexB {
+    buf: Vec<u8>,
+    scanned: usize,
+}
+
+impl AnnexB {
+    /// Début du code de départ d'un délimiteur (NAL de type 9) à partir de `from`.
+    fn next_aud(buf: &[u8], from: usize) -> Option<usize> {
+        let mut i = from;
+        while i + 3 < buf.len() {
+            if buf[i] == 0 && buf[i + 1] == 0 && buf[i + 2] == 1 && buf[i + 3] & 0x1f == 9 {
+                return Some(if i > 0 && buf[i - 1] == 0 { i - 1 } else { i });
+            }
+            i += 1;
+        }
+        None
+    }
+
+    fn is_key(au: &[u8]) -> bool {
+        au.windows(4).any(|w| w[0] == 0 && w[1] == 0 && w[2] == 1 && w[3] & 0x1f == 5)
+    }
+
+    fn push(&mut self, data: &[u8]) -> Vec<(Vec<u8>, bool)> {
+        self.buf.extend_from_slice(data);
+        let mut out = Vec::new();
+        // Premier délimiteur : ce qui le précède (début de flux) est jeté.
+        let Some(first) = Self::next_aud(&self.buf, 0) else {
+            self.scanned = self.buf.len().saturating_sub(4);
+            if self.buf.len() > MAX_MEDIA {
+                self.buf.clear();
+            }
+            return out;
+        };
+        if first > 0 {
+            self.buf.drain(..first);
+            self.scanned = 0;
+        }
+        loop {
+            match Self::next_aud(&self.buf, self.scanned.max(4)) {
+                Some(next) => {
+                    let au: Vec<u8> = self.buf.drain(..next).collect();
+                    let key = Self::is_key(&au);
+                    out.push((au, key));
+                    self.scanned = 0;
+                }
+                None => {
+                    self.scanned = self.buf.len().saturating_sub(4);
+                    break;
+                }
+            }
+        }
+        if self.buf.len() > MAX_MEDIA {
+            self.buf.clear();
+            self.scanned = 0;
+        }
+        out
+    }
+}
+
+/// Lit le flux Ogg d'Opus de ffmpeg : paquets audio un par un (en-têtes OpusHead et OpusTags ôtés).
+#[derive(Default)]
+struct OggOpus {
+    buf: Vec<u8>,
+    packet: Vec<u8>,
+    count: u64,
+}
+
+impl OggOpus {
+    fn push(&mut self, data: &[u8]) -> Vec<Vec<u8>> {
+        self.buf.extend_from_slice(data);
+        let mut out = Vec::new();
+        loop {
+            if self.buf.len() < 27 {
+                break;
+            }
+            if &self.buf[..4] != b"OggS" {
+                // Resynchronisation sur la page suivante.
+                match self.buf.windows(4).skip(1).position(|w| w == b"OggS") {
+                    Some(p) => {
+                        self.buf.drain(..p + 1);
+                        self.packet.clear();
+                        continue;
+                    }
+                    None => {
+                        let keep = self.buf.len().saturating_sub(3);
+                        self.buf.drain(..keep);
+                        break;
+                    }
+                }
+            }
+            let segments = self.buf[26] as usize;
+            let header = 27 + segments;
+            if self.buf.len() < header {
+                break;
+            }
+            let body: usize = self.buf[27..header].iter().map(|b| *b as usize).sum();
+            if self.buf.len() < header + body {
+                break;
+            }
+            let mut offset = header;
+            for i in 0..segments {
+                let lace = self.buf[27 + i] as usize;
+                self.packet.extend_from_slice(&self.buf[offset..offset + lace]);
+                offset += lace;
+                if lace < 255 {
+                    self.count += 1;
+                    let packet = std::mem::take(&mut self.packet);
+                    if self.count > 2 && !packet.is_empty() && packet.len() <= MAX_MEDIA {
+                        out.push(packet);
+                    }
+                }
+            }
+            self.buf.drain(..header + body);
+            if self.packet.len() > MAX_MEDIA {
+                self.packet.clear();
+            }
+        }
+        out
+    }
+}
+
+/// Images par seconde et débit de la vidéo (PORTUNIA_GATE_NAVIGATEUR_IMAGES, _DEBIT en kbit/s).
+fn video_settings() -> (u32, u32) {
+    let get = |k: &str, d: u32, lo: u32, hi: u32| std::env::var(k).ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(d).clamp(lo, hi);
+    (get("PORTUNIA_GATE_NAVIGATEUR_IMAGES", 30, 5, 60), get("PORTUNIA_GATE_NAVIGATEUR_DEBIT", 3000, 300, 20000))
+}
+
+/// ffmpeg : écran virtuel (zone de la page) → H.264 sans attente (pas d'images B, une image
+/// clé par seconde, en-têtes répétés : l'onglet peut prendre le flux en route).
+fn ffmpeg_video_args(display: &str, (x, y): (u32, u32), (w, h): (u32, u32), (fps, kbps): (u32, u32)) -> Vec<String> {
+    [
+        "-hide_banner", "-loglevel", "error", "-nostdin",
+        "-f", "x11grab", "-draw_mouse", "0", "-framerate", &fps.to_string(), "-video_size", &format!("{w}x{h}"), "-i", &format!("{display}+{x},{y}"),
+        "-an", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-profile:v", "baseline", "-level", "4.1", "-pix_fmt", "yuv420p",
+        "-g", &fps.to_string(), "-b:v", &format!("{kbps}k"), "-maxrate", &format!("{kbps}k"), "-bufsize", &format!("{}k", kbps / 2),
+        "-x264-params", "aud=1:repeat-headers=1", "-flush_packets", "1", "-f", "h264", "-",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
+/// ffmpeg : son du navigateur (sortie de PulseAudio) → Opus 20 ms, une page Ogg par paquet.
+fn ffmpeg_audio_args() -> Vec<String> {
+    [
+        "-hide_banner", "-loglevel", "error", "-nostdin",
+        "-f", "pulse", "-fragment_size", "3840", "-i", "portunia.monitor",
+        "-vn", "-ac", "2", "-ar", "48000", "-c:a", "libopus", "-b:a", "96k", "-application", "lowdelay", "-frame_duration", "20",
+        "-page_duration", "20000", "-flush_packets", "1", "-f", "ogg", "-",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
 }
 
 /// Touches de modification (Alt 1, Ctrl 2, Méta 4, Maj 8) : seulement celles-là.
@@ -494,26 +669,75 @@ mod unix {
         }
     }
 
-    /// Connexion au service du navigateur : un Chromium neuf, piloté par le flux rendu.
-    pub async fn launch(token: &str, (w, h): (u32, u32)) -> Result<tokio::net::UnixStream> {
+    async fn connect_service() -> Result<tokio::net::UnixStream> {
         let path = control_path();
-        let stream = tokio::time::timeout(Duration::from_secs(5), tokio::net::UnixStream::connect(&path))
+        tokio::time::timeout(Duration::from_secs(5), tokio::net::UnixStream::connect(&path))
             .await
             .map_err(|_| anyhow!(t!("the browser service is not answering", "le service du navigateur ne répond pas")))?
-            .map_err(|e| anyhow!(t!(format!("browser service unavailable ({e})"), format!("service du navigateur indisponible ({e})"))))?;
-        let head = json!({ "jeton": token, "largeur": w, "hauteur": h, "langue": crate::lang::get().code() });
+            .map_err(|e| anyhow!(t!(format!("browser service unavailable ({e})"), format!("service du navigateur indisponible ({e})"))))
+    }
+
+    /// Seconde connexion d'une session en vidéo : images et son en arrivent.
+    pub async fn media(token: &str) -> Result<tokio::net::UnixStream> {
+        let mut stream = connect_service().await?;
+        stream.write_all(format!("{}\n", json!({ "jeton": token, "flux": true })).as_bytes()).await?;
+        Ok(stream)
+    }
+
+    /// Connexion au service du navigateur : un Chromium neuf, piloté par le flux rendu. Rend aussi
+    /// ce que le service a pu ouvrir : vidéo (écran virtuel) et son.
+    pub async fn launch(token: &str, (w, h): (u32, u32), video: bool) -> Result<(tokio::net::UnixStream, bool, bool)> {
+        let stream = connect_service().await?;
+        let head = json!({ "jeton": token, "largeur": w, "hauteur": h, "langue": crate::lang::get().code(), "video": video });
         let mut reader = tokio::io::BufReader::new(stream);
         reader.get_mut().write_all(format!("{head}\n").as_bytes()).await?;
         let answer = tokio::time::timeout(Duration::from_secs(30), read_line(&mut reader, 4096))
             .await
             .map_err(|_| anyhow!(t!("the browser does not start (timed out)", "le navigateur ne démarre pas (délai dépassé)")))??;
-        if answer != "ok" {
+        let words: Vec<&str> = answer.split_whitespace().collect();
+        if words.first() != Some(&"ok") {
             bail!("{}", answer.strip_prefix("non ").unwrap_or(&answer).to_string());
         }
         if !reader.buffer().is_empty() {
             bail!("réponse inattendue du service du navigateur");
         }
-        Ok(reader.into_inner())
+        Ok((reader.into_inner(), words.contains(&"video"), words.contains(&"son")))
+    }
+
+    /// Images et son du service vers l'onglet : [genre][clé][temps en µs, 8 octets][données].
+    /// Onglet en retard : les images sont sautées jusqu'à la prochaine image clé.
+    pub async fn pump_media(read: tokio::net::unix::OwnedReadHalf, to_tab: mpsc::Sender<ToTab>) {
+        let start = std::time::Instant::now();
+        let mut read = tokio::io::BufReader::with_capacity(256 * 1024, read);
+        let mut need_key = true;
+        loop {
+            let mut head = [0u8; 6];
+            if read.read_exact(&mut head).await.is_err() {
+                return;
+            }
+            let len = u32::from_be_bytes([head[2], head[3], head[4], head[5]]) as usize;
+            if len > MAX_MEDIA {
+                return;
+            }
+            let mut msg = Vec::with_capacity(10 + len);
+            msg.extend_from_slice(&head[..2]);
+            msg.extend_from_slice(&(start.elapsed().as_micros() as u64).to_be_bytes());
+            msg.resize(10 + len, 0);
+            if read.read_exact(&mut msg[10..]).await.is_err() {
+                return;
+            }
+            let (video, key) = (head[0] == MEDIA_VIDEO, head[1] == 1);
+            if video && need_key && !key {
+                continue;
+            }
+            match to_tab.try_send(ToTab::Image(msg)) {
+                Ok(()) if video => need_key = false,
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(_)) if video => need_key = true,
+                Err(mpsc::error::TrySendError::Full(_)) => {}
+                Err(mpsc::error::TrySendError::Closed(_)) => return,
+            }
+        }
     }
 }
 
@@ -540,9 +764,12 @@ pub struct Opening {
     pub idle_warning: Duration,
     pub size: (u32, u32),
     pub url: Option<String>,
+    /// L'onglet décode la vidéo H.264 et le son Opus (WebCodecs).
+    pub video: bool,
 }
 
-/// Ce que la session envoie à l'onglet et en reçoit (le WebSocket du portail).
+/// Ce que la session envoie à l'onglet et en reçoit (le WebSocket du portail). `Image` : image
+/// JPEG de la page, ou trame de vidéo ou de son quand la session est en vidéo.
 pub enum ToTab {
     Json(Value),
     Image(Vec<u8>),
@@ -603,10 +830,22 @@ async fn drive(
     }
     #[cfg(unix)]
     {
-        let stream = unix::launch(token, o.size).await?;
+        let (stream, video, sound) = unix::launch(token, o.size, o.video).await?;
         let (read, write) = stream.into_split();
         let (cdp, mut events) = Cdp::start(read, write);
-        Browser::new(cdp, o.size, asked.clone()).run(state, o, nav, target, &mut events, from_tab, to_tab, closing).await
+        let mut browser = Browser::new(cdp, o.size, asked.clone());
+        let mut pump = None;
+        if video {
+            let (media_read, media_write) = unix::media(token).await?.into_split();
+            pump = Some(tokio::spawn(unix::pump_media(media_read, to_tab.clone())));
+            browser.video = Some(media_write);
+            browser.sound = sound;
+        }
+        let r = browser.run(state, o, nav, target, &mut events, from_tab, to_tab, closing).await;
+        if let Some(p) = pump {
+            p.abort();
+        }
+        r
     }
 }
 
@@ -618,11 +857,44 @@ struct Browser {
     page: String,
     session: String,
     asked: Arc<AtomicBool>,
+    /// Session en vidéo : connexion « flux » (la Gate y écrit la zone à capturer).
+    #[cfg(unix)]
+    video: Option<tokio::net::unix::OwnedWriteHalf>,
+    #[cfg(not(unix))]
+    video: Option<()>,
+    sound: bool,
 }
 
 impl Browser {
     fn new(cdp: Arc<Cdp>, size: (u32, u32), asked: Arc<AtomicBool>) -> Self {
-        Browser { cdp, size, page: String::new(), session: String::new(), asked }
+        Browser { cdp, size, page: String::new(), session: String::new(), asked, video: None, sound: false }
+    }
+
+    /// Montre la page à la taille de l'onglet : fenêtre de Chromium et zone capturée (vidéo), ou
+    /// images de la page (sans écran).
+    async fn show(&mut self) -> Result<()> {
+        if self.video.is_none() {
+            return self.screencast().await;
+        }
+        let (w, h) = self.size;
+        let window = self.cdp.call(None, "Browser.getWindowForTarget", json!({ "targetId": self.page })).await?;
+        let id = window["windowId"].clone();
+        self.cdp.call(None, "Browser.setWindowBounds", json!({ "windowId": id, "bounds": { "left": 0, "top": 0, "width": w, "height": h, "windowState": "normal" } })).await?;
+        // Bandeau éventuel de Chromium au-dessus de la page : la fenêtre grandit d'autant et la
+        // capture commence sous lui (les clics restent dans les coordonnées de la page).
+        let top = match self.call("Runtime.evaluate", json!({ "expression": "outerHeight - innerHeight", "returnByValue": true })).await {
+            Ok(r) => r["result"]["value"].as_u64().unwrap_or(0).min(200) as u32,
+            Err(_) => 0,
+        };
+        if top > 0 {
+            self.cdp.call(None, "Browser.setWindowBounds", json!({ "windowId": id, "bounds": { "width": w, "height": h + top } })).await?;
+        }
+        #[cfg(unix)]
+        if let Some(media) = self.video.as_mut() {
+            let line = format!("{}\n", json!({ "x": 0, "y": top, "l": w, "h": h }));
+            media.write_all(line.as_bytes()).await?;
+        }
+        Ok(())
     }
 
     async fn call(&self, method: &str, params: Value) -> Result<Value> {
@@ -663,7 +935,7 @@ impl Browser {
         cdp.call(None, "Browser.setDownloadBehavior", json!({ "behavior": "deny" })).await?;
         self.call("Page.enable", json!({})).await?;
         self.call("Page.setInterceptFileChooserDialog", json!({ "enabled": true })).await?;
-        self.screencast().await
+        self.show().await
     }
 
     /// Sans attendre : la réponse ne vient qu'une fois le site joint (ou refusé), parfois tard.
@@ -744,8 +1016,10 @@ impl Browser {
                 let s = size(v["l"].as_u64().unwrap_or(1280) as u32, v["h"].as_u64().unwrap_or(800) as u32);
                 if s != self.size {
                     self.size = s;
-                    let _ = self.call("Page.stopScreencast", json!({})).await;
-                    self.screencast().await?;
+                    if self.video.is_none() {
+                        let _ = self.call("Page.stopScreencast", json!({})).await;
+                    }
+                    self.show().await?;
                 }
             }
             "fermer" => return Ok(false),
@@ -763,7 +1037,14 @@ impl Browser {
             "Page.screencastFrame" if ours => {
                 use base64::{engine::general_purpose::STANDARD, Engine};
                 let image = p["data"].as_str().and_then(|d| STANDARD.decode(d).ok());
-                // L'onglet reçoit l'image avant l'accusé : Chromium attend ainsi un onglet lent.
+                // L'onglet reçoit l'image avant l'accusé : Chromium attend ainsi un onglet lent. Pas
+                // plus de 4 images d'avance dans la file (elle est plus longue pour la vidéo).
+                for _ in 0..200 {
+                    if to_tab.capacity() + 4 >= to_tab.max_capacity() {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
                 if let Some(image) = image {
                     if to_tab.send(ToTab::Image(image)).await.is_err() {
                         return Some("onglet fermé".into());
@@ -833,7 +1114,7 @@ impl Browser {
         closing: &mut tokio::sync::watch::Receiver<u64>,
     ) -> Result<String> {
         self.open().await?;
-        let _ = to_tab.send(ToTab::Json(json!({ "t": "pret", "l": self.size.0, "h": self.size.1 }))).await;
+        let _ = to_tab.send(ToTab::Json(json!({ "t": "pret", "l": self.size.0, "h": self.size.1, "video": self.video.is_some(), "son": self.sound }))).await;
         if let Some(url) = &o.url {
             self.navigate(url).await;
         }
@@ -962,10 +1243,10 @@ fn socks_code(answer: &str) -> u8 {
 }
 
 /// Options de Chromium : profil à part, tout par le proxy, rien en dehors (ni DNS, ni QUIC,
-/// ni WebRTC direct), aucun service de Google, pas de son.
-fn chromium_args(profile: &std::path::Path, proxy_port: u16, (w, h): (u32, u32), lang: &str, no_sandbox: bool) -> Vec<String> {
+/// ni WebRTC direct), aucun service de Google. `video` : fenêtre sans cadre sur l'écran virtuel
+/// (capturée par ffmpeg), sinon sans écran (images de la page) ; `audio` : son vers PulseAudio.
+fn chromium_args(profile: &std::path::Path, proxy_port: u16, (w, h): (u32, u32), lang: &str, no_sandbox: bool, video: bool, audio: bool) -> Vec<String> {
     let mut args: Vec<String> = vec![
-        "--headless=new".into(),
         "--remote-debugging-pipe".into(),
         format!("--user-data-dir={}", profile.display()),
         format!("--proxy-server=socks5://127.0.0.1:{proxy_port}"),
@@ -994,16 +1275,23 @@ fn chromium_args(profile: &std::path::Path, proxy_port: u16, (w, h): (u32, u32),
         "--metrics-recording-only".into(),
         "--password-store=basic".into(),
         "--use-mock-keychain".into(),
-        "--mute-audio".into(),
         "--disable-dev-shm-usage".into(),
         "--disable-gpu".into(),
+        "--autoplay-policy=no-user-gesture-required".into(),
         format!("--window-size={w},{h}"),
         format!("--lang={}", if lang == "fr" { "fr-FR" } else { "en-US" }),
     ];
+    if !audio {
+        args.push("--mute-audio".into());
+    }
     if no_sandbox {
         args.push("--no-sandbox".into());
     }
-    args.push("about:blank".into());
+    if video {
+        args.extend(["--ozone-platform=x11".into(), "--window-position=0,0".into(), "--noerrdialogs".into(), "--app=about:blank".into()]);
+    } else {
+        args.extend(["--headless=new".into(), "about:blank".into()]);
+    }
     args
 }
 
@@ -1025,11 +1313,40 @@ mod worker {
     #[derive(Deserialize)]
     struct Head {
         jeton: String,
+        #[serde(default)]
         largeur: u32,
+        #[serde(default)]
         hauteur: u32,
         #[serde(default)]
         langue: String,
+        /// L'onglet sait décoder la vidéo (WebCodecs) : écran virtuel et flux H.264 + Opus.
+        #[serde(default)]
+        video: bool,
+        /// Seconde connexion de la Gate pour cette session : elle y reçoit vidéo et son.
+        #[serde(default)]
+        flux: bool,
     }
+
+    /// Programmes de la vidéo : sans eux, la session se fait en images de la page.
+    #[derive(Clone)]
+    struct Tools {
+        xvfb: Option<PathBuf>,
+        ffmpeg: Option<PathBuf>,
+        pulse: Option<PathBuf>,
+    }
+
+    fn which(name: &str) -> Option<PathBuf> {
+        ["/usr/bin", "/usr/local/bin", "/bin"].iter().map(|d| std::path::Path::new(d).join(name)).find(|p| p.exists())
+    }
+
+    /// Flux d'une session en vidéo, en attente de la connexion « flux » de la Gate.
+    struct Media {
+        frames: Option<mpsc::Receiver<Vec<u8>>>,
+        /// Zone de l'écran à capturer : position puis taille.
+        region: mpsc::Sender<((u32, u32), (u32, u32))>,
+    }
+
+    static MEDIA: LazyLock<Mutex<HashMap<String, Media>>> = LazyLock::new(Mutex::default);
 
     fn chromium() -> Option<PathBuf> {
         if let Some(p) = std::env::var_os("PORTUNIA_GATE_CHROMIUM") {
@@ -1045,6 +1362,12 @@ mod worker {
 
     pub async fn serve() -> Result<()> {
         let browser = chromium().ok_or_else(|| anyhow!(t!("Chromium not found: apt install chromium", "Chromium introuvable : apt install chromium")))?;
+        let tools = Tools { xvfb: which("Xvfb"), ffmpeg: which("ffmpeg"), pulse: which("pulseaudio") };
+        match (&tools.xvfb, &tools.ffmpeg, &tools.pulse) {
+            (Some(_), Some(_), Some(_)) => tracing::info!("{}", t!("video and sound: Xvfb, ffmpeg and PulseAudio found", "vidéo et son : Xvfb, ffmpeg et PulseAudio trouvés")),
+            (Some(_), Some(_), None) => tracing::info!("{}", t!("video without sound (PulseAudio missing)", "vidéo sans le son (PulseAudio absent)")),
+            _ => tracing::info!("{}", t!("pictures of the page only (Xvfb or ffmpeg missing: installer.sh browser installs them)", "images de la page seulement (Xvfb ou ffmpeg absent : installer.sh navigateur les installe)")),
+        }
         let path = control_path();
         let _ = std::fs::remove_file(&path);
         let listener = UnixListener::bind(&path)?;
@@ -1060,15 +1383,23 @@ mod worker {
                 tracing::warn!("{}", t!("connection refused: not the Gate", "connexion refusée : ce n'est pas la Gate"));
                 continue;
             }
-            if SESSIONS_OPEN.fetch_add(1, Ordering::SeqCst) >= MAX_SESSIONS {
-                SESSIONS_OPEN.fetch_sub(1, Ordering::SeqCst);
-                let mut s = stream;
-                let _ = s.write_all(b"non trop de navigateurs\n").await;
-                continue;
-            }
-            let browser = browser.clone();
+            let (browser, tools) = (browser.clone(), tools.clone());
             tokio::spawn(async move {
-                if let Err(e) = one(stream, &browser, no_sandbox).await {
+                let mut reader = tokio::io::BufReader::new(stream);
+                let head: Head = match read_line(&mut reader, 4096).await.and_then(|l| Ok(serde_json::from_str(&l)?)) {
+                    Ok(h) => h,
+                    Err(_) => return,
+                };
+                if head.flux {
+                    attach(reader, &head.jeton).await;
+                    return;
+                }
+                if SESSIONS_OPEN.fetch_add(1, Ordering::SeqCst) >= MAX_SESSIONS {
+                    SESSIONS_OPEN.fetch_sub(1, Ordering::SeqCst);
+                    let _ = reader.get_mut().write_all(b"non trop de navigateurs\n").await;
+                    return;
+                }
+                if let Err(e) = one(reader, head, &browser, &tools, no_sandbox).await {
                     tracing::warn!("{} {e:#}", t!("browser:", "navigateur :"));
                 }
                 SESSIONS_OPEN.fetch_sub(1, Ordering::SeqCst);
@@ -1086,22 +1417,218 @@ mod worker {
         Ok(unsafe { (std::os::fd::OwnedFd::from_raw_fd(fds[0]), std::os::fd::OwnedFd::from_raw_fd(fds[1])) })
     }
 
-    /// Une session : proxy, Chromium, relais du protocole DevTools, puis tout est effacé.
-    async fn one(stream: UnixStream, browser: &std::path::Path, no_sandbox: bool) -> Result<()> {
+    /// Écran virtuel : Xvfb choisit un numéro libre et l'écrit sur le descripteur 3.
+    async fn start_xvfb(xvfb: &std::path::Path, kids: &mut Vec<tokio::process::Child>) -> Result<String> {
         use std::os::fd::AsRawFd;
-        let mut reader = tokio::io::BufReader::new(stream);
-        let head: Head = serde_json::from_str(&read_line(&mut reader, 4096).await?)?;
+        let (read, write) = pipe()?;
+        let fd = write.as_raw_fd();
+        let mut cmd = tokio::process::Command::new(xvfb);
+        cmd.args(["-displayfd", "3", "-screen", "0", "3840x2160x24", "-nolisten", "tcp"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).kill_on_drop(true);
+        unsafe {
+            cmd.pre_exec(move || if libc::dup2(fd, 3) < 0 { Err(std::io::Error::last_os_error()) } else { Ok(()) });
+        }
+        let child = cmd.spawn()?;
+        drop(write);
+        kids.push(child);
+        let mut from = tokio::net::unix::pipe::Receiver::from_owned_fd(read)?;
+        let mut text = Vec::new();
+        let read_it = async {
+            let mut b = [0u8; 16];
+            loop {
+                let n = from.read(&mut b).await?;
+                if n == 0 {
+                    break;
+                }
+                text.extend_from_slice(&b[..n]);
+                if text.contains(&b'\n') {
+                    break;
+                }
+            }
+            Ok::<_, std::io::Error>(())
+        };
+        tokio::time::timeout(Duration::from_secs(10), read_it).await.map_err(|_| anyhow!("Xvfb ne démarre pas"))??;
+        let n: u32 = String::from_utf8_lossy(&text).trim().parse().map_err(|_| anyhow!("Xvfb : numéro d'écran illisible"))?;
+        Ok(format!(":{n}"))
+    }
+
+    /// Son : un PulseAudio par session, une seule sortie (vide) écoutée par ffmpeg.
+    async fn start_pulse(pulse: &std::path::Path, dir: &std::path::Path, kids: &mut Vec<tokio::process::Child>) -> Result<PathBuf> {
+        let sock = dir.join("pulse.sock");
+        let child = tokio::process::Command::new(pulse)
+            .args(["-n", "--daemonize=no", "--use-pid-file=no", "--exit-idle-time=-1", "--log-target=stderr", "--log-level=error"])
+            .arg("-L")
+            .arg("module-null-sink sink_name=portunia rate=48000")
+            .arg("-L")
+            .arg(format!("module-native-protocol-unix socket={} auth-anonymous=1", sock.display()))
+            .env("HOME", dir)
+            .env("XDG_RUNTIME_DIR", dir)
+            .env("XDG_CONFIG_HOME", dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()?;
+        kids.push(child);
+        for _ in 0..50 {
+            if sock.exists() {
+                return Ok(sock);
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        bail!("PulseAudio ne démarre pas")
+    }
+
+    /// Vidéo de la zone de la page, relancée quand la zone change (onglet redimensionné).
+    async fn video_loop(ffmpeg: PathBuf, display: String, mut region: ((u32, u32), (u32, u32)), tx: mpsc::Sender<Vec<u8>>, mut changes: mpsc::Receiver<((u32, u32), (u32, u32))>) {
+        let settings = video_settings();
+        loop {
+            let child = tokio::process::Command::new(&ffmpeg)
+                .args(ffmpeg_video_args(&display, region.0, region.1, settings))
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .kill_on_drop(true)
+                .spawn();
+            let Ok(mut child) = child else { return };
+            let Some(mut out) = child.stdout.take() else { return };
+            let mut split = AnnexB::default();
+            let mut buf = vec![0u8; 256 * 1024];
+            // Image perdue (Gate en retard) : on attend la prochaine image clé.
+            let mut need_key = true;
+            let restart = loop {
+                tokio::select! {
+                    r = out.read(&mut buf) => match r {
+                        Ok(n) if n > 0 => {
+                            for (au, key) in split.push(&buf[..n]) {
+                                if need_key && !key {
+                                    continue;
+                                }
+                                match tx.try_send(media_frame(MEDIA_VIDEO, key, &au)) {
+                                    Ok(()) => need_key = false,
+                                    Err(mpsc::error::TrySendError::Full(_)) => need_key = true,
+                                    Err(mpsc::error::TrySendError::Closed(_)) => return,
+                                }
+                            }
+                        }
+                        _ => break true,
+                    },
+                    r = changes.recv() => match r {
+                        Some(r) => {
+                            region = r;
+                            break true;
+                        }
+                        None => return,
+                    },
+                }
+            };
+            drop(child);
+            if restart {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }
+    }
+
+    /// Son du navigateur, relancé si ffmpeg s'arrête.
+    async fn audio_loop(ffmpeg: PathBuf, sock: PathBuf, tx: mpsc::Sender<Vec<u8>>) {
+        loop {
+            let child = tokio::process::Command::new(&ffmpeg)
+                .args(ffmpeg_audio_args())
+                .env("PULSE_SERVER", format!("unix:{}", sock.display()))
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .kill_on_drop(true)
+                .spawn();
+            let Ok(mut child) = child else { return };
+            let Some(mut out) = child.stdout.take() else { return };
+            let mut ogg = OggOpus::default();
+            let mut buf = vec![0u8; 16 * 1024];
+            loop {
+                match out.read(&mut buf).await {
+                    Ok(n) if n > 0 => {
+                        for p in ogg.push(&buf[..n]) {
+                            if let Err(mpsc::error::TrySendError::Closed(_)) = tx.try_send(media_frame(MEDIA_AUDIO, false, &p)) {
+                                return;
+                            }
+                        }
+                    }
+                    _ => break,
+                }
+            }
+            drop(child);
+            if tx.is_closed() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+
+    /// Connexion « flux » de la Gate : vidéo et son vers elle ; d'elle, la zone à capturer.
+    async fn attach(reader: tokio::io::BufReader<UnixStream>, token: &str) {
+        let found = MEDIA.lock().unwrap().get_mut(token).and_then(|m| Some((m.frames.take()?, m.region.clone())));
+        let Some((mut frames, region)) = found else { return };
+        let (read, mut write) = reader.into_inner().into_split();
+        let mut lines = tokio::io::BufReader::new(read).lines();
+        loop {
+            tokio::select! {
+                f = frames.recv() => match f {
+                    Some(f) => {
+                        if write.write_all(&f).await.is_err() {
+                            break;
+                        }
+                    }
+                    None => break,
+                },
+                l = lines.next_line() => match l {
+                    Ok(Some(l)) => {
+                        let Ok(v) = serde_json::from_str::<Value>(&l) else { continue };
+                        let n = |i: &str| v[i].as_u64().unwrap_or(0) as u32;
+                        let (w, h) = size(n("l"), n("h"));
+                        let _ = region.send(((n("x").min(3840 - w), n("y").min(2160 - h)), (w, h))).await;
+                    }
+                    _ => break,
+                },
+            }
+        }
+    }
+
+    /// Une session : proxy, Chromium, relais du protocole DevTools, puis tout est effacé.
+    async fn one(reader: tokio::io::BufReader<UnixStream>, head: Head, browser: &std::path::Path, tools: &Tools, no_sandbox: bool) -> Result<()> {
+        use std::os::fd::AsRawFd;
         let size = size(head.largeur, head.hauteur);
         let proxy = TcpListener::bind("127.0.0.1:0").await?;
         let proxy_port = proxy.local_addr()?.port();
         let profile = std::env::temp_dir().join(format!("portunia-navigateur-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&profile)?;
         std::fs::set_permissions(&profile, std::fs::Permissions::from_mode(0o700))?;
+        // Vidéo : écran virtuel et son, si les programmes sont là et que l'onglet sait décoder.
+        let mut kids: Vec<tokio::process::Child> = Vec::new();
+        let mut display = None;
+        let mut sound = None;
+        if let (true, Some(xvfb), Some(_)) = (head.video, &tools.xvfb, &tools.ffmpeg) {
+            match start_xvfb(xvfb, &mut kids).await {
+                Ok(d) => display = Some(d),
+                Err(e) => tracing::warn!("Xvfb : {e:#}"),
+            }
+            if let (Some(_), Some(pulse)) = (&display, &tools.pulse) {
+                match start_pulse(pulse, &profile, &mut kids).await {
+                    Ok(s) => sound = Some(s),
+                    Err(e) => tracing::warn!("PulseAudio : {e:#}"),
+                }
+            }
+        }
+        let video = display.is_some();
         let ((cmd_read, cmd_write), (out_read, out_write)) = (pipe()?, pipe()?);
         let (child_in, child_out) = (cmd_read.as_raw_fd(), out_write.as_raw_fd());
         let mut command = std::process::Command::new(browser);
+        if let Some(d) = &display {
+            command.env("DISPLAY", d);
+        }
+        if let Some(s) = &sound {
+            command.env("PULSE_SERVER", format!("unix:{}", s.display()));
+        }
         command
-            .args(chromium_args(&profile, proxy_port, size, &head.langue, no_sandbox))
+            .args(chromium_args(&profile.join("profil"), proxy_port, size, &head.langue, no_sandbox, video, sound.is_some()))
             .env("HOME", &profile)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -1145,10 +1672,26 @@ mod worker {
         }
         let to_chromium = tokio::net::unix::pipe::Sender::from_owned_fd(cmd_write)?;
         let from_chromium = tokio::net::unix::pipe::Receiver::from_owned_fd(out_read)?;
+        // Flux vidéo et son, prêts avant la réponse : la Gate s'y branche ensuite.
+        let mut media_tasks = Vec::new();
+        if let (Some(d), Some(ffmpeg)) = (&display, &tools.ffmpeg) {
+            let (tx, rx) = mpsc::channel::<Vec<u8>>(64);
+            let (region_tx, region_rx) = mpsc::channel(4);
+            MEDIA.lock().unwrap().insert(head.jeton.clone(), Media { frames: Some(rx), region: region_tx });
+            media_tasks.push(tokio::spawn(video_loop(ffmpeg.clone(), d.clone(), ((0, 0), size), tx.clone(), region_rx)));
+            if let Some(s) = &sound {
+                media_tasks.push(tokio::spawn(audio_loop(ffmpeg.clone(), s.clone(), tx)));
+            }
+        }
         let mut stream = reader.into_inner();
-        stream.write_all(b"ok\n").await?;
+        let answer = match (video, sound.is_some()) {
+            (true, true) => "ok video son\n",
+            (true, false) => "ok video\n",
+            _ => "ok\n",
+        };
+        stream.write_all(answer.as_bytes()).await?;
         let (mut gate_read, mut gate_write) = stream.into_split();
-        let token = head.jeton;
+        let token = head.jeton.clone();
         let proxying = async move {
             loop {
                 let Ok((conn, _)) = proxy.accept().await else { break };
@@ -1165,10 +1708,15 @@ mod worker {
             _ = tokio::io::copy(&mut from_chromium, &mut gate_write) => {}
             _ = proxying => {}
         }
-        // Fin : Chromium et ses processus, puis le profil.
+        // Fin : flux, Chromium et ses processus, écran virtuel et son, puis le profil.
+        MEDIA.lock().unwrap().remove(&head.jeton);
+        for t in media_tasks {
+            t.abort();
+        }
         unsafe {
             libc::kill(-pid, libc::SIGKILL);
         }
+        drop(kids);
         let status = tokio::task::spawn_blocking(move || child.wait()).await;
         let _ = std::fs::remove_dir_all(&profile);
         if let Ok(Ok(s)) = status {
@@ -1259,18 +1807,23 @@ mod tests {
         let w = wheel(&json!({ "x": 10, "y": 10, "dx": 0, "dy": 1e9 }), s).unwrap();
         assert_eq!(w["deltaY"], 10000.0);
         assert_eq!(size(10, 99999), (320, 2160));
+        assert_eq!(size(1281, 801), (1280, 800));
     }
 
     #[test]
     fn options_de_chromium() {
-        let a = chromium_args(std::path::Path::new("/tmp/p"), 4321, (1280, 800), "fr", false);
+        let a = chromium_args(std::path::Path::new("/tmp/p"), 4321, (1280, 800), "fr", false, false, false);
+        assert!(a.contains(&"--headless=new".to_string()) && a.contains(&"--mute-audio".to_string()));
+        let v = chromium_args(std::path::Path::new("/tmp/p"), 4321, (1280, 800), "fr", false, true, true);
+        assert!(!v.contains(&"--headless=new".to_string()) && !v.contains(&"--mute-audio".to_string()));
+        assert!(v.contains(&"--app=about:blank".to_string()));
         assert!(a.contains(&"--proxy-server=socks5://127.0.0.1:4321".to_string()));
         assert!(a.contains(&"--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE 127.0.0.1".to_string()));
         assert!(a.contains(&"--proxy-bypass-list=<-loopback>".to_string()));
         assert!(a.contains(&"--disable-quic".to_string()));
         assert!(a.contains(&"--lang=fr-FR".to_string()));
         assert!(!a.iter().any(|x| x == "--no-sandbox"));
-        assert!(chromium_args(std::path::Path::new("/tmp/p"), 1, (1, 1), "en", true).iter().any(|x| x == "--no-sandbox"));
+        assert!(chromium_args(std::path::Path::new("/tmp/p"), 1, (1, 1), "en", true, false, false).iter().any(|x| x == "--no-sandbox"));
         assert_eq!(socks_code("ok"), 0);
         assert_eq!(socks_code("non domaine bloqué"), 2);
         assert_eq!(socks_code("non injoignable"), 4);
@@ -1278,6 +1831,67 @@ mod tests {
         assert!(chromium_own("Update.GoogleAPIs.com."));
         assert!(!chromium_own("accounts.google.com"));
         assert!(!chromium_own("www.google.com"));
+    }
+
+    #[test]
+    fn decoupe_h264() {
+        let aud = [0u8, 0, 0, 1, 9, 0xf0];
+        let idr = [0u8, 0, 0, 1, 0x65, 1, 2, 3];
+        let p = [0u8, 0, 1, 0x41, 9, 9];
+        let mut stream = Vec::new();
+        stream.extend_from_slice(&[0xAA, 0xBB]); // reste d'un flux pris en route
+        stream.extend_from_slice(&aud);
+        stream.extend_from_slice(&idr);
+        stream.extend_from_slice(&aud);
+        stream.extend_from_slice(&p);
+        stream.extend_from_slice(&aud);
+        let mut s = AnnexB::default();
+        // Arrivée en morceaux de 3 octets : mêmes images qu'en une fois.
+        let mut got = Vec::new();
+        for chunk in stream.chunks(3) {
+            got.extend(s.push(chunk));
+        }
+        assert_eq!(got.len(), 2);
+        assert!(got[0].1 && !got[1].1);
+        assert_eq!(got[0].0, [&aud[..], &idr[..]].concat());
+        assert_eq!(got[1].0, [&aud[..], &p[..]].concat());
+    }
+
+    #[test]
+    fn lecture_ogg_opus() {
+        fn page(packets: &[&[u8]]) -> Vec<u8> {
+            let mut lacing = Vec::new();
+            let mut body = Vec::new();
+            for p in packets {
+                let mut n = p.len();
+                while n >= 255 {
+                    lacing.push(255u8);
+                    n -= 255;
+                }
+                lacing.push(n as u8);
+                body.extend_from_slice(p);
+            }
+            let mut out = b"OggS".to_vec();
+            out.extend_from_slice(&[0; 22]);
+            out.push(lacing.len() as u8);
+            out.extend(lacing);
+            out.extend(body);
+            out
+        }
+        let big = vec![7u8; 300];
+        let mut stream = page(&[b"OpusHead"]);
+        stream.extend(page(&[b"OpusTags"]));
+        stream.extend(page(&[b"abc", &big]));
+        let mut o = OggOpus::default();
+        let mut got = Vec::new();
+        for chunk in stream.chunks(10) {
+            got.extend(o.push(chunk));
+        }
+        assert_eq!(got, vec![b"abc".to_vec(), big]);
+        assert_eq!(media_frame(MEDIA_AUDIO, false, b"xy"), [2, 0, 0, 0, 0, 2, b'x', b'y']);
+        let v = ffmpeg_video_args(":5", (0, 40), (1280, 720), (30, 3000));
+        assert!(v.windows(2).any(|w| w[0] == "-i" && w[1] == ":5+0,40"));
+        assert!(v.contains(&"aud=1:repeat-headers=1".to_string()));
     }
 
     #[tokio::test]

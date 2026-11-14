@@ -50,6 +50,116 @@ function send(msg) {
   if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
 }
 
+// ---------- Vidéo et son (Gate 0.54) ----------
+
+// H.264 « constrained baseline », niveau 4.1 (ffmpeg sur la Gate), son Opus 48 kHz stéréo.
+const CODEC = 'avc1.42E029';
+const AUDIO = { codec: 'opus', sampleRate: 48000, numberOfChannels: 2 };
+const stats = { mode: 'images', images: 0, sons: 0, octets: 0 };
+window.__navigateur = stats;
+
+async function videoSupported() {
+  if (new URLSearchParams(location.search).has('images')) return false;
+  if (!('VideoDecoder' in window) || !('AudioDecoder' in window)) return false;
+  try {
+    const v = await VideoDecoder.isConfigSupported({ codec: CODEC, optimizeForLatency: true });
+    const a = await AudioDecoder.isConfigSupported(AUDIO);
+    return !!(v.supported && a.supported);
+  } catch { return false; }
+}
+
+let videoMode = false;
+let video = null;
+let waitKey = true;
+function newVideoDecoder() {
+  video = new VideoDecoder({
+    output: (frame) => {
+      if (canvas.width !== frame.displayWidth || canvas.height !== frame.displayHeight) {
+        canvas.width = frame.displayWidth;
+        canvas.height = frame.displayHeight;
+      }
+      ctx.drawImage(frame, 0, 0);
+      frame.close();
+      stats.images += 1;
+      $('attente').hidden = true;
+    },
+    error: () => { waitKey = true; setTimeout(newVideoDecoder, 0); },
+  });
+  video.configure({ codec: CODEC, optimizeForLatency: true });
+  waitKey = true;
+}
+
+let audioCtx = null;
+let audioGain = null;
+let audio = null;
+let playAt = 0;
+let muted = false;
+// Les navigateurs ne jouent le son qu'après un geste de l'utilisateur dans la page.
+function startAudio() {
+  if (audioCtx || !videoMode || $('son').hidden) return;
+  try {
+    audioCtx = new AudioContext({ sampleRate: 48000, latencyHint: 'interactive' });
+    audioGain = audioCtx.createGain();
+    audioGain.gain.value = muted ? 0 : 1;
+    audioGain.connect(audioCtx.destination);
+    audio = new AudioDecoder({ output: playAudio, error: () => { audio = null; } });
+    audio.configure(AUDIO);
+    $('son').title = T('Sound of the page: click to mute', 'Son de la page : cliquez pour le couper');
+  } catch { audioCtx = null; }
+}
+function playAudio(data) {
+  const buffer = audioCtx.createBuffer(data.numberOfChannels, data.numberOfFrames, data.sampleRate);
+  for (let c = 0; c < data.numberOfChannels; c += 1) {
+    const plane = new Float32Array(data.numberOfFrames);
+    data.copyTo(plane, { planeIndex: c, format: 'f32-planar' });
+    buffer.copyToChannel(plane, c);
+  }
+  data.close();
+  const src = audioCtx.createBufferSource();
+  src.buffer = buffer;
+  src.connect(audioGain);
+  const now = audioCtx.currentTime;
+  // Un peu d'avance contre les à-coups du réseau, jamais plus de 0,4 s de retard.
+  if (playAt < now + 0.03 || playAt > now + 0.4) playAt = now + 0.08;
+  src.start(playAt);
+  playAt += buffer.duration;
+  stats.sons += 1;
+}
+$('son').addEventListener('click', () => {
+  if (!audioCtx) { startAudio(); return; }
+  muted = !muted;
+  audioGain.gain.value = muted ? 0 : 1;
+  $('son').textContent = muted ? T('Sound off', 'Son coupé') : T('Sound', 'Son');
+  keys.focus({ preventScroll: true });
+});
+for (const ev of ['pointerdown', 'keydown']) document.addEventListener(ev, () => startAudio(), { capture: true });
+
+function media(buffer) {
+  const bytes = new Uint8Array(buffer);
+  if (bytes.length < 10) return;
+  const kind = bytes[0];
+  const key = bytes[1] === 1;
+  const ts = Number(new DataView(buffer).getBigUint64(2));
+  const data = bytes.subarray(10);
+  if (kind === 1 && video) {
+    // Retard du décodeur : on saute jusqu'à la prochaine image clé (une par seconde).
+    if (!key && (waitKey || video.decodeQueueSize > 6)) { waitKey = true; return; }
+    waitKey = false;
+    try { video.decode(new EncodedVideoChunk({ type: key ? 'key' : 'delta', timestamp: ts, data })); } catch { waitKey = true; }
+  } else if (kind === 2 && audio && audio.state === 'configured') {
+    try { audio.decode(new EncodedAudioChunk({ type: 'key', timestamp: ts, data })); } catch { /* paquet perdu */ }
+  }
+}
+
+// Vidéo regardée (son qui joue, onglet visible) : l'utilisateur est là, même sans toucher la
+// souris ; la session ne se ferme pas pour inactivité.
+let soundsSeen = 0;
+setInterval(() => {
+  const playing = stats.sons > soundsSeen && audioCtx && !muted && !document.hidden;
+  soundsSeen = stats.sons;
+  if (playing) send({ t: 'actif' });
+}, 60000);
+
 // ---------- Image de la page ----------
 
 // Une seule image décodée à la fois : la plus récente remplace celle qui attendait.
@@ -66,6 +176,7 @@ async function draw(buffer) {
     }
     ctx.drawImage(bmp, 0, 0);
     bmp.close();
+    stats.images += 1;
     $('attente').hidden = true;
   } catch { /* image abîmée : la suivante la remplace */ }
   decoding = false;
@@ -84,20 +195,26 @@ new ResizeObserver(() => {
 
 // ---------- Connexion ----------
 
-function connect() {
+let canVideo = null;
+async function connect() {
   notice.hidden = true;
   closedByServer = false;
   $('attente').hidden = false;
+  if (canVideo === null) canVideo = await videoSupported();
   const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
   const s = viewSize();
   const start = new URLSearchParams(location.search).get('url');
-  ws = new WebSocket(`${scheme}://${location.host}/ws-navigateur/${encodeURIComponent(nom)}?l=${s.l}&h=${s.h}${start ? `&url=${encodeURIComponent(start)}` : ''}`);
+  ws = new WebSocket(`${scheme}://${location.host}/ws-navigateur/${encodeURIComponent(nom)}?l=${s.l}&h=${s.h}${canVideo ? '&video=1' : ''}${start ? `&url=${encodeURIComponent(start)}` : ''}`);
   ws.binaryType = 'arraybuffer';
   ws.addEventListener('message', (e) => {
-    if (typeof e.data !== 'string') { draw(e.data); return; }
+    if (typeof e.data !== 'string') { stats.octets += e.data.byteLength; if (videoMode) media(e.data); else draw(e.data); return; }
     let msg;
     try { msg = JSON.parse(e.data); } catch { return; }
     if (msg.t === 'pret') {
+      videoMode = !!msg.video;
+      stats.mode = videoMode ? 'video' : 'images';
+      if (videoMode && !video) newVideoDecoder();
+      $('son').hidden = !msg.son;
       if (!start) address.focus();
     } else if (msg.t === 'page') {
       if (document.activeElement !== address) address.value = msg.url === 'about:blank' ? '' : msg.url;

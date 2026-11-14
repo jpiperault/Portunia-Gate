@@ -1,4 +1,4 @@
-# Navigateur du portail web (paquet Debian, Gate 0.53) : un Chromium sans écran par session,
+# Navigateur du portail web (paquet Debian, Gate 0.53 ; vidéo et son en 0.54) : un Chromium par session,
 # piloté par la Gate. Activé par « installer.sh navigateur » (installe Chromium) ; la sortie web
 # doit aussi être permise dans le portail, serveur par serveur (Portunia › Administrer).
 [Unit]
