@@ -295,6 +295,9 @@ struct Registered {
     /// L'utilisateur a demandé une page : avant, ce que Chromium ouvre de lui-même est refusé
     /// sans être noté (le journal ne garde que ce que l'utilisateur a voulu ouvrir).
     asked: Arc<AtomicBool>,
+    /// Passe à vrai à la fin de la session : ses connexions encore ouvertes se coupent (sinon
+    /// elles attendraient que le site ferme, et la session resterait ouverte au journal).
+    stop: tokio::sync::watch::Receiver<bool>,
 }
 
 /// Services de Chromium pour lui-même (mises à jour de composants, suggestions) : refusés par le
@@ -328,9 +331,11 @@ struct Ask {
 
 /// Une connexion de Chromium vers un site : même filtre que la sortie web de Portunia. Rend la
 /// réponse à écrire (« ok » ou « non <raison> ») et, si c'est ok, de quoi relayer.
-async fn open_site(ask: &Ask) -> (String, Option<(Arc<egress::Navigation>, egress::Opened, tokio::net::TcpStream)>) {
-    let found = SESSIONS.lock().unwrap().get(&ask.jeton).map(|r| (r.nav.clone(), r.target.lock().unwrap().clone(), r.asked.load(Ordering::SeqCst)));
-    let Some((nav, target, asked)) = found else {
+type Relayed = (Arc<egress::Navigation>, egress::Opened, tokio::net::TcpStream, tokio::sync::watch::Receiver<bool>);
+
+async fn open_site(ask: &Ask) -> (String, Option<Relayed>) {
+    let found = SESSIONS.lock().unwrap().get(&ask.jeton).map(|r| (r.nav.clone(), r.target.lock().unwrap().clone(), r.asked.load(Ordering::SeqCst), r.stop.clone()));
+    let Some((nav, target, asked, stop)) = found else {
         return ("non session inconnue".into(), None);
     };
     if !asked {
@@ -355,22 +360,62 @@ async fn open_site(ask: &Ask) -> (String, Option<(Arc<egress::Navigation>, egres
         }
     };
     match egress::connect(&addresses).await {
-        Ok(tcp) => ("ok".into(), Some((nav, opened, tcp))),
+        Ok(tcp) => ("ok".into(), Some((nav, opened, tcp, stop))),
         Err(_) => ("non injoignable".into(), None),
     }
 }
 
-/// Relaie jusqu'à la fin ou la coupure de la navigation ; rend les octets passés.
-async fn relay<A, B>(a: A, b: B, cut: &mut crate::live::Cut) -> u64
+/// Attend la fin de la session (le récepteur passe à vrai) ; jamais si l'émetteur disparaît sans.
+async fn stopped(stop: &mut tokio::sync::watch::Receiver<bool>) {
+    loop {
+        let done = *stop.borrow_and_update();
+        if done {
+            return;
+        }
+        if stop.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
+/// Relaie jusqu'à ce qu'un des deux côtés ferme, la coupure de la navigation ou la fin de la
+/// session ; rend les octets passés (comptés au fur et à mesure, même en cas de coupure).
+async fn relay<A, B>(a: A, b: B, cut: &mut crate::live::Cut, stop: &mut tokio::sync::watch::Receiver<bool>) -> u64
 where
     A: AsyncRead + AsyncWrite + Unpin,
     B: AsyncRead + AsyncWrite + Unpin,
 {
-    let (mut a, mut b) = (a, b);
-    tokio::select! {
-        r = tokio::io::copy_bidirectional(&mut a, &mut b) => r.map(|(x, y)| x + y).unwrap_or(0),
-        _ = cut.reason() => 0,
+    let (mut ar, mut aw) = tokio::io::split(a);
+    let (mut br, mut bw) = tokio::io::split(b);
+    let (mut abuf, mut bbuf) = (vec![0u8; 32 * 1024], vec![0u8; 32 * 1024]);
+    let mut total = 0u64;
+    loop {
+        tokio::select! {
+            r = ar.read(&mut abuf) => match r {
+                Ok(n) if n > 0 => {
+                    if bw.write_all(&abuf[..n]).await.is_err() {
+                        break;
+                    }
+                    total += n as u64;
+                }
+                _ => break,
+            },
+            r = br.read(&mut bbuf) => match r {
+                Ok(n) if n > 0 => {
+                    if aw.write_all(&bbuf[..n]).await.is_err() {
+                        break;
+                    }
+                    total += n as u64;
+                }
+                _ => break,
+            },
+            _ = cut.reason() => break,
+            _ = stopped(stop) => break,
+        }
     }
+    let _ = aw.shutdown().await;
+    let _ = bw.shutdown().await;
+    total
 }
 
 #[cfg(unix)]
@@ -440,9 +485,9 @@ mod unix {
                 if stream.write_all(format!("{answer}\n").as_bytes()).await.is_err() {
                     return;
                 }
-                if let Some((nav, opened, tcp)) = opened {
+                if let Some((nav, opened, tcp, mut stop)) = opened {
                     let mut cut = nav.cut();
-                    let bytes = relay(stream, tcp, &mut cut).await;
+                    let bytes = relay(stream, tcp, &mut cut, &mut stop).await;
                     opened.done(bytes);
                 }
             });
@@ -522,9 +567,12 @@ pub async fn session(state: Arc<crate::State>, o: Opening, mut from_tab: mpsc::R
         Ok(nav) => {
             let target = Arc::new(Mutex::new(o.target.clone()));
             let asked = Arc::new(AtomicBool::new(false));
-            SESSIONS.lock().unwrap().insert(token.clone(), Registered { nav: nav.clone(), target: target.clone(), asked: asked.clone() });
+            let (stop_tx, stop) = tokio::sync::watch::channel(false);
+            SESSIONS.lock().unwrap().insert(token.clone(), Registered { nav: nav.clone(), target: target.clone(), asked: asked.clone(), stop });
             let r = drive(&state, &o, &token, &nav, &target, &asked, &mut from_tab, &to_tab, &mut closing).await;
             SESSIONS.lock().unwrap().remove(&token);
+            // Connexions encore ouvertes : coupées, la session se ferme au journal tout de suite.
+            let _ = stop_tx.send(true);
             match r {
                 Ok(why) => why,
                 Err(e) => format!("{}{e:#}", t!("Browser stopped: ", "Navigateur arrêté : ")),
@@ -1230,6 +1278,27 @@ mod tests {
         assert!(chromium_own("Update.GoogleAPIs.com."));
         assert!(!chromium_own("accounts.google.com"));
         assert!(!chromium_own("www.google.com"));
+    }
+
+    #[tokio::test]
+    async fn relais_coupe_a_la_fin() {
+        let (mut client, a) = tokio::io::duplex(1024);
+        let (b, mut site) = tokio::io::duplex(1024);
+        let (tx, mut rx) = tokio::sync::watch::channel(false);
+        let (_guard, mut cut) = crate::live::Registry::default().watch(crate::live::Watched {
+            user: uuid::Uuid::nil(), login: "x", target: None, web: false, recorded: false, session: None, portal: None,
+        });
+        let task = tokio::spawn(async move { relay(a, b, &mut cut, &mut rx).await });
+        client.write_all(b"GET").await.unwrap();
+        let mut got = [0u8; 3];
+        site.read_exact(&mut got).await.unwrap();
+        site.write_all(b"OK!!").await.unwrap();
+        let mut back = [0u8; 4];
+        client.read_exact(&mut back).await.unwrap();
+        // Le site garde sa connexion ouverte : la fin de la session la coupe quand même.
+        tx.send(true).unwrap();
+        let total = tokio::time::timeout(Duration::from_secs(2), task).await.expect("relais toujours ouvert").unwrap();
+        assert_eq!(total, 7);
     }
 
     #[tokio::test]

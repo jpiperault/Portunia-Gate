@@ -176,8 +176,9 @@ async fn finish(state: &State, mut a: Active, why: &str) {
 
 /// Ferme les sessions inactives ou coupées ; au démarrage, clôt celles d'un service arrêté.
 pub async fn run(state: Arc<State>) -> Result<()> {
-    // Fin brutale du service : ces sessions restent lisibles, sans signature (interrompues).
-    sqlx::query("UPDATE sessions SET ended_at = now() WHERE kind = 'web' AND ended_at IS NULL").execute(&state.db).await?;
+    // Fin brutale du service : ces sessions restent lisibles, sans signature (interrompues). Les
+    // navigations (sortie web) ne survivent pas non plus à un redémarrage (0.53.1).
+    sqlx::query("UPDATE sessions SET ended_at = now() WHERE kind IN ('web', 'navigation') AND ended_at IS NULL").execute(&state.db).await?;
     let mut tick = tokio::time::interval(SWEEP);
     loop {
         tick.tick().await;
